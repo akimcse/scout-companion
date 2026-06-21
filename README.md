@@ -11,22 +11,16 @@ back to the agent window.
 > **Unofficial community project.** Not affiliated with, endorsed by, or supported by
 > Microsoft. Use at your own risk. MIT licensed.
 
-![Scout Companion toast: an animated quokka mascot, live step list, and a one-click approval prompt](docs/screenshot.png)
-
-When the agent needs your approval, the toast turns bright yellow and pulses for attention:
-
-![Scout Companion approval alert: the whole toast turns bright yellow with one-click Allow / Deny](docs/alert.png)
-
 ### Status at a glance
 
 The whole toast changes color so you can read the agent's state from across the room —
 no need to look at the text:
 
-| State | Color | What it means |
-|-------|-------|---------------|
-| **Working** | 🟢 Calm dark **green** with a soft glow | The agent is actively running a task |
-| **Idle** | ⚫ Dim **navy** (default) | The agent is connected but waiting / between turns |
-| **Approval needed** | 🟡 Bright pulsing **yellow** | The agent is asking for permission — Allow / Deny right here |
+| State | Color | What it means | Preview |
+|-------|-------|---------------|---------|
+| **Working** | 🟢 Calm dark **green** with a soft glow | The agent is actively running a task | <img src="docs/state-working.png" width="260"> |
+| **Idle** | ⚫ Dim **navy** (default) | The agent is connected but waiting / between turns | <img src="docs/state-idle.png" width="260"> |
+| **Approval needed** | 🟡 Bright pulsing **yellow** | The agent is asking for permission — Allow / Deny right here | <img src="docs/state-approval.png" width="260"> |
 
 The tones are intentionally muted so green and idle sit harmoniously next to each other,
 while the approval yellow stays loud enough that you can't miss it.
