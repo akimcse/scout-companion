@@ -5,3 +5,5 @@ config.json
 .vs/
 Thumbs.db
 desktop.ini
+rt.err
+*.err
