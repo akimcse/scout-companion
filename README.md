@@ -13,6 +13,10 @@ back to the agent window.
 
 ![Scout Companion toast: an animated quokka mascot, live step list, and a one-click approval prompt](docs/screenshot.png)
 
+When the agent needs your approval, the toast turns bright yellow and pulses for attention:
+
+![Scout Companion approval alert: the whole toast turns bright yellow with one-click Allow / Deny](docs/alert.png)
+
 ---
 
 ## Why
@@ -32,7 +36,8 @@ place.
   and gently breathes when idle, so you can tell at a glance whether work is happening.
 - **One-click approvals** — surfaces pending permission requests and clicks the real
   Allow/Deny button inside the agent window for you (via UI Automation — no need to
-  bring the window to the foreground).
+  bring the window to the foreground). When approval is needed the whole toast turns a
+  **bright pulsing yellow** so you can't miss it.
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
 - **Zero personal data, zero config** — discovers the agent home folder, the active

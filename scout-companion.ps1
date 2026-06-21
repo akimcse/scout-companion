@@ -330,8 +330,8 @@ function Focus-Agent {
         Width="380" SizeToContent="Height"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize">
-  <Border CornerRadius="14" Background="#FF1B1F2A" BorderBrush="#FF3A4358" BorderThickness="1" Padding="14">
-    <Border.Effect><DropShadowEffect BlurRadius="20" ShadowDepth="3" Opacity="0.55" Color="#000000"/></Border.Effect>
+  <Border x:Name="RootBorder" CornerRadius="14" Background="#FF1B1F2A" BorderBrush="#FF3A4358" BorderThickness="1" Padding="14">
+    <Border.Effect><DropShadowEffect x:Name="RootGlow" BlurRadius="20" ShadowDepth="3" Opacity="0.55" Color="#000000"/></Border.Effect>
     <StackPanel>
       <DockPanel LastChildFill="True">
 
@@ -356,20 +356,23 @@ function Focus-Agent {
           <Ellipse Canvas.Left="11" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
           <Ellipse Canvas.Left="36" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
           <!-- glasses temples (behind) -->
-          <Line X1="8"  Y1="21" X2="16" Y2="26" Stroke="#FF2E2E2E" StrokeThickness="1.6"/>
-          <Line X1="48" Y1="21" X2="40" Y2="26" Stroke="#FF2E2E2E" StrokeThickness="1.6"/>
-          <!-- big round lenses (light tint so eyes show through) -->
-          <Ellipse Canvas.Left="14" Canvas.Top="20" Width="15" Height="15" Fill="#1AD4F2FF"/>
-          <Ellipse Canvas.Left="27" Canvas.Top="20" Width="15" Height="15" Fill="#1AD4F2FF"/>
-          <!-- cute eyes (bigger), inside the lenses -->
-          <Ellipse Canvas.Left="18" Canvas.Top="23" Width="7.5" Height="9.5" Fill="#FF332019"/>
-          <Ellipse Canvas.Left="30" Canvas.Top="23" Width="7.5" Height="9.5" Fill="#FF332019"/>
-          <Ellipse Canvas.Left="19.5" Canvas.Top="24.5" Width="3" Height="3" Fill="#FFFFFFFF"/>
-          <Ellipse Canvas.Left="31.5" Canvas.Top="24.5" Width="3" Height="3" Fill="#FFFFFFFF"/>
-          <!-- frame rings on top -->
-          <Ellipse Canvas.Left="14" Canvas.Top="20" Width="15" Height="15" Stroke="#FF262626" StrokeThickness="1.7" Fill="Transparent"/>
-          <Ellipse Canvas.Left="27" Canvas.Top="20" Width="15" Height="15" Stroke="#FF262626" StrokeThickness="1.7" Fill="Transparent"/>
-          <Line X1="29" Y1="26" X2="27" Y2="26" Stroke="#FF262626" StrokeThickness="1.7"/>
+          <Line X1="8"  Y1="21" X2="14" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
+          <Line X1="48" Y1="21" X2="42" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
+          <!-- big round lenses -->
+          <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
+          <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
+          <!-- cute big eyes inside the lenses -->
+          <Ellipse Canvas.Left="17" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
+          <Ellipse Canvas.Left="32" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
+          <Ellipse Canvas.Left="18.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
+          <Ellipse Canvas.Left="33.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
+          <!-- bold round frames on top -->
+          <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
+          <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
+          <Line X1="26.5" Y1="25.5" X2="29.5" Y2="25.5" Stroke="#FF242424" StrokeThickness="2.2"/>
+          <!-- lens shine -->
+          <Ellipse Canvas.Left="15" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
+          <Ellipse Canvas.Left="30" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
           <!-- nose + signature smile -->
           <Ellipse Canvas.Left="24" Canvas.Top="30" Width="8"  Height="5"  Fill="#FF5A3A2A"/>
           <Path Stroke="#FF5A3A2A" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
@@ -417,7 +420,7 @@ function Focus-Agent {
       <Border x:Name="PermPanel" Margin="0,12,0,0" Padding="10" CornerRadius="9"
               Background="#FF2A2030" BorderBrush="#FFB4843C" BorderThickness="1" Visibility="Collapsed">
         <StackPanel>
-          <TextBlock Text="Permission requested" Foreground="#FFF2C879" FontWeight="SemiBold" FontSize="12"/>
+          <TextBlock x:Name="PermTitle" Text="&#x26A0; Permission requested" Foreground="#FF6A4A00" FontWeight="Bold" FontSize="13"/>
           <TextBlock x:Name="PermText" Margin="0,5,0,0" Foreground="#FFD6CFC2" FontSize="11.5"
                      TextWrapping="Wrap" MaxHeight="90" TextTrimming="CharacterEllipsis"/>
           <StackPanel Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
@@ -451,6 +454,43 @@ $BodyT        = $Window.FindName('BodyT')
 $BodyS        = $Window.FindName('BodyS')
 $LeftPawT     = $Window.FindName('LeftPawT')
 $RightPawT    = $Window.FindName('RightPawT')
+$RootBorder   = $Window.FindName('RootBorder')
+$RootGlow     = $Window.FindName('RootGlow')
+$PermTitle    = $Window.FindName('PermTitle')
+
+# Brushes for the two themes (dark normal vs. bright-yellow alert).
+function B([string]$hex) { (New-Object System.Windows.Media.BrushConverter).ConvertFromString($hex) }
+$Theme = @{
+    NormalBg     = B '#FF1B1F2A'; NormalBorder = B '#FF3A4358'; NormalHeader = B '#FFE6EAF2'
+    AlertBg      = B '#FFFFD23D'; AlertBorder  = B '#FFFF7A00'; AlertHeader  = B '#FF3A2600'
+    PermBgNormal = B '#FF2A2030'; PermBdNormal = B '#FFB4843C'; PermTxtNormal = B '#FFD6CFC2'
+    PermBgAlert  = B '#FFFFFFFF'; PermBdAlert  = B '#FFFF7A00'; PermTxtAlert  = B '#FF3A2E10'
+}
+$script:AlertOn = $null
+
+function Set-AlertTheme([bool]$on) {
+    if ($on) {
+        $RootBorder.Background  = $Theme.AlertBg
+        $RootBorder.BorderBrush = $Theme.AlertBorder
+        $RootBorder.BorderThickness = 2
+        $HeaderText.Foreground  = $Theme.AlertHeader
+        $PermPanel.Background   = $Theme.PermBgAlert
+        $PermPanel.BorderBrush  = $Theme.PermBdAlert
+        $PermText.Foreground    = $Theme.PermTxtAlert
+        $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(255, 176, 0)
+    } else {
+        $RootBorder.Background  = $Theme.NormalBg
+        $RootBorder.BorderBrush = $Theme.NormalBorder
+        $RootBorder.BorderThickness = 1
+        $HeaderText.Foreground  = $Theme.NormalHeader
+        $PermPanel.Background   = $Theme.PermBgNormal
+        $PermPanel.BorderBrush  = $Theme.PermBdNormal
+        $PermText.Foreground    = $Theme.PermTxtNormal
+        $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 0, 0)
+        $RootGlow.BlurRadius    = 20
+        $RootGlow.Opacity       = 0.55
+    }
+}
 
 function Place-BottomRight {
     $wa = [System.Windows.SystemParameters]::WorkArea
@@ -462,6 +502,8 @@ $Window.Add_SizeChanged({ Place-BottomRight })
 $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
 $script:Hidden = $false
+$script:Pending = $false
+Set-AlertTheme $false
 
 $AllowBtn.Add_Click({
     if (Invoke-AgentButton $Config.allowLabels) {
@@ -485,7 +527,19 @@ $script:Busy  = $false
 $anim = New-Object System.Windows.Threading.DispatcherTimer
 $anim.Interval = [TimeSpan]::FromMilliseconds(50)
 $anim.Add_Tick({
-    if ($script:Busy) {
+    if ($script:Pending) {
+        # gentle attention pulse on the yellow alert glow
+        $script:Phase += 0.20
+        $puls = ([Math]::Sin($script:Phase * 3.0) + 1.0) / 2.0
+        $RootGlow.BlurRadius = 16 + $puls * 18
+        $RootGlow.Opacity    = 0.55 + $puls * 0.4
+        # the quokka peeks up, waiting
+        $BodyT.Y = [Math]::Sin($script:Phase) * 0.8
+        $BodyT.X = 0
+        $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+        $LeftPawT.Y = 0; $RightPawT.Y = 0
+    }
+    elseif ($script:Busy) {
         $script:Phase += 0.32
         $BodyT.Y     = [Math]::Sin($script:Phase * 2.0) * 1.6
         $BodyT.X     = [Math]::Sin($script:Phase) * 0.6
@@ -536,8 +590,12 @@ $timer.Add_Tick({
     $isActive = $hasPending -or $running -or ($State.TurnActive) -or ($State.EventsPath -and $ageSec -le [double]$Config.activeWindowSeconds)
 
     $script:Busy = (-not $hasPending) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
+    $script:Pending = $hasPending
 
     if ($script:Hidden -and $hasPending) { $script:Hidden = $false }
+
+    # swap to the bright-yellow alert theme only on state change
+    if ($hasPending -ne $script:AlertOn) { Set-AlertTheme $hasPending; $script:AlertOn = $hasPending }
 
     # content
     if ($hasPending) {
@@ -546,18 +604,21 @@ $timer.Add_Tick({
         $HeaderText.Text = "Approval needed$extra"
         $PermText.Text = $first.text
         $PermPanel.Visibility = 'Visible'
-        $Dot.Fill = '#FFF2C879'
+        $Dot.Fill = '#FFB45309'
+        # keep the yellow alert focused: hide the step list and narration
+        $SayingText.Visibility = 'Collapsed'
+        $StepsPanel.Visibility = 'Collapsed'
     } else {
         $PermPanel.Visibility = 'Collapsed'
         if (-not $agentRunning) { $HeaderText.Text = 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
         elseif ($script:Busy)   { $HeaderText.Text = 'Working hard...';     $Dot.Fill = '#FF4ADE80' }
         else                    { $HeaderText.Text = 'Idle';                $Dot.Fill = '#FF8A93A6' }
+
+        if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
+        else { $SayingText.Visibility = 'Collapsed' }
+
+        Render-Steps
     }
-
-    if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
-    else { $SayingText.Visibility = 'Collapsed' }
-
-    Render-Steps
 
     # visibility policy
     $shouldShow = $false
