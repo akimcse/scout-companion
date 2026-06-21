@@ -1,0 +1,7 @@
+# Gitignore for Scout Companion
+config.json
+*.log
+*.user
+.vs/
+Thumbs.db
+desktop.ini

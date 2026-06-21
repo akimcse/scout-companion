@@ -1,0 +1,22 @@
+{
+  "_comment": "Optional overrides. Copy this file to config.json and edit. All fields are optional; delete the ones you don't need. Defaults work out of the box for Microsoft Scout / OpenClaw.",
+
+  "home": null,
+  "_home": "Agent home folder. Default: %USERPROFILE%\\.copilot. You can also set the SCOUT_COMPANION_HOME environment variable.",
+
+  "processNames": ["Microsoft Scout", "OpenClaw", "Claw", "Copilot"],
+  "_processNames": "Process names of your agent's desktop window, matched case-insensitively.",
+
+  "windowHints": ["Scout", "Clawpilot", "OpenClaw", "Copilot"],
+  "_windowHints": "Fallback window-title substrings used if the process name doesn't match.",
+
+  "allowLabels": ["Allow", "Always allow", "Allow once", "Approve", "Accept", "Yes", "Continue"],
+  "denyLabels": ["Deny", "Reject", "Decline", "Block", "No", "Cancel"],
+  "_labels": "Button captions the companion will click for Allow / Deny inside the agent window.",
+
+  "activeWindowSeconds": 150,
+  "_activeWindowSeconds": "Treat the session as 'working' if its event log changed within this many seconds.",
+
+  "pollIntervalMs": 700,
+  "_pollIntervalMs": "How often (ms) to poll the event stream and window focus."
+}
