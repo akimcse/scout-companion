@@ -17,6 +17,20 @@ When the agent needs your approval, the toast turns bright yellow and pulses for
 
 ![Scout Companion approval alert: the whole toast turns bright yellow with one-click Allow / Deny](docs/alert.png)
 
+### Status at a glance
+
+The whole toast changes color so you can read the agent's state from across the room —
+no need to look at the text:
+
+| State | Color | What it means |
+|-------|-------|---------------|
+| **Working** | 🟢 Calm dark **green** with a soft glow | The agent is actively running a task |
+| **Idle** | ⚫ Dim **navy** (default) | The agent is connected but waiting / between turns |
+| **Approval needed** | 🟡 Bright pulsing **yellow** | The agent is asking for permission — Allow / Deny right here |
+
+The tones are intentionally muted so green and idle sit harmoniously next to each other,
+while the approval yellow stays loud enough that you can't miss it.
+
 ---
 
 ## Why
@@ -34,6 +48,9 @@ place.
   the agent's latest narration.
 - **Cheerful animated mascot** — a quokka that bobs and "types" while the agent is busy,
   and gently breathes when idle, so you can tell at a glance whether work is happening.
+- **Color-coded status** — the whole toast shifts color with the agent's state: calm
+  **green** while working, dim **navy** when idle, and bright pulsing **yellow** when an
+  approval is needed (see [Status at a glance](#status-at-a-glance)).
 - **One-click approvals** — surfaces pending permission requests and clicks the real
   Allow/Deny button inside the agent window for you (via UI Automation — no need to
   bring the window to the foreground). When approval is needed the whole toast turns a
