@@ -11,7 +11,7 @@ back to the agent window.
 > **Unofficial community project.** Not affiliated with, endorsed by, or supported by
 > Microsoft. Use at your own risk. MIT licensed.
 
-![Scout Companion toast showing live activity and a one-click approval prompt](docs/screenshot.png)
+![Scout Companion toast: an animated quokka mascot, live step list, and a one-click approval prompt](docs/screenshot.png)
 
 ---
 
@@ -25,8 +25,11 @@ place.
 
 ## Features
 
-- **Live progress toast** — streams the agent's current tool/activity from its session
-  event log.
+- **Live progress toast** — streams the agent's current activity as readable steps
+  (e.g. "Reading config.json", "Running: git commit ...") with a ✓/▸ status list, plus
+  the agent's latest narration.
+- **Cheerful animated mascot** — a quokka that bobs and "types" while the agent is busy,
+  and gently breathes when idle, so you can tell at a glance whether work is happening.
 - **One-click approvals** — surfaces pending permission requests and clicks the real
   Allow/Deny button inside the agent window for you (via UI Automation — no need to
   bring the window to the foreground).

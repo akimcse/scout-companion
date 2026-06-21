@@ -5,8 +5,10 @@
 .DESCRIPTION
     Shows a small always-on-top toast in the corner of your screen whenever the agent
     is working in the background (window minimized or not focused). It streams the
-    agent's live progress and, when the agent asks for a permission ("Allow"), lets you
-    approve or deny it with a single click - without switching back to the agent window.
+    agent's live progress as readable steps, shows a cheerful animated quokka mascot
+    that works hard while the agent is busy, and - when the agent asks for a permission
+    ("Allow") - lets you approve or deny it with a single click, without switching back
+    to the agent window.
 
     The app discovers everything at runtime. It hardcodes no user data:
       - the agent home folder defaults to %USERPROFILE%\.copilot
@@ -57,21 +59,15 @@ if (-not ('ScoutNative' -as [type])) {
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $Config = [ordered]@{
-    # Agent home folder. Both Scout and OpenClaw use ~/.copilot today.
     home          = $null
-    # Candidate process names of the desktop agent window (matched case-insensitively).
     processNames  = @('Microsoft Scout', 'OpenClaw', 'Claw', 'Copilot')
-    # Window-name candidates used as a secondary match if process name misses.
     windowHints   = @('Scout', 'Clawpilot', 'OpenClaw', 'Copilot')
-    # Button labels to treat as "approve" / "deny" when auto-clicking the agent prompt.
-    # Order matters: the first label that matches a visible button is clicked, so the
-    # safest one-time "Allow" is preferred over "Allow for session"/"Allow everywhere".
+    # Order matters: first match is clicked, so the safest one-time "Allow" wins.
     allowLabels   = @('Allow', 'Allow for session', 'Allow everywhere', 'Always allow', 'Allow once', 'Approve', 'Accept', 'Continue', 'Yes')
     denyLabels    = @('Deny', 'Reject', 'Decline', 'Block', 'Cancel', 'No')
-    # Consider the session "active" if events.jsonl changed within this many seconds.
     activeWindowSeconds = 150
-    # Polling interval for the event stream / visibility, in milliseconds.
     pollIntervalMs      = 700
+    maxSteps            = 4
 }
 
 $cfgPath = Join-Path $ScriptDir 'config.json'
@@ -92,27 +88,90 @@ if (-not $Config.home) { $Config.home = Join-Path $env:USERPROFILE '.copilot' }
 $SessionRoot = Join-Path $Config.home 'session-state'
 
 # ---------------------------------------------------------------------------
-# Shared mutable state (single-threaded, driven by the UI dispatcher timer).
+# Shared mutable state.
 # ---------------------------------------------------------------------------
 $State = [pscustomobject]@{
     SessionDir      = $null
     EventsPath      = $null
     Offset          = [long]0
-    Activity        = 'Waiting for the agent to start working...'
-    ToolName        = $null
+    Saying          = $null                       # latest assistant narrative
+    Steps           = New-Object System.Collections.ArrayList   # recent tool steps
     TurnActive      = $false
     LastEventUtc    = [datetime]::MinValue
-    PendingPerms    = [ordered]@{}   # requestId -> @{ text; kind; toolCallId }
+    PendingPerms    = [ordered]@{}
     AgentHwnd       = [IntPtr]::Zero
-    AgentProcId     = 0
 }
 
 # ---------------------------------------------------------------------------
 # Helpers.
 # ---------------------------------------------------------------------------
+function Truncate([string]$s, [int]$n) {
+    if ($null -eq $s) { return '' }
+    $s = $s -replace '\s+', ' '
+    $s = $s.Trim()
+    if ($s.Length -le $n) { return $s }
+    return $s.Substring(0, $n).TrimEnd() + '...'
+}
+
+function Leaf([string]$p) {
+    if (-not $p) { return '' }
+    try { return Split-Path $p -Leaf } catch { return $p }
+}
+
+function Describe-Tool([string]$name, $a) {
+    # Turn a tool call into a short, human-readable action.
+    if (-not $name) { return 'Working' }
+    switch -Regex ($name) {
+        '^report_intent$'              { if ($a.intent) { return [string]$a.intent } ; return 'Planning' }
+        '^(powershell|bash|shell|run_command)$' {
+            $c = $a.command; if (-not $c) { $c = $a.script }
+            if ($c) { $first = ($c -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+                      return "Running: $(Truncate $first 64)" }
+            return 'Running a command'
+        }
+        '^view$'                       { return "Reading $(Leaf $a.path)" }
+        '^edit$'                       { return "Editing $(Leaf $a.path)" }
+        '^create$'                     { return "Creating $(Leaf $a.path)" }
+        '^grep$'                       { return "Searching `"$(Truncate $a.pattern 40)`"" }
+        '^glob$'                       { return "Finding files: $(Truncate $a.pattern 40)" }
+        '^task$'                       { if ($a.description) { return "Delegating: $(Truncate $a.description 50)" } ; return 'Delegating a subtask' }
+        '^web_fetch$'                  { return "Fetching $(Truncate $a.url 50)" }
+        '^web_search$'                 { return "Web search: $(Truncate $a.query 44)" }
+        '^m_filesystem_(list|tree)$'   { return "Listing $(Leaf $a.path)" }
+        '^m_filesystem_stat$'          { return "Checking $(Leaf $a.path)" }
+        '^m_filesystem_mkdir$'         { return "New folder $(Leaf $a.path)" }
+        '^m_filesystem_move$'          { return "Moving $(Leaf $a.source)" }
+        '^sql$'                        { if ($a.description) { return "DB: $(Truncate $a.description 46)" } ; return 'Querying database' }
+        '^workiq_list_emails$'         { return 'Checking emails' }
+        '^workiq_(search_emails|get_email)$' { return "Email: $(Truncate $a.query 40)" }
+        '^workiq_(send_email|reply_to_email|create_draft).*' { return 'Composing email' }
+        '^workiq_.*chat.*'             { return 'Teams chat' }
+        '^workiq_.*event.*'            { return 'Calendar' }
+        '^workiq_.*(people|profile|manager).*' { return 'Looking up people' }
+        '^workiq_.*file.*'             { return 'OneDrive files' }
+        '^m_remember$'                 { return 'Saving a memory' }
+        '^m_recall$'                   { return 'Recalling memory' }
+        '^skill$'                      { if ($a.skill) { return "Skill: $($a.skill)" } ; return 'Using a skill' }
+        '^browser_'                    { return 'Browsing the web' }
+        default                        { return (($name -replace '^m_','') -replace '_',' ') }
+    }
+}
+
+function Add-Step([string]$id, [string]$reqId, [string]$text) {
+    if (-not $text) { return }
+    $rec = [pscustomobject]@{ Id = $id; ReqId = $reqId; Text = $text; Done = $false }
+    [void]$State.Steps.Add($rec)
+    while ($State.Steps.Count -gt [int]$Config.maxSteps) { $State.Steps.RemoveAt(0) }
+}
+
+function Complete-Step([string]$id, [string]$reqId) {
+    for ($i = $State.Steps.Count - 1; $i -ge 0; $i--) {
+        $s = $State.Steps[$i]
+        if (($id -and $s.Id -eq $id) -or ($reqId -and $s.ReqId -eq $reqId)) { $s.Done = $true; break }
+    }
+}
 
 function Get-AgentWindow {
-    # Returns @{ Hwnd; Pid } for the agent's main window, or $null.
     $procs = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle }
     foreach ($name in $Config.processNames) {
         $p = $procs | Where-Object { $_.ProcessName -ieq $name -or $_.ProcessName -like "*$name*" } | Select-Object -First 1
@@ -126,46 +185,35 @@ function Get-AgentWindow {
 }
 
 function Find-ActiveSession {
-    # Pick the session whose events.jsonl was most recently written.
-    # Prefer sessions that currently hold an inuse.*.lock file.
     if (-not (Test-Path $SessionRoot)) { return $null }
-
     $candidates = Get-ChildItem $SessionRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $ev = Join-Path $_.FullName 'events.jsonl'
         if (Test-Path $ev) {
             $locked = (Get-ChildItem $_.FullName -Filter 'inuse.*.lock' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
-            [pscustomobject]@{
-                Dir     = $_.FullName
-                Events  = $ev
-                Mtime   = (Get-Item $ev).LastWriteTimeUtc
-                Locked  = $locked
-            }
+            [pscustomobject]@{ Dir = $_.FullName; Events = $ev; Mtime = (Get-Item $ev).LastWriteTimeUtc; Locked = $locked }
         }
     }
     if (-not $candidates) { return $null }
-
-    $best = $candidates | Sort-Object @{ Expression = 'Locked'; Descending = $true }, @{ Expression = 'Mtime'; Descending = $true } | Select-Object -First 1
-    return $best
+    return $candidates | Sort-Object @{ Expression = 'Locked'; Descending = $true }, @{ Expression = 'Mtime'; Descending = $true } | Select-Object -First 1
 }
 
 function Read-NewEvents {
-    # Reads newly appended JSON lines from the active session's events.jsonl.
     $sess = Find-ActiveSession
     if (-not $sess) { return }
 
     if ($State.EventsPath -ne $sess.Events) {
-        # Switched to a different/newer session: jump to its end so we only
-        # react to fresh activity, then reset per-session state.
         $State.SessionDir = $sess.Dir
         $State.EventsPath = $sess.Events
         $State.Offset     = (Get-Item $sess.Events).Length
         $State.PendingPerms = [ordered]@{}
+        $State.Steps.Clear()
+        $State.Saying = $null
         $State.TurnActive = $false
         return
     }
 
     $len = (Get-Item $sess.Events).Length
-    if ($len -lt $State.Offset) { $State.Offset = 0 }   # file rotated/truncated
+    if ($len -lt $State.Offset) { $State.Offset = 0 }
     if ($len -eq $State.Offset) { return }
 
     $fs = [System.IO.File]::Open($sess.Events, 'Open', 'Read', 'ReadWrite')
@@ -174,9 +222,7 @@ function Read-NewEvents {
         $sr = New-Object System.IO.StreamReader($fs)
         $chunk = $sr.ReadToEnd()
         $State.Offset = $fs.Position
-    } finally {
-        $fs.Dispose()
-    }
+    } finally { $fs.Dispose() }
 
     foreach ($line in ($chunk -split "`n")) {
         $line = $line.Trim()
@@ -189,22 +235,25 @@ function Read-NewEvents {
 function Handle-Event($evt) {
     $State.LastEventUtc = [datetime]::UtcNow
     switch ($evt.type) {
-        'assistant.turn_start'    { $State.TurnActive = $true }
-        'assistant.turn_end'      { $State.TurnActive = $false; $State.Activity = 'Done. Waiting for next step...'; $State.ToolName = $null }
+        'assistant.turn_start' { $State.TurnActive = $true }
+        'assistant.turn_end'   { $State.TurnActive = $false }
         'assistant.message' {
-            $txt = $null
-            if ($evt.data.text) { $txt = $evt.data.text }
-            elseif ($evt.data.message) { $txt = $evt.data.message }
-            if ($txt) { $State.Activity = (Truncate $txt 240); $State.ToolName = $null }
+            $txt = $evt.data.content; if (-not $txt) { $txt = $evt.data.text }
+            if ($txt) { $State.Saying = Truncate $txt 200 }
         }
         'tool.execution_start' {
-            $tn = $evt.data.toolName; if (-not $tn) { $tn = $evt.data.name }
-            $State.ToolName = $tn
-            if ($tn) { $State.Activity = "Running $tn" }
+            $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
+            Add-Step $evt.data.toolCallId $null $desc
         }
         'tool.execution_complete' {
-            $tn = $evt.data.toolName; if (-not $tn) { $tn = $evt.data.name }
-            if ($tn) { $State.Activity = "Finished $tn" }
+            Complete-Step $evt.data.toolCallId $null
+        }
+        'external_tool.requested' {
+            $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
+            Add-Step $evt.data.toolCallId $evt.data.requestId $desc
+        }
+        'external_tool.completed' {
+            Complete-Step $null $evt.data.requestId
         }
         'permission.requested' {
             $req = $evt.data.permissionRequest
@@ -224,38 +273,20 @@ function Handle-Event($evt) {
             $id = $evt.data.requestId
             if ($State.PendingPerms.Contains($id)) { $State.PendingPerms.Remove($id) }
         }
-        'external_tool.requested' {
-            # treated like a soft pending; show as activity only
-            $State.Activity = 'Waiting on an external tool...'
-        }
     }
 }
 
-function Truncate([string]$s, [int]$n) {
-    if ($null -eq $s) { return '' }
-    $s = $s -replace '\s+', ' '
-    if ($s.Length -le $n) { return $s }
-    return $s.Substring(0, $n) + '...'
-}
-
 function Wake-AgentA11y([IntPtr]$hwnd) {
-    # WM_GETOBJECT with UiaRootObjectId (-25) nudges Chromium/Electron to expose
-    # its accessibility tree so UI Automation can see (and invoke) the buttons.
     if ($hwnd -eq [IntPtr]::Zero) { return }
     [void][ScoutNative]::SendMessage($hwnd, 0x003D, [IntPtr]::Zero, [IntPtr](-25))
 }
 
 function Invoke-AgentButton([string[]]$labels) {
-    # Best-effort: find a visible, enabled button in the agent window whose name
-    # matches one of $labels and invoke it via UI Automation. Returns $true on click.
     $win = Get-AgentWindow
     if (-not $win) { return $false }
     Wake-AgentA11y $win.Hwnd
     Start-Sleep -Milliseconds 350
-
-    try {
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle($win.Hwnd)
-    } catch { return $false }
+    try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($win.Hwnd) } catch { return $false }
     if (-not $root) { return $false }
 
     $btnCond = New-Object System.Windows.Automation.PropertyCondition(
@@ -266,27 +297,16 @@ function Invoke-AgentButton([string[]]$labels) {
     foreach ($label in $labels) {
         foreach ($b in $buttons) {
             $n = $b.Current.Name
-            if (-not $n) { continue }
-            if ($n.Trim().ToLower() -eq $label.ToLower() -or $n -ieq $label) {
-                if ($b.Current.IsOffscreen) { continue }
-                try {
-                    $ip = $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                    $ip.Invoke()
-                    return $true
-                } catch { }
+            if ($n -and ($n.Trim().ToLower() -eq $label.ToLower()) -and -not $b.Current.IsOffscreen) {
+                try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch { }
             }
         }
     }
-    # Looser contains-match as a fallback.
     foreach ($label in $labels) {
         foreach ($b in $buttons) {
             $n = $b.Current.Name
             if ($n -and ($n -ilike "*$label*") -and -not $b.Current.IsOffscreen) {
-                try {
-                    $ip = $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                    $ip.Invoke()
-                    return $true
-                } catch { }
+                try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch { }
             }
         }
     }
@@ -296,36 +316,88 @@ function Invoke-AgentButton([string[]]$labels) {
 function Focus-Agent {
     $win = Get-AgentWindow
     if (-not $win) { return }
-    [void][ScoutNative]::ShowWindow($win.Hwnd, 9)   # SW_RESTORE
+    [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
     [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
 }
 
 # ---------------------------------------------------------------------------
-# WPF overlay UI.
+# WPF overlay UI (with animated quokka mascot).
 # ---------------------------------------------------------------------------
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Scout Companion"
-        Width="360" SizeToContent="Height"
+        Width="380" SizeToContent="Height"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize">
-  <Border CornerRadius="12" Background="#FF1B1F2A" BorderBrush="#FF3A4358" BorderThickness="1" Padding="14">
-    <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.5" Color="#000000"/></Border.Effect>
+  <Border CornerRadius="14" Background="#FF1B1F2A" BorderBrush="#FF3A4358" BorderThickness="1" Padding="14">
+    <Border.Effect><DropShadowEffect BlurRadius="20" ShadowDepth="3" Opacity="0.55" Color="#000000"/></Border.Effect>
     <StackPanel>
       <DockPanel LastChildFill="True">
-        <Ellipse x:Name="Dot" Width="9" Height="9" Fill="#FF4ADE80" VerticalAlignment="Center" Margin="0,0,8,0"/>
-        <TextBlock x:Name="HeaderText" Text="Scout is working" Foreground="#FFE6EAF2" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"/>
+
+        <!-- Quokka mascot -->
+        <Canvas x:Name="Quokka" Width="56" Height="56" DockPanel.Dock="Left" Margin="0,0,12,0"
+                RenderTransformOrigin="0.5,0.6" VerticalAlignment="Center">
+          <Canvas.RenderTransform>
+            <TransformGroup>
+              <ScaleTransform x:Name="BodyS" ScaleX="1" ScaleY="1"/>
+              <TranslateTransform x:Name="BodyT"/>
+            </TransformGroup>
+          </Canvas.RenderTransform>
+          <!-- ears -->
+          <Ellipse Canvas.Left="8"  Canvas.Top="1"  Width="16" Height="18" Fill="#FFB87A50"/>
+          <Ellipse Canvas.Left="32" Canvas.Top="1"  Width="16" Height="18" Fill="#FFB87A50"/>
+          <Ellipse Canvas.Left="12" Canvas.Top="5"  Width="8"  Height="10" Fill="#FFE3A6A6"/>
+          <Ellipse Canvas.Left="36" Canvas.Top="5"  Width="8"  Height="10" Fill="#FFE3A6A6"/>
+          <!-- head/body -->
+          <Ellipse Canvas.Left="6"  Canvas.Top="9"  Width="44" Height="43" Fill="#FFC58A5E"/>
+          <Ellipse Canvas.Left="15" Canvas.Top="25" Width="26" Height="25" Fill="#FFF0DBBC"/>
+          <!-- cheeks -->
+          <Ellipse Canvas.Left="11" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
+          <Ellipse Canvas.Left="36" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
+          <!-- eyes -->
+          <Ellipse Canvas.Left="19" Canvas.Top="23" Width="6"  Height="8"  Fill="#FF332019"/>
+          <Ellipse Canvas.Left="31" Canvas.Top="23" Width="6"  Height="8"  Fill="#FF332019"/>
+          <Ellipse Canvas.Left="20" Canvas.Top="24" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
+          <Ellipse Canvas.Left="32" Canvas.Top="24" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
+          <!-- nose + signature smile -->
+          <Ellipse Canvas.Left="24" Canvas.Top="31" Width="8"  Height="5"  Fill="#FF5A3A2A"/>
+          <Path Stroke="#FF5A3A2A" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                Data="M19,37 Q28,46 37,37"/>
+          <!-- paws (animated) -->
+          <Ellipse Canvas.Left="13" Canvas.Top="45" Width="11" Height="9" Fill="#FFB87A50">
+            <Ellipse.RenderTransform><TranslateTransform x:Name="LeftPawT"/></Ellipse.RenderTransform>
+          </Ellipse>
+          <Ellipse Canvas.Left="32" Canvas.Top="45" Width="11" Height="9" Fill="#FFB87A50">
+            <Ellipse.RenderTransform><TranslateTransform x:Name="RightPawT"/></Ellipse.RenderTransform>
+          </Ellipse>
+        </Canvas>
+
         <Button x:Name="CloseBtn" Content="&#x2715;" DockPanel.Dock="Right" Width="22" Height="22"
-                Background="Transparent" Foreground="#FF8A93A6" BorderThickness="0" FontSize="12" Cursor="Hand"/>
+                Background="Transparent" Foreground="#FF8A93A6" BorderThickness="0" FontSize="12"
+                VerticalAlignment="Top" Cursor="Hand"/>
         <Button x:Name="OpenBtn" Content="Open" DockPanel.Dock="Right" Height="22" Margin="0,0,6,0"
-                Background="#FF2A3142" Foreground="#FFB9C2D6" BorderThickness="0" Padding="8,0" FontSize="11" Cursor="Hand"/>
+                Background="#FF2A3142" Foreground="#FFB9C2D6" BorderThickness="0" Padding="8,0" FontSize="11"
+                VerticalAlignment="Top" Cursor="Hand"/>
+
+        <StackPanel VerticalAlignment="Center">
+          <DockPanel LastChildFill="True">
+            <Ellipse x:Name="Dot" Width="9" Height="9" Fill="#FF4ADE80" VerticalAlignment="Center" Margin="0,0,7,0" DockPanel.Dock="Left"/>
+            <TextBlock x:Name="HeaderText" Text="Scout is working" Foreground="#FFE6EAF2" FontSize="13.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          </DockPanel>
+          <TextBlock x:Name="SayingText" Margin="0,4,0,0" Text="" Foreground="#FF9AA6BE" FontSize="11"
+                     FontStyle="Italic" TextWrapping="Wrap" MaxHeight="44" TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
       </DockPanel>
 
-      <TextBlock x:Name="ActivityText" Margin="0,10,0,0" Text="..." Foreground="#FFB9C2D6"
-                 FontSize="12" TextWrapping="Wrap" MaxHeight="80" TextTrimming="CharacterEllipsis"/>
+      <!-- live step list -->
+      <Border x:Name="StepsPanel" Margin="0,10,0,0" Padding="10,8" CornerRadius="9" Background="#FF232838" Visibility="Collapsed">
+        <TextBlock x:Name="StepsText" Text="" Foreground="#FFC7D0E2" FontSize="11.5" FontFamily="Consolas, Cascadia Mono, monospace"
+                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+      </Border>
 
-      <Border x:Name="PermPanel" Margin="0,12,0,0" Padding="10" CornerRadius="8"
+      <!-- permission prompt -->
+      <Border x:Name="PermPanel" Margin="0,12,0,0" Padding="10" CornerRadius="9"
               Background="#FF2A2030" BorderBrush="#FFB4843C" BorderThickness="1" Visibility="Collapsed">
         <StackPanel>
           <TextBlock Text="Permission requested" Foreground="#FFF2C879" FontWeight="SemiBold" FontSize="12"/>
@@ -348,58 +420,88 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $Window = [Windows.Markup.XamlReader]::Load($reader)
 
 $HeaderText   = $Window.FindName('HeaderText')
-$ActivityText = $Window.FindName('ActivityText')
+$SayingText   = $Window.FindName('SayingText')
 $Dot          = $Window.FindName('Dot')
+$StepsPanel   = $Window.FindName('StepsPanel')
+$StepsText    = $Window.FindName('StepsText')
 $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
 $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
 $OpenBtn      = $Window.FindName('OpenBtn')
 $CloseBtn     = $Window.FindName('CloseBtn')
+$BodyT        = $Window.FindName('BodyT')
+$BodyS        = $Window.FindName('BodyS')
+$LeftPawT     = $Window.FindName('LeftPawT')
+$RightPawT    = $Window.FindName('RightPawT')
 
-# Position bottom-right above the taskbar.
-$Window.Add_Loaded({
+function Place-BottomRight {
     $wa = [System.Windows.SystemParameters]::WorkArea
     $Window.Left = $wa.Right - $Window.ActualWidth - 16
     $Window.Top  = $wa.Bottom - $Window.ActualHeight - 16
-})
-
-$Window.Add_SizeChanged({
-    $wa = [System.Windows.SystemParameters]::WorkArea
-    $Window.Left = $wa.Right - $Window.ActualWidth - 16
-    $Window.Top  = $wa.Bottom - $Window.ActualHeight - 16
-})
-
-# Drag to reposition.
+}
+$Window.Add_Loaded({ Place-BottomRight })
+$Window.Add_SizeChanged({ Place-BottomRight })
 $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
-$script:Hidden = $false   # user manually dismissed for the current burst
+$script:Hidden = $false
 
 $AllowBtn.Add_Click({
-    $ok = Invoke-AgentButton $Config.allowLabels
-    if ($ok) {
-        # optimistic: clear pending so the panel hides immediately
+    if (Invoke-AgentButton $Config.allowLabels) {
         foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
-    } else {
-        Focus-Agent
-    }
+    } else { Focus-Agent }
 })
-
 $DenyBtn.Add_Click({
-    $ok = Invoke-AgentButton $Config.denyLabels
-    if ($ok) {
+    if (Invoke-AgentButton $Config.denyLabels) {
         foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
-    } else {
-        Focus-Agent
-    }
+    } else { Focus-Agent }
 })
-
 $OpenBtn.Add_Click({ Focus-Agent })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 
 # ---------------------------------------------------------------------------
-# Main loop: poll events + decide visibility.
+# Quokka animation: a dedicated fast timer drives the mascot frame-by-frame.
+# Working => bobbing body + alternating "typing" paws. Idle => slow breathing.
 # ---------------------------------------------------------------------------
+$script:Phase = 0.0
+$script:Busy  = $false
+$anim = New-Object System.Windows.Threading.DispatcherTimer
+$anim.Interval = [TimeSpan]::FromMilliseconds(50)
+$anim.Add_Tick({
+    if ($script:Busy) {
+        $script:Phase += 0.32
+        $BodyT.Y     = [Math]::Sin($script:Phase * 2.0) * 1.6
+        $BodyT.X     = [Math]::Sin($script:Phase) * 0.6
+        $BodyS.ScaleX = 1.0
+        $BodyS.ScaleY = 1.0
+        $LeftPawT.Y  = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0)) * 2.4
+        $RightPawT.Y = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0 + [Math]::PI)) * 2.4
+    } else {
+        $script:Phase += 0.04
+        $breathe = 1.0 + [Math]::Sin($script:Phase) * 0.035
+        $BodyS.ScaleX = $breathe
+        $BodyS.ScaleY = $breathe
+        $BodyT.Y = [Math]::Sin($script:Phase) * 0.6
+        $BodyT.X = 0
+        $LeftPawT.Y = 0
+        $RightPawT.Y = 0
+    }
+})
+
+# ---------------------------------------------------------------------------
+# Main loop: poll events + decide visibility + render.
+# ---------------------------------------------------------------------------
+function Render-Steps {
+    if ($State.Steps.Count -eq 0) { $StepsPanel.Visibility = 'Collapsed'; return }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($s in $State.Steps) {
+        $mark = if ($s.Done) { [char]0x2713 } else { [char]0x25B8 }   # check / triangle
+        [void]$sb.AppendLine("$mark  $($s.Text)")
+    }
+    $StepsText.Text = $sb.ToString().TrimEnd()
+    $StepsPanel.Visibility = 'Visible'
+}
+
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds([int]$Config.pollIntervalMs)
 $timer.Add_Tick({
@@ -413,45 +515,37 @@ $timer.Add_Tick({
 
     $hasPending = $State.PendingPerms.Count -gt 0
     $ageSec = ([datetime]::UtcNow - $State.LastEventUtc).TotalSeconds
-    $isActive = $hasPending -or ($State.EventsPath -and $ageSec -le [double]$Config.activeWindowSeconds)
+    $running = ($State.Steps | Where-Object { -not $_.Done } | Measure-Object).Count -gt 0
+    $isActive = $hasPending -or $running -or ($State.TurnActive) -or ($State.EventsPath -and $ageSec -le [double]$Config.activeWindowSeconds)
 
-    # Re-arm after a manual dismiss when something new demands attention.
+    $script:Busy = (-not $hasPending) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
+
     if ($script:Hidden -and $hasPending) { $script:Hidden = $false }
 
-    # Update content.
+    # content
     if ($hasPending) {
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
-        $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1) more)" } else { '' }
+        $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
         $HeaderText.Text = "Approval needed$extra"
         $PermText.Text = $first.text
         $PermPanel.Visibility = 'Visible'
         $Dot.Fill = '#FFF2C879'
     } else {
         $PermPanel.Visibility = 'Collapsed'
-        if (-not $agentRunning) {
-            $HeaderText.Text = 'Agent not detected'
-            $Dot.Fill = '#FF8A93A6'
-        } elseif ($State.TurnActive -or $isActive) {
-            $HeaderText.Text = 'Working in the background'
-            $Dot.Fill = '#FF4ADE80'
-        } else {
-            $HeaderText.Text = 'Idle'
-            $Dot.Fill = '#FF8A93A6'
-        }
+        if (-not $agentRunning) { $HeaderText.Text = 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
+        elseif ($script:Busy)   { $HeaderText.Text = 'Working hard...';     $Dot.Fill = '#FF4ADE80' }
+        else                    { $HeaderText.Text = 'Idle';                $Dot.Fill = '#FF8A93A6' }
     }
-    $ActivityText.Text = $State.Activity
 
-    # Visibility policy:
-    #   - Always surface a pending approval.
-    #   - Otherwise show only when the agent is active AND its window is
-    #     minimized or not in the foreground (i.e. you've looked away).
+    if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
+    else { $SayingText.Visibility = 'Collapsed' }
+
+    Render-Steps
+
+    # visibility policy
     $shouldShow = $false
-    if ($hasPending) {
-        $shouldShow = $true
-    } elseif ($isActive -and $agentRunning -and ($isMinimized -or -not $isForeground)) {
-        $shouldShow = $true
-    }
-
+    if ($hasPending) { $shouldShow = $true }
+    elseif ($isActive -and $agentRunning -and ($isMinimized -or -not $isForeground)) { $shouldShow = $true }
     if ($script:Hidden) { $shouldShow = $false }
 
     if ($shouldShow) {
@@ -462,7 +556,7 @@ $timer.Add_Tick({
     }
 })
 
-# Prime state on first run (jump to current end of the active session).
+# prime to current end of the active session
 $initial = Find-ActiveSession
 if ($initial) {
     $State.SessionDir = $initial.Dir
@@ -471,9 +565,9 @@ if ($initial) {
     $State.LastEventUtc = (Get-Item $initial.Events).LastWriteTimeUtc
 }
 
+$anim.Start()
 $timer.Start()
 
-# Run hidden until the policy decides to show the toast.
 $Window.Visibility = 'Hidden'
 $app = New-Object System.Windows.Application
 $app.Run($Window) | Out-Null
