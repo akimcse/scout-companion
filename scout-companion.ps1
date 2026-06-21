@@ -336,7 +336,7 @@ function Focus-Agent {
       <DockPanel LastChildFill="True">
 
         <!-- Quokka mascot -->
-        <Canvas x:Name="Quokka" Width="56" Height="56" DockPanel.Dock="Left" Margin="0,0,12,0"
+        <Canvas x:Name="Quokka" Width="58" Height="60" DockPanel.Dock="Left" Margin="0,0,12,0"
                 RenderTransformOrigin="0.5,0.6" VerticalAlignment="Center">
           <Canvas.RenderTransform>
             <TransformGroup>
@@ -360,15 +360,28 @@ function Focus-Agent {
           <Ellipse Canvas.Left="31" Canvas.Top="23" Width="6"  Height="8"  Fill="#FF332019"/>
           <Ellipse Canvas.Left="20" Canvas.Top="24" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
           <Ellipse Canvas.Left="32" Canvas.Top="24" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
+          <!-- glasses -->
+          <Line X1="8"  Y1="22" X2="17" Y2="25" Stroke="#FF222222" StrokeThickness="1.5"/>
+          <Line X1="48" Y1="22" X2="39" Y2="25" Stroke="#FF222222" StrokeThickness="1.5"/>
+          <Ellipse Canvas.Left="16" Canvas.Top="21" Width="11" Height="11" Stroke="#FF1E1E1E" StrokeThickness="1.7" Fill="#22BFE3FF"/>
+          <Ellipse Canvas.Left="29" Canvas.Top="21" Width="11" Height="11" Stroke="#FF1E1E1E" StrokeThickness="1.7" Fill="#22BFE3FF"/>
+          <Line X1="27" Y1="26" X2="29" Y2="26" Stroke="#FF1E1E1E" StrokeThickness="1.7"/>
           <!-- nose + signature smile -->
-          <Ellipse Canvas.Left="24" Canvas.Top="31" Width="8"  Height="5"  Fill="#FF5A3A2A"/>
+          <Ellipse Canvas.Left="24" Canvas.Top="30" Width="8"  Height="5"  Fill="#FF5A3A2A"/>
           <Path Stroke="#FF5A3A2A" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                Data="M19,37 Q28,46 37,37"/>
-          <!-- paws (animated) -->
-          <Ellipse Canvas.Left="13" Canvas.Top="45" Width="11" Height="9" Fill="#FFB87A50">
+                Data="M20,35 Q28,42 36,35"/>
+          <!-- laptop: screen lid (seen from behind) -->
+          <Border Canvas.Left="17" Canvas.Top="40" Width="24" Height="13" CornerRadius="2" Background="#FF3A4257"/>
+          <Border Canvas.Left="19" Canvas.Top="42" Width="20" Height="9"  CornerRadius="1" Background="#FF5C6B86"/>
+          <Ellipse Canvas.Left="27" Canvas.Top="45" Width="4" Height="4" Fill="#FF9DE7FF"/>
+          <!-- laptop: keyboard base -->
+          <Polygon Points="11,52 47,52 53,60 5,60" Fill="#FFC9D0DC"/>
+          <Polygon Points="14,53 44,53 48,58 10,58" Fill="#FFA9B3C4"/>
+          <!-- paws on the keyboard (animated typing) -->
+          <Ellipse Canvas.Left="14" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
             <Ellipse.RenderTransform><TranslateTransform x:Name="LeftPawT"/></Ellipse.RenderTransform>
           </Ellipse>
-          <Ellipse Canvas.Left="32" Canvas.Top="45" Width="11" Height="9" Fill="#FFB87A50">
+          <Ellipse Canvas.Left="32" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
             <Ellipse.RenderTransform><TranslateTransform x:Name="RightPawT"/></Ellipse.RenderTransform>
           </Ellipse>
         </Canvas>
