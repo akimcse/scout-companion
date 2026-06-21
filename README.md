@@ -53,6 +53,9 @@ place.
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
 - **Zero personal data, zero config** — discovers the agent home folder, the active
   session, and the agent window automatically at runtime. Nothing is hardcoded.
+- **Lives and dies with Scout** — an optional watcher launches the companion when Scout
+  starts and the companion closes itself when Scout quits, so it's only ever running when
+  you need it (see [Start and stop with Scout](#start-and-stop-with-scout-recommended)).
 - **Single file, no install** — pure PowerShell + WPF. No dependencies, no build step.
 
 ## Requirements
@@ -66,9 +69,28 @@ place.
 1. Download/clone this repo anywhere.
 2. Double-click **`Start-ScoutCompanion.cmd`**.
 
-That's it. The toast stays hidden until the agent is working in the background. To run
-it automatically at login, put a shortcut to `Start-ScoutCompanion.cmd` in your Startup
-folder (`Win`+`R` → `shell:startup`).
+That's it. The toast stays hidden until the agent is working in the background.
+
+### Start and stop with Scout (recommended)
+
+Instead of running it for your whole Windows session, you can tie the companion to
+Scout's lifetime — it **opens when Scout starts and closes when Scout quits**:
+
+1. Open your Startup folder: `Win`+`R` → `shell:startup`.
+2. Create a shortcut whose target is:
+
+   ```
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "<path>\Watch-Scout.ps1"
+   ```
+
+`Watch-Scout.ps1` is a tiny background watcher: while Scout is closed it does nothing but
+a cheap process check every few seconds; when Scout appears it launches the companion,
+and the companion shuts **itself** down a few seconds after Scout exits (controlled by
+`exitWhenAgentGone` / `exitGraceSeconds` in `config.json`).
+
+If you'd rather have it simply run from login onward, put a shortcut to
+`Start-ScoutCompanion.cmd` in the Startup folder instead and set `exitWhenAgentGone` to
+`false`.
 
 To stop it: click the **✕** on the toast (hides it until the next approval), or close
 the background PowerShell process from Task Manager.
@@ -107,6 +129,8 @@ Everything works out of the box. To customize, copy `config.sample.json` to
 | `allowLabels` / `denyLabels` | `["Allow",...]` / `["Deny",...]` | Buttons to click for approvals |
 | `activeWindowSeconds` | `150` | How long after the last event the session counts as "working" |
 | `pollIntervalMs` | `700` | Event/focus polling interval |
+| `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
+| `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
 
 You can also point it at a different home folder with the `SCOUT_COMPANION_HOME`
 environment variable.

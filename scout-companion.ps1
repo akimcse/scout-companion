@@ -68,6 +68,8 @@ $Config = [ordered]@{
     activeWindowSeconds = 150
     pollIntervalMs      = 700
     maxSteps            = 4
+    exitWhenAgentGone   = $true
+    exitGraceSeconds    = 30
 }
 
 $cfgPath = Join-Path $ScriptDir 'config.json'
@@ -182,6 +184,16 @@ function Get-AgentWindow {
         if ($p) { return @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id } }
     }
     return $null
+}
+
+# Lightweight presence check (process only, no window). Used to decide when Scout
+# has fully closed so the companion can shut itself down.
+function Test-AgentProcess {
+    $all = Get-Process -ErrorAction SilentlyContinue
+    foreach ($name in $Config.processNames) {
+        if ($all | Where-Object { $_.ProcessName -ieq $name -or $_.ProcessName -like "*$name*" } | Select-Object -First 1) { return $true }
+    }
+    return $false
 }
 
 function Find-ActiveSession {
@@ -520,6 +532,7 @@ $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
 $script:Hidden = $false
 $script:Pending = $false
+$script:AgentGoneSince = $null
 Set-Theme 'idle'
 
 $AllowBtn.Add_Click({
@@ -600,6 +613,20 @@ $timer.Add_Tick({
     $fg = [ScoutNative]::GetForegroundWindow()
     $isForeground = $agentRunning -and ($fg -eq $win.Hwnd)
     $isMinimized  = $agentRunning -and [ScoutNative]::IsIconic($win.Hwnd)
+
+    # Lifecycle: when Scout has fully closed, shut the companion down after a short
+    # grace period (covers restarts / momentary window-title flaps).
+    if ($agentRunning -or (Test-AgentProcess)) {
+        $script:AgentGoneSince = $null
+    } elseif ($Config.exitWhenAgentGone) {
+        if (-not $script:AgentGoneSince) {
+            $script:AgentGoneSince = [datetime]::UtcNow
+        } elseif ((([datetime]::UtcNow - $script:AgentGoneSince).TotalSeconds) -ge [double]$Config.exitGraceSeconds) {
+            $timer.Stop(); $anim.Stop()
+            try { $Window.Close() } catch { }
+            return
+        }
+    }
 
     $hasPending = $State.PendingPerms.Count -gt 0
     $ageSec = ([datetime]::UtcNow - $State.LastEventUtc).TotalSeconds

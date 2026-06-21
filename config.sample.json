@@ -18,5 +18,11 @@
   "_activeWindowSeconds": "Treat the session as 'working' if its event log changed within this many seconds.",
 
   "pollIntervalMs": 700,
-  "_pollIntervalMs": "How often (ms) to poll the event stream and window focus."
+  "_pollIntervalMs": "How often (ms) to poll the event stream and window focus.",
+
+  "exitWhenAgentGone": true,
+  "_exitWhenAgentGone": "Automatically close the companion shortly after the agent app quits. Pair with Watch-Scout.ps1 (in the Startup folder) to tie the companion's lifetime to Scout: it opens when Scout starts and closes when Scout exits.",
+
+  "exitGraceSeconds": 30,
+  "_exitGraceSeconds": "How long the agent must stay gone before the companion shuts itself down (covers restarts and brief window flaps)."
 }
