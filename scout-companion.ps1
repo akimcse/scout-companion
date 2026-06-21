@@ -355,17 +355,21 @@ function Focus-Agent {
           <!-- cheeks -->
           <Ellipse Canvas.Left="11" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
           <Ellipse Canvas.Left="36" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
-          <!-- eyes -->
-          <Ellipse Canvas.Left="19" Canvas.Top="23" Width="6"  Height="8"  Fill="#FF332019"/>
-          <Ellipse Canvas.Left="31" Canvas.Top="23" Width="6"  Height="8"  Fill="#FF332019"/>
-          <Ellipse Canvas.Left="20" Canvas.Top="24" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
-          <Ellipse Canvas.Left="32" Canvas.Top="24" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
-          <!-- glasses -->
-          <Line X1="8"  Y1="22" X2="17" Y2="25" Stroke="#FF222222" StrokeThickness="1.5"/>
-          <Line X1="48" Y1="22" X2="39" Y2="25" Stroke="#FF222222" StrokeThickness="1.5"/>
-          <Ellipse Canvas.Left="16" Canvas.Top="21" Width="11" Height="11" Stroke="#FF1E1E1E" StrokeThickness="1.7" Fill="#22BFE3FF"/>
-          <Ellipse Canvas.Left="29" Canvas.Top="21" Width="11" Height="11" Stroke="#FF1E1E1E" StrokeThickness="1.7" Fill="#22BFE3FF"/>
-          <Line X1="27" Y1="26" X2="29" Y2="26" Stroke="#FF1E1E1E" StrokeThickness="1.7"/>
+          <!-- glasses temples (behind) -->
+          <Line X1="8"  Y1="21" X2="16" Y2="26" Stroke="#FF2E2E2E" StrokeThickness="1.6"/>
+          <Line X1="48" Y1="21" X2="40" Y2="26" Stroke="#FF2E2E2E" StrokeThickness="1.6"/>
+          <!-- big round lenses (light tint so eyes show through) -->
+          <Ellipse Canvas.Left="14" Canvas.Top="20" Width="15" Height="15" Fill="#1AD4F2FF"/>
+          <Ellipse Canvas.Left="27" Canvas.Top="20" Width="15" Height="15" Fill="#1AD4F2FF"/>
+          <!-- cute eyes (bigger), inside the lenses -->
+          <Ellipse Canvas.Left="18" Canvas.Top="23" Width="7.5" Height="9.5" Fill="#FF332019"/>
+          <Ellipse Canvas.Left="30" Canvas.Top="23" Width="7.5" Height="9.5" Fill="#FF332019"/>
+          <Ellipse Canvas.Left="19.5" Canvas.Top="24.5" Width="3" Height="3" Fill="#FFFFFFFF"/>
+          <Ellipse Canvas.Left="31.5" Canvas.Top="24.5" Width="3" Height="3" Fill="#FFFFFFFF"/>
+          <!-- frame rings on top -->
+          <Ellipse Canvas.Left="14" Canvas.Top="20" Width="15" Height="15" Stroke="#FF262626" StrokeThickness="1.7" Fill="Transparent"/>
+          <Ellipse Canvas.Left="27" Canvas.Top="20" Width="15" Height="15" Stroke="#FF262626" StrokeThickness="1.7" Fill="Transparent"/>
+          <Line X1="29" Y1="26" X2="27" Y2="26" Stroke="#FF262626" StrokeThickness="1.7"/>
           <!-- nose + signature smile -->
           <Ellipse Canvas.Left="24" Canvas.Top="30" Width="8"  Height="5"  Fill="#FF5A3A2A"/>
           <Path Stroke="#FF5A3A2A" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
