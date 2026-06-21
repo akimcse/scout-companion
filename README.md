@@ -101,8 +101,10 @@ environment variable.
 - **"Agent not detected"** — your build may use a different process name; add it to
   `processNames` in `config.json`.
 - **Allow/Deny clicks the wrong thing or does nothing** — the button captions in your
-  build may differ; adjust `allowLabels` / `denyLabels`. As a fallback the companion
-  focuses the agent window so you can click manually.
+  build may differ; adjust `allowLabels` / `denyLabels`. Scout currently shows **Allow**,
+  **Allow for session**, **Allow everywhere**, and **Deny**; the toast's **Allow** maps to
+  the safest one-time **Allow**. As a fallback the companion focuses the agent window so
+  you can click manually.
 
 ## Privacy & safety
 

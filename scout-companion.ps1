@@ -64,8 +64,10 @@ $Config = [ordered]@{
     # Window-name candidates used as a secondary match if process name misses.
     windowHints   = @('Scout', 'Clawpilot', 'OpenClaw', 'Copilot')
     # Button labels to treat as "approve" / "deny" when auto-clicking the agent prompt.
-    allowLabels   = @('Allow', 'Always allow', 'Allow once', 'Approve', 'Accept', 'Yes', 'Continue')
-    denyLabels    = @('Deny', 'Reject', 'Decline', 'Block', 'No', 'Cancel')
+    # Order matters: the first label that matches a visible button is clicked, so the
+    # safest one-time "Allow" is preferred over "Allow for session"/"Allow everywhere".
+    allowLabels   = @('Allow', 'Allow for session', 'Allow everywhere', 'Always allow', 'Allow once', 'Approve', 'Accept', 'Continue', 'Yes')
+    denyLabels    = @('Deny', 'Reject', 'Decline', 'Block', 'Cancel', 'No')
     # Consider the session "active" if events.jsonl changed within this many seconds.
     activeWindowSeconds = 150
     # Polling interval for the event stream / visibility, in milliseconds.

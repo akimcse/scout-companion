@@ -10,9 +10,9 @@
   "windowHints": ["Scout", "Clawpilot", "OpenClaw", "Copilot"],
   "_windowHints": "Fallback window-title substrings used if the process name doesn't match.",
 
-  "allowLabels": ["Allow", "Always allow", "Allow once", "Approve", "Accept", "Yes", "Continue"],
-  "denyLabels": ["Deny", "Reject", "Decline", "Block", "No", "Cancel"],
-  "_labels": "Button captions the companion will click for Allow / Deny inside the agent window.",
+  "allowLabels": ["Allow", "Allow for session", "Allow everywhere", "Always allow", "Allow once", "Approve", "Accept", "Continue", "Yes"],
+  "denyLabels": ["Deny", "Reject", "Decline", "Block", "Cancel", "No"],
+  "_labels": "Button captions the companion clicks for Allow / Deny inside the agent window. Scout currently shows: Allow, Allow for session, Allow everywhere, Deny. Order matters: the first match wins, so the one-time 'Allow' is preferred.",
 
   "activeWindowSeconds": 150,
   "_activeWindowSeconds": "Treat the session as 'working' if its event log changed within this many seconds.",
