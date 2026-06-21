@@ -458,18 +458,20 @@ $RootBorder   = $Window.FindName('RootBorder')
 $RootGlow     = $Window.FindName('RootGlow')
 $PermTitle    = $Window.FindName('PermTitle')
 
-# Brushes for the two themes (dark normal vs. bright-yellow alert).
+# Brushes for the three states: idle (dark), working (muted green), alert (yellow).
 function B([string]$hex) { (New-Object System.Windows.Media.BrushConverter).ConvertFromString($hex) }
 $Theme = @{
-    NormalBg     = B '#FF1B1F2A'; NormalBorder = B '#FF3A4358'; NormalHeader = B '#FFE6EAF2'
-    AlertBg      = B '#FFFFD23D'; AlertBorder  = B '#FFFF7A00'; AlertHeader  = B '#FF3A2600'
-    PermBgNormal = B '#FF2A2030'; PermBdNormal = B '#FFB4843C'; PermTxtNormal = B '#FFD6CFC2'
-    PermBgAlert  = B '#FFFFFFFF'; PermBdAlert  = B '#FFFF7A00'; PermTxtAlert  = B '#FF3A2E10'
+    NormalBg      = B '#FF1B1F2A'; NormalBorder  = B '#FF3A4358'; NormalHeader  = B '#FFE6EAF2'
+    WorkingBg     = B '#FF18261D'; WorkingBorder = B '#FF3C6B4C'; WorkingHeader = B '#FFE6F2EA'
+    AlertBg       = B '#FFFFD23D'; AlertBorder   = B '#FFFF7A00'; AlertHeader   = B '#FF3A2600'
+    PermBgNormal  = B '#FF2A2030'; PermBdNormal  = B '#FFB4843C'; PermTxtNormal = B '#FFD6CFC2'
+    PermBgAlert   = B '#FFFFFFFF'; PermBdAlert   = B '#FFFF7A00'; PermTxtAlert  = B '#FF3A2E10'
 }
-$script:AlertOn = $null
+$script:ThemeState = $null
 
-function Set-AlertTheme([bool]$on) {
-    if ($on) {
+# state: 'alert' (approval), 'working' (busy), 'idle' (default/dim)
+function Set-Theme([string]$state) {
+    if ($state -eq 'alert') {
         $RootBorder.Background  = $Theme.AlertBg
         $RootBorder.BorderBrush = $Theme.AlertBorder
         $RootBorder.BorderThickness = 2
@@ -478,7 +480,22 @@ function Set-AlertTheme([bool]$on) {
         $PermPanel.BorderBrush  = $Theme.PermBdAlert
         $PermText.Foreground    = $Theme.PermTxtAlert
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(255, 176, 0)
-    } else {
+        $RootGlow.BlurRadius    = 20
+        $RootGlow.Opacity       = 0.55
+    }
+    elseif ($state -eq 'working') {
+        $RootBorder.Background  = $Theme.WorkingBg
+        $RootBorder.BorderBrush = $Theme.WorkingBorder
+        $RootBorder.BorderThickness = 1
+        $HeaderText.Foreground  = $Theme.WorkingHeader
+        $PermPanel.Background   = $Theme.PermBgNormal
+        $PermPanel.BorderBrush  = $Theme.PermBdNormal
+        $PermText.Foreground    = $Theme.PermTxtNormal
+        $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(56, 170, 100)
+        $RootGlow.BlurRadius    = 22
+        $RootGlow.Opacity       = 0.40
+    }
+    else {
         $RootBorder.Background  = $Theme.NormalBg
         $RootBorder.BorderBrush = $Theme.NormalBorder
         $RootBorder.BorderThickness = 1
@@ -503,7 +520,7 @@ $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
 $script:Hidden = $false
 $script:Pending = $false
-Set-AlertTheme $false
+Set-Theme 'idle'
 
 $AllowBtn.Add_Click({
     if (Invoke-AgentButton $Config.allowLabels) {
@@ -594,8 +611,9 @@ $timer.Add_Tick({
 
     if ($script:Hidden -and $hasPending) { $script:Hidden = $false }
 
-    # swap to the bright-yellow alert theme only on state change
-    if ($hasPending -ne $script:AlertOn) { Set-AlertTheme $hasPending; $script:AlertOn = $hasPending }
+    # pick the visual state: approval > working > idle, swap only on change
+    $desiredState = if ($hasPending) { 'alert' } elseif ($script:Busy -and $agentRunning) { 'working' } else { 'idle' }
+    if ($desiredState -ne $script:ThemeState) { Set-Theme $desiredState; $script:ThemeState = $desiredState }
 
     # content
     if ($hasPending) {
