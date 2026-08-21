@@ -60,8 +60,12 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $Config = [ordered]@{
     home          = $null
-    processNames  = @('Microsoft Scout', 'OpenClaw', 'Claw', 'Copilot')
-    windowHints   = @('Scout', 'Clawpilot', 'OpenClaw', 'Copilot')
+    processNames  = @('scout', 'Microsoft Scout', 'OpenClaw', 'Clawpilot', 'Claw')
+    windowHints   = @('Microsoft Scout', 'Clawpilot', 'OpenClaw')
+    # Browser processes are excluded from window-title matching so a browser tab
+    # whose title happens to contain a hint (e.g. an Edge tab named "Scout, ...")
+    # is never mistaken for the agent window.
+    browserProcs  = @('msedge', 'chrome', 'firefox', 'brave', 'opera', 'iexplore', 'vivaldi')
     # Order matters: first match is clicked, so the safest one-time "Allow" wins.
     allowLabels   = @('Allow', 'Allow for session', 'Allow everywhere', 'Always allow', 'Allow once', 'Approve', 'Accept', 'Continue', 'Yes')
     denyLabels    = @('Deny', 'Reject', 'Decline', 'Block', 'Cancel', 'No')
@@ -85,7 +89,32 @@ if (Test-Path $cfgPath) {
 }
 
 if ($env:SCOUT_COMPANION_HOME) { $Config.home = $env:SCOUT_COMPANION_HOME }
-if (-not $Config.home) { $Config.home = Join-Path $env:USERPROFILE '.copilot' }
+
+# Auto-detect the agent home. Different Scout/Clawpilot builds store their session
+# state in different roots (newer builds use %USERPROFILE%\.scout\copilot, older
+# ones used %USERPROFILE%\.copilot). If home isn't pinned via config/env, pick the
+# candidate whose session-state has the most recently written events.jsonl so we
+# always follow the build the user is actually running.
+if (-not $Config.home) {
+    $candidates = @(
+        (Join-Path $env:USERPROFILE '.scout\copilot'),
+        (Join-Path $env:USERPROFILE '.copilot')
+    )
+    $best = $null; $bestTime = [datetime]::MinValue
+    foreach ($c in $candidates) {
+        $sr = Join-Path $c 'session-state'
+        if (-not (Test-Path $sr)) { continue }
+        $newest = Get-ChildItem $sr -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'events.jsonl' } |
+            Where-Object { Test-Path $_ } |
+            ForEach-Object { (Get-Item $_).LastWriteTimeUtc } |
+            Sort-Object -Descending | Select-Object -First 1
+        if ($newest -and $newest -gt $bestTime) { $bestTime = $newest; $best = $c }
+    }
+    if ($best) { $Config.home = $best }
+    elseif (Test-Path (Join-Path $env:USERPROFILE '.scout\copilot')) { $Config.home = Join-Path $env:USERPROFILE '.scout\copilot' }
+    else { $Config.home = Join-Path $env:USERPROFILE '.copilot' }
+}
 
 $SessionRoot = Join-Path $Config.home 'session-state'
 
@@ -175,12 +204,16 @@ function Complete-Step([string]$id, [string]$reqId) {
 
 function Get-AgentWindow {
     $procs = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle }
+    # 1) Match by process name first (most reliable — a browser tab can't spoof this).
     foreach ($name in $Config.processNames) {
         $p = $procs | Where-Object { $_.ProcessName -ieq $name -or $_.ProcessName -like "*$name*" } | Select-Object -First 1
         if ($p) { return @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id } }
     }
+    # 2) Fall back to window-title hints, but skip browser processes so a tab
+    #    titled "Scout, ..." is never picked instead of the real app window.
+    $nonBrowser = $procs | Where-Object { $_.ProcessName -notin $Config.browserProcs }
     foreach ($hint in $Config.windowHints) {
-        $p = $procs | Where-Object { $_.MainWindowTitle -like "*$hint*" } | Select-Object -First 1
+        $p = $nonBrowser | Where-Object { $_.MainWindowTitle -like "*$hint*" } | Select-Object -First 1
         if ($p) { return @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id } }
     }
     return $null
@@ -196,16 +229,35 @@ function Test-AgentProcess {
     return $false
 }
 
+function Test-LiveLock {
+    # A session lock is only meaningful if the PID embedded in its name
+    # (inuse.<pid>.lock) belongs to a process that is still running. Stale lock
+    # files from crashed/closed sessions are ignored so we never latch onto an
+    # ancient session and report it as "active".
+    param([string]$dir)
+    $locks = Get-ChildItem $dir -Filter 'inuse.*.lock' -ErrorAction SilentlyContinue
+    foreach ($l in $locks) {
+        if ($l.BaseName -match 'inuse\.(\d+)') {
+            $procId = [int]$Matches[1]
+            if (Get-Process -Id $procId -ErrorAction SilentlyContinue) { return $true }
+        }
+    }
+    return $false
+}
+
 function Find-ActiveSession {
     if (-not (Test-Path $SessionRoot)) { return $null }
     $candidates = Get-ChildItem $SessionRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $ev = Join-Path $_.FullName 'events.jsonl'
         if (Test-Path $ev) {
-            $locked = (Get-ChildItem $_.FullName -Filter 'inuse.*.lock' -ErrorAction SilentlyContinue | Measure-Object).Count -gt 0
+            $locked = Test-LiveLock $_.FullName
             [pscustomobject]@{ Dir = $_.FullName; Events = $ev; Mtime = (Get-Item $ev).LastWriteTimeUtc; Locked = $locked }
         }
     }
     if (-not $candidates) { return $null }
+    # Prefer a session with a live lock, then the most recently written events file.
+    # If nothing has a live lock, fall back to plain recency so we still track the
+    # newest session.
     return $candidates | Sort-Object @{ Expression = 'Locked'; Descending = $true }, @{ Expression = 'Mtime'; Descending = $true } | Select-Object -First 1
 }
 
@@ -554,6 +606,7 @@ $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 # ---------------------------------------------------------------------------
 $script:Phase = 0.0
 $script:Busy  = $false
+$script:PrevBusy = $false
 $anim = New-Object System.Windows.Threading.DispatcherTimer
 $anim.Interval = [TimeSpan]::FromMilliseconds(50)
 $anim.Add_Tick({
@@ -636,7 +689,12 @@ $timer.Add_Tick({
     $script:Busy = (-not $hasPending) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
     $script:Pending = $hasPending
 
+    # The ✕ button only dismisses the CURRENT burst. Re-show automatically when a
+    # new approval arrives, or when a fresh working turn begins (idle -> busy edge),
+    # so closing it once doesn't mute the companion forever.
     if ($script:Hidden -and $hasPending) { $script:Hidden = $false }
+    if ($script:Hidden -and $script:Busy -and -not $script:PrevBusy) { $script:Hidden = $false }
+    $script:PrevBusy = $script:Busy
 
     # pick the visual state: approval > working > idle, swap only on change
     $desiredState = if ($hasPending) { 'alert' } elseif ($script:Busy -and $agentRunning) { 'working' } else { 'idle' }
@@ -670,6 +728,14 @@ $timer.Add_Tick({
     if ($hasPending) { $shouldShow = $true }
     elseif ($isActive -and $agentRunning -and ($isMinimized -or -not $isForeground)) { $shouldShow = $true }
     if ($script:Hidden) { $shouldShow = $false }
+
+    if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
+        try {
+            $dbg = "{0} show={1} pend={2} active={3} run={4} agent={5} fg={6} min={7} hidden={8} age={9} hwnd='{10}'" -f `
+                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, [int]$ageSec, ($win.Hwnd)
+            Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') -Value $dbg
+        } catch { }
+    }
 
     if ($shouldShow) {
         if (-not $Window.IsVisible) { $Window.Show() }
