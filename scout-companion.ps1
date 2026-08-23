@@ -30,6 +30,8 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
 # ---------------------------------------------------------------------------
 # Native interop: foreground/minimize detection, focus, and a11y wake.
@@ -53,6 +55,9 @@ if (-not ('ScoutNative' -as [type])) {
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern System.IntPtr SendMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool DestroyIcon(System.IntPtr hIcon);
 '@
 }
 
@@ -711,6 +716,123 @@ $OpenBtn.Add_Click({ Focus-Agent })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 
 # ---------------------------------------------------------------------------
+# Tray icon.
+#
+# The companion runs with no taskbar button and keeps its toast hidden most of
+# the time, so without this there is no way to tell it is running at all. The
+# icon doubles as the state indicator: it carries the same three colours as the
+# toast, so a glance at the tray answers "is Scout busy?".
+# ---------------------------------------------------------------------------
+$script:AnimPaused = $false
+
+function New-TrayIcon([string]$hex) {
+    # Drawn at runtime rather than shipped as a .ico, so the project stays a
+    # single script with no binary assets to keep in sync.
+    $fill = [System.Drawing.ColorTranslator]::FromHtml($hex)
+    $edge = [System.Drawing.Color]::FromArgb(200,
+        [Math]::Max(0, $fill.R - 70), [Math]::Max(0, $fill.G - 70), [Math]::Max(0, $fill.B - 70))
+
+    $bmp = New-Object System.Drawing.Bitmap 32, 32
+    $g   = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
+
+    $brush = New-Object System.Drawing.SolidBrush $fill
+    $pen   = New-Object System.Drawing.Pen $edge, 2.0
+    try {
+        # A quokka head: two ears over a round face. Recognisable at 16 px and
+        # distinct from the many other round tray icons.
+        foreach ($x in 4, 18) {
+            $g.FillEllipse($brush, $x, 2, 10, 11)
+            $g.DrawEllipse($pen,   $x, 2, 10, 11)
+        }
+        $g.FillEllipse($brush, 3, 8, 26, 22)
+        $g.DrawEllipse($pen,   3, 8, 26, 22)
+
+        # Eyes, in the edge colour so they read on any taskbar background.
+        $dark = New-Object System.Drawing.SolidBrush $edge
+        try {
+            $g.FillEllipse($dark, 10, 15, 5, 6)
+            $g.FillEllipse($dark, 18, 15, 5, 6)
+        } finally { $dark.Dispose() }
+    } finally {
+        $brush.Dispose(); $pen.Dispose(); $g.Dispose()
+    }
+
+    # GetHicon hands back an unmanaged handle; clone into a managed icon and
+    # release it immediately so repeated calls cannot leak GDI handles.
+    $h = $bmp.GetHicon()
+    try {
+        $icon = [System.Drawing.Icon]::FromHandle($h)
+        return [System.Drawing.Icon]$icon.Clone()
+    } finally {
+        [void][ScoutNative]::DestroyIcon($h)
+        $bmp.Dispose()
+    }
+}
+
+# Pre-built once per state: swapping a cached icon costs nothing, and nothing
+# is allocated on the hot path.
+$TrayIcons = @{
+    idle    = New-TrayIcon '#5B6780'
+    working = New-TrayIcon '#4ADE80'
+    alert   = New-TrayIcon '#FFD23D'
+}
+
+$Tray = New-Object System.Windows.Forms.NotifyIcon
+$Tray.Icon = $TrayIcons.idle
+$Tray.Text = 'Scout Companion - idle'
+$Tray.Visible = $true
+
+function Set-TrayState([string]$state, [string]$detail) {
+    if ($TrayIcons.ContainsKey($state)) { $Tray.Icon = $TrayIcons[$state] }
+    # NotifyIcon.Text is capped at 63 characters and throws above it.
+    $t = "Scout Companion - $detail"
+    if ($t.Length -gt 63) { $t = $t.Substring(0, 60) + '...' }
+    $Tray.Text = $t
+}
+
+function Stop-Companion {
+    # Every exit path funnels through here: an orphaned NotifyIcon lingers in
+    # the tray until the user hovers over it, which looks like a crash.
+    try { $timer.Stop() } catch { }
+    try { $anim.Stop() }  catch { }
+    try {
+        $Tray.Visible = $false
+        $Tray.Dispose()
+        foreach ($i in $TrayIcons.Values) { $i.Dispose() }
+    } catch { }
+    try { $Window.Close() } catch { }
+}
+
+$MenuShow  = New-Object System.Windows.Forms.ToolStripMenuItem 'Show toast'
+$MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem 'Open Scout'
+$MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem 'Pause animation'
+$MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
+$MenuPause.CheckOnClick = $true
+
+$MenuShow.Add_Click({ $script:Hidden = $false })
+$MenuOpen.Add_Click({ Focus-Agent })
+$MenuPause.Add_Click({
+    $script:AnimPaused = $MenuPause.Checked
+    if ($script:AnimPaused) { $anim.Stop(); Reset-Mascot }
+})
+$MenuExit.Add_Click({ Stop-Companion })
+
+$TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+[void]$TrayMenu.Items.Add($MenuShow)
+[void]$TrayMenu.Items.Add($MenuOpen)
+[void]$TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$TrayMenu.Items.Add($MenuPause)
+[void]$TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$TrayMenu.Items.Add($MenuExit)
+$Tray.ContextMenuStrip = $TrayMenu
+
+# Double-clicking the tray icon brings the agent forward, matching the toast's
+# "Open" button.
+$Tray.Add_MouseDoubleClick({ Focus-Agent })
+
+# ---------------------------------------------------------------------------
 # Quokka animation: a dedicated timer drives the mascot frame-by-frame.
 # Working => bobbing body + alternating "typing" paws. Idle => slow breathing.
 #
@@ -720,6 +842,14 @@ $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 $script:Phase = 0.0
 $script:Busy  = $false
 $script:PrevBusy = $false
+
+function Reset-Mascot {
+    # Neutral pose, used when the animation is paused or switched off.
+    $BodyT.Y = 0; $BodyT.X = 0
+    $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+    $LeftPawT.Y = 0; $RightPawT.Y = 0
+}
+
 $anim = New-Object System.Windows.Threading.DispatcherTimer
 $anim.Interval = [TimeSpan]::FromMilliseconds([int]$Config.animIntervalMs)
 # Phase steps are scaled so the mascot moves at the same speed regardless of the
@@ -804,8 +934,7 @@ $timer.Add_Tick({
         if (-not $script:AgentGoneSince) {
             $script:AgentGoneSince = [datetime]::UtcNow
         } elseif ((([datetime]::UtcNow - $script:AgentGoneSince).TotalSeconds) -ge [double]$Config.exitGraceSeconds) {
-            $timer.Stop(); $anim.Stop()
-            try { $Window.Close() } catch { }
+            Stop-Companion
             return
         }
     }
@@ -827,7 +956,16 @@ $timer.Add_Tick({
 
     # pick the visual state: approval > working > idle, swap only on change
     $desiredState = if ($hasPending) { 'alert' } elseif ($script:Busy -and $agentRunning) { 'working' } else { 'idle' }
-    if ($desiredState -ne $script:ThemeState) { Set-Theme $desiredState; $script:ThemeState = $desiredState }
+    if ($desiredState -ne $script:ThemeState) {
+        Set-Theme $desiredState
+        $script:ThemeState = $desiredState
+        $detail = switch ($desiredState) {
+            'alert'   { 'approval needed' }
+            'working' { 'Scout is working' }
+            default   { if ($agentRunning) { 'idle' } else { 'agent not detected' } }
+        }
+        Set-TrayState $desiredState $detail
+    }
 
     # content
     if ($hasPending) {
@@ -870,7 +1008,7 @@ $timer.Add_Tick({
         if (-not $Window.IsVisible) { $Window.Show() }
         $Window.Topmost = $true
         # Only animate while the toast is actually on screen.
-        if (-not $anim.IsEnabled) { $anim.Start() }
+        if (-not $anim.IsEnabled -and -not $script:AnimPaused) { $anim.Start() }
     } else {
         if ($anim.IsEnabled) { $anim.Stop() }
         if ($Window.IsVisible) { $Window.Hide() }
@@ -893,5 +1031,12 @@ $script:SessionScanUtc = [datetime]::UtcNow
 $timer.Start()
 
 $Window.Visibility = 'Hidden'
+# Make sure the tray icon never outlives the process, however it ends.
+$Window.Add_Closed({
+    try { $Tray.Visible = $false; $Tray.Dispose() } catch { }
+})
 $app = New-Object System.Windows.Application
+# The toast is the app: closing it exits, and any settings window opened from
+# the tray is free to come and go without taking the companion down with it.
+$app.ShutdownMode = [System.Windows.ShutdownMode]::OnMainWindowClose
 $app.Run($Window) | Out-Null
