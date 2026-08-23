@@ -21,9 +21,14 @@ no need to look at the text:
 | **Working** | 🟢 Calm dark **green** with a soft glow | The agent is actively running a task | <img src="docs/state-working.png" width="260"> |
 | **Idle** | ⚫ Dim **navy** (default) | The agent is connected but waiting / between turns | <img src="docs/state-idle.png" width="260"> |
 | **Approval needed** | 🟡 Bright pulsing **yellow** | The agent is asking for permission — Allow / Deny right here | <img src="docs/state-approval.png" width="260"> |
+| **Waiting on you** | 🔵 Bright pulsing **cyan** | The agent asked you a question and the turn is parked until you answer | <img src="docs/state-question.png" width="260"> |
 
 The tones are intentionally muted so green and idle sit harmoniously next to each other,
-while the approval yellow stays loud enough that you can't miss it.
+while the two "you are blocking me" colours stay loud enough that you can't miss them.
+
+Approval and question are deliberately different colours. An approval you can settle from
+the toast itself; a question you cannot — you have to go to the agent window and answer
+it. Telling them apart from across the room decides whether you need to get up.
 
 ---
 
@@ -58,6 +63,10 @@ place.
   Allow/Deny button inside the agent window for you (via UI Automation — no need to
   bring the window to the foreground). When approval is needed the whole toast turns a
   **bright pulsing yellow** so you can't miss it.
+- **Tells you when the agent is stuck on a question** — if the agent asks you something,
+  the turn is parked until you answer, exactly like an approval. The toast turns **cyan**,
+  shows the question and its options, and offers to bring the agent window forward. It
+  cannot answer for you, so it does not pretend to.
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
 - **Stays out of the way** — around 1.4% of one CPU core and a flat working set while
@@ -158,6 +167,7 @@ Scout Companion:
 2. **Tails `events.jsonl`** and interprets events:
    - `tool.execution_start` / `assistant.message` → current activity text
    - `permission.requested` / `permission.completed` → pending approvals
+   - `external_tool.requested` for an ask-the-user tool → pending question
 3. Detects the **agent window** from the running process list and checks whether it's
    minimized or in the foreground to decide when to show the toast.
 4. For approvals, it wakes the agent window's accessibility tree and invokes the
@@ -181,6 +191,7 @@ and edit. Common overrides:
 | `home` | auto-detected | Agent home folder |
 | `processNames` | `["Microsoft Scout","OpenClaw",...]` | Agent window process names |
 | `allowLabels` / `denyLabels` | `["Allow",...]` / `["Deny",...]` | Buttons to click for approvals |
+| `askToolNames` | `["m_ask_user","ask_user"]` | Tool names that mean "waiting for your answer" |
 | `activeWindowSeconds` | `150` | How long after the last event the session counts as "working" |
 | `pollIntervalMs` | `700` | Event/focus polling interval |
 | `sessionRescanMs` | `5000` | How often to re-resolve which session is active. Between rescans the companion just tails the file it already found |

@@ -80,6 +80,10 @@ $Config = [ordered]@{
     # Order matters: first match is clicked, so the safest one-time "Allow" wins.
     allowLabels   = @('Allow', 'Allow for session', 'Allow everywhere', 'Always allow', 'Allow once', 'Approve', 'Accept', 'Continue', 'Yes')
     denyLabels    = @('Deny', 'Reject', 'Decline', 'Block', 'Cancel', 'No')
+    # External tools that mean "the agent is waiting for you to answer something".
+    # These block the turn exactly like an approval does, but the companion cannot
+    # answer them for you - it can only tell you they are waiting.
+    askToolNames  = @('m_ask_user', 'ask_user')
     activeWindowSeconds = 150
     pollIntervalMs      = 700
     # A full rescan of every session folder is expensive on machines with a long
@@ -175,6 +179,7 @@ $State = [pscustomobject]@{
     TurnActive      = $false
     LastEventUtc    = [datetime]::MinValue
     PendingPerms    = [ordered]@{}
+    PendingAsks     = [ordered]@{}                # questions waiting on the user
     AgentHwnd       = [IntPtr]::Zero
 }
 
@@ -402,6 +407,7 @@ function Read-NewEvents {
             $State.EventsPath = $sess.Events
             $State.Offset     = (New-Object System.IO.FileInfo $sess.Events).Length
             $State.PendingPerms = [ordered]@{}
+            $State.PendingAsks  = [ordered]@{}
             $State.Steps.Clear()
             $State.Saying = $null
             $State.TurnActive = $false
@@ -446,11 +452,30 @@ function Handle-Event($evt) {
             Complete-Step $evt.data.toolCallId $null
         }
         'external_tool.requested' {
-            $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
-            Add-Step $evt.data.toolCallId $evt.data.requestId $desc
+            # An "ask the user" tool is not progress, it is a stop: the turn is
+            # parked until someone answers. Surface it like an approval rather
+            # than burying it in the step list.
+            if ($Config.askToolNames -contains $evt.data.toolName) {
+                $q = $evt.data.arguments.question
+                if (-not $q) { $q = $evt.data.arguments.prompt }
+                if (-not $q) { $q = 'The agent is waiting for your answer.' }
+                $choices = @()
+                foreach ($a in @($evt.data.arguments.answers)) {
+                    if ($a -and $a.title) { $choices += $a.title }
+                }
+                $State.PendingAsks[$evt.data.requestId] = @{
+                    text    = (Truncate $q 280)
+                    choices = $choices
+                }
+            } else {
+                $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
+                Add-Step $evt.data.toolCallId $evt.data.requestId $desc
+            }
         }
         'external_tool.completed' {
-            Complete-Step $null $evt.data.requestId
+            $id = $evt.data.requestId
+            if ($State.PendingAsks.Contains($id)) { $State.PendingAsks.Remove($id) }
+            else { Complete-Step $null $id }
         }
         'permission.requested' {
             $req = $evt.data.permissionRequest
@@ -605,6 +630,9 @@ function Focus-Agent {
                     Background="#FF3A2730" Foreground="#FFF0B4B4" BorderThickness="0" Cursor="Hand"/>
             <Button x:Name="AllowBtn" Content="Allow" Width="90" Height="28"
                     Background="#FF2E7D46" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold" Cursor="Hand"/>
+            <Button x:Name="AnswerBtn" Content="Answer in Scout" Width="140" Height="28"
+                    Background="#FF0E7FB8" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold"
+                    Cursor="Hand" Visibility="Collapsed"/>
           </StackPanel>
         </StackPanel>
       </Border>
@@ -626,6 +654,7 @@ $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
 $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
+$AnswerBtn    = $Window.FindName('AnswerBtn')
 $OpenBtn      = $Window.FindName('OpenBtn')
 $CloseBtn     = $Window.FindName('CloseBtn')
 $SettingsBtn  = $Window.FindName('SettingsBtn')
@@ -647,12 +676,17 @@ $Theme = @{
     NormalBg      = B '#FF1B1F2A'; NormalBorder  = B '#FF3A4358'; NormalHeader  = B '#FFE6EAF2'
     WorkingBg     = B '#FF18261D'; WorkingBorder = B '#FF3C6B4C'; WorkingHeader = B '#FFE6F2EA'
     AlertBg       = B '#FFFFD23D'; AlertBorder   = B '#FFFF7A00'; AlertHeader   = B '#FF3A2600'
+    # Questions get their own colour rather than sharing the approval yellow:
+    # an approval can be answered from the toast, a question cannot, so telling
+    # them apart from across the room decides whether you have to walk over.
+    AskBg         = B '#FF5CC8F5'; AskBorder     = B '#FF0E7FB8'; AskHeader     = B '#FF06263A'
     PermBgNormal  = B '#FF2A2030'; PermBdNormal  = B '#FFB4843C'; PermTxtNormal = B '#FFD6CFC2'
     PermBgAlert   = B '#FFFFFFFF'; PermBdAlert   = B '#FFFF7A00'; PermTxtAlert  = B '#FF3A2E10'
+    PermBgAsk     = B '#FFFFFFFF'; PermBdAsk     = B '#FF0E7FB8'; PermTxtAsk    = B '#FF10303F'
 }
 $script:ThemeState = $null
 
-# state: 'alert' (approval), 'working' (busy), 'idle' (default/dim)
+# state: 'alert' (approval), 'ask' (question), 'working' (busy), 'idle' (default/dim)
 function Set-Theme([string]$state) {
     if ($state -eq 'alert') {
         $RootBorder.Background  = $Theme.AlertBg
@@ -662,7 +696,21 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAlert
         $PermPanel.BorderBrush  = $Theme.PermBdAlert
         $PermText.Foreground    = $Theme.PermTxtAlert
+        $PermTitle.Foreground   = $Theme.AlertHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(255, 176, 0)
+        $RootGlow.BlurRadius    = 20
+        $RootGlow.Opacity       = 0.55
+    }
+    elseif ($state -eq 'ask') {
+        $RootBorder.Background  = $Theme.AskBg
+        $RootBorder.BorderBrush = $Theme.AskBorder
+        $RootBorder.BorderThickness = 2
+        $HeaderText.Foreground  = $Theme.AskHeader
+        $PermPanel.Background   = $Theme.PermBgAsk
+        $PermPanel.BorderBrush  = $Theme.PermBdAsk
+        $PermText.Foreground    = $Theme.PermTxtAsk
+        $PermTitle.Foreground   = $Theme.AskHeader
+        $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 150, 210)
         $RootGlow.BlurRadius    = 20
         $RootGlow.Opacity       = 0.55
     }
@@ -674,6 +722,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(56, 170, 100)
         $RootGlow.BlurRadius    = 22
         $RootGlow.Opacity       = 0.40
@@ -686,6 +735,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 0, 0)
         $RootGlow.BlurRadius    = 20
         $RootGlow.Opacity       = 0.55
@@ -706,6 +756,7 @@ $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
 $script:Hidden = $false
 $script:Pending = $false
+$script:Asking = $false
 $script:AgentGoneSince = $null
 Set-Theme 'idle'
 
@@ -720,6 +771,7 @@ $DenyBtn.Add_Click({
     } else { Focus-Agent }
 })
 $OpenBtn.Add_Click({ Focus-Agent })
+$AnswerBtn.Add_Click({ Focus-Agent })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
 
@@ -1146,6 +1198,7 @@ function Rebuild-TrayIcons([string]$species) {
         idle    = New-TrayIcon '#5B6780' $species
         working = New-TrayIcon '#4ADE80' $species
         alert   = New-TrayIcon '#FFD23D' $species
+        ask     = New-TrayIcon '#5CC8F5' $species
     }
     $script:TrayIconSpecies = $species
     # Point the tray at the new set before freeing the old one.
@@ -1563,8 +1616,8 @@ $anim.Interval = [TimeSpan]::FromMilliseconds([int]$Config.animIntervalMs)
 # configured frame rate.
 $script:PhaseScale = [double]$Config.animIntervalMs / 50.0
 $anim.Add_Tick({
-    if ($script:Pending) {
-        # gentle attention pulse on the yellow alert glow
+    if ($script:Pending -or $script:Asking) {
+        # gentle attention pulse on the glow, whichever colour it is wearing
         $script:Phase += 0.20 * $script:PhaseScale
         $puls = ([Math]::Sin($script:Phase * 3.0) + 1.0) / 2.0
         $RootGlow.BlurRadius = 16 + $puls * 18
@@ -1647,27 +1700,36 @@ $timer.Add_Tick({
     }
 
     $hasPending = $State.PendingPerms.Count -gt 0
+    $hasAsk     = $State.PendingAsks.Count -gt 0
     $ageSec = ([datetime]::UtcNow - $State.LastEventUtc).TotalSeconds
     $running = ($State.Steps | Where-Object { -not $_.Done } | Measure-Object).Count -gt 0
-    $isActive = $hasPending -or $running -or ($State.TurnActive) -or ($State.EventsPath -and $ageSec -le [double]$Config.activeWindowSeconds)
+    $isActive = $hasPending -or $hasAsk -or $running -or ($State.TurnActive) -or ($State.EventsPath -and $ageSec -le [double]$Config.activeWindowSeconds)
 
-    $script:Busy = (-not $hasPending) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
+    # A question parks the turn just like an approval does, so neither counts as
+    # "busy" - the mascot should be waiting, not typing.
+    $script:Busy = (-not $hasPending) -and (-not $hasAsk) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
     $script:Pending = $hasPending
+    $script:Asking  = $hasAsk
 
     # The ✕ button only dismisses the CURRENT burst. Re-show automatically when a
-    # new approval arrives, or when a fresh working turn begins (idle -> busy edge),
-    # so closing it once doesn't mute the companion forever.
-    if ($script:Hidden -and $hasPending) { $script:Hidden = $false }
+    # new approval or question arrives, or when a fresh working turn begins
+    # (idle -> busy edge), so closing it once doesn't mute the companion forever.
+    if ($script:Hidden -and ($hasPending -or $hasAsk)) { $script:Hidden = $false }
     if ($script:Hidden -and $script:Busy -and -not $script:PrevBusy) { $script:Hidden = $false }
     $script:PrevBusy = $script:Busy
 
-    # pick the visual state: approval > working > idle, swap only on change
-    $desiredState = if ($hasPending) { 'alert' } elseif ($script:Busy -and $agentRunning) { 'working' } else { 'idle' }
+    # pick the visual state: approval > question > working > idle, swap only on
+    # change. Approval outranks a question because the toast can act on it.
+    $desiredState = if ($hasPending) { 'alert' }
+                    elseif ($hasAsk) { 'ask' }
+                    elseif ($script:Busy -and $agentRunning) { 'working' }
+                    else { 'idle' }
     if ($desiredState -ne $script:ThemeState) {
         Set-Theme $desiredState
         $script:ThemeState = $desiredState
         $detail = switch ($desiredState) {
             'alert'   { 'approval needed' }
+            'ask'     { 'waiting on your answer' }
             'working' { 'Scout is working' }
             default   { if ($agentRunning) { 'idle' } else { 'agent not detected' } }
         }
@@ -1679,13 +1741,37 @@ $timer.Add_Tick({
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
         $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
         $HeaderText.Text = "Approval needed$extra"
+        $PermTitle.Text  = [char]0x26A0 + ' Permission requested'
         $PermText.Text = $first.text
+        $AllowBtn.Visibility  = 'Visible'
+        $DenyBtn.Visibility   = 'Visible'
+        $AnswerBtn.Visibility = 'Collapsed'
         $PermPanel.Visibility = 'Visible'
         $Dot.Fill = '#FFB45309'
         # keep the yellow alert focused: hide the step list and narration
         $SayingText.Visibility = 'Collapsed'
         $StepsPanel.Visibility = 'Collapsed'
-    } else {
+    }
+    elseif ($hasAsk) {
+        $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
+        $extra = if ($State.PendingAsks.Count -gt 1) { " (+$($State.PendingAsks.Count - 1))" } else { '' }
+        $HeaderText.Text = "Waiting on you$extra"
+        $PermTitle.Text  = [char]0x2753 + ' The agent asked you a question'
+        $body = $first.text
+        if ($first.choices -and $first.choices.Count) {
+            $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
+        }
+        $PermText.Text = Truncate $body 320
+        # The companion cannot answer for you, so it offers the one useful action.
+        $AllowBtn.Visibility  = 'Collapsed'
+        $DenyBtn.Visibility   = 'Collapsed'
+        $AnswerBtn.Visibility = 'Visible'
+        $PermPanel.Visibility = 'Visible'
+        $Dot.Fill = '#FF0E7FB8'
+        $SayingText.Visibility = 'Collapsed'
+        $StepsPanel.Visibility = 'Collapsed'
+    }
+    else {
         $PermPanel.Visibility = 'Collapsed'
         if (-not $agentRunning) { $HeaderText.Text = 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
         elseif ($script:Busy)   { $HeaderText.Text = 'Working hard...';     $Dot.Fill = '#FF4ADE80' }
@@ -1699,14 +1785,14 @@ $timer.Add_Tick({
 
     # visibility policy
     $shouldShow = $false
-    if ($hasPending) { $shouldShow = $true }
+    if ($hasPending -or $hasAsk) { $shouldShow = $true }
     elseif ($isActive -and $agentRunning -and ($isMinimized -or -not $isForeground)) { $shouldShow = $true }
     if ($script:Hidden) { $shouldShow = $false }
 
     if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
         try {
-            $dbg = "{0} show={1} pend={2} active={3} run={4} agent={5} fg={6} min={7} hidden={8} age={9} hwnd='{10}'" -f `
-                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, [int]$ageSec, ($win.Hwnd)
+            $dbg = "{0} show={1} pend={2} ask={3} active={4} run={5} agent={6} fg={7} min={8} hidden={9} age={10} hwnd='{11}'" -f `
+                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, [int]$ageSec, ($win.Hwnd)
             Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') -Value $dbg
         } catch { }
     }
