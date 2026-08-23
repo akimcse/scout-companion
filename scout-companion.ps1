@@ -735,159 +735,166 @@ $SettingsBtn.Add_Click({ Show-SettingsWindow })
 # Every head carries a thin stroke in its own shade colour, otherwise pale
 # mascots vanish against the bright yellow approval background.
 # ---------------------------------------------------------------------------
+# Shared "cute face" kit. The proportions matter more than the species: big
+# eyes set low on the head, a bright highlight plus a small secondary one, soft
+# blush, and a small mouth kept above y=40 so the laptop never covers it. Every
+# mascot uses the same eyes, which is what makes them read as a family.
+function New-CuteEyes($p) {
+    # Dark rim, coloured iris, dark pupil, one big highlight and one small: the
+    # layering that reads as a glossy eye even at 14 px across.
+    @"
+      <Ellipse Canvas.Left="10.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
+      <Ellipse Canvas.Left="33.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
+      <Ellipse Canvas.Left="11.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
+      <Ellipse Canvas.Left="34.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
+      <Ellipse Canvas.Left="14.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
+      <Ellipse Canvas.Left="37.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
+      <Ellipse Canvas.Left="12.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="35.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="19.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+      <Ellipse Canvas.Left="42.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+"@
+}
+
+function New-Blush($p) {
+    @"
+      <Ellipse Canvas.Left="3.5" Canvas.Top="27.5" Width="11.5" Height="7" Fill="$($p.blush)" Opacity="0.5"/>
+      <Ellipse Canvas.Left="43"  Canvas.Top="27.5" Width="11.5" Height="7" Fill="$($p.blush)" Opacity="0.5"/>
+"@
+}
+
+# A small rounded muzzle: nose plus the little curved mouth under it. Kept above
+# y=39 so the laptop never swallows the expression.
+function New-Snout($p, [double]$noseW = 8, [double]$noseY = 30.5) {
+    $x = 29 - $noseW / 2
+    $m = $noseY + 5
+    @"
+      <Ellipse Canvas.Left="$x" Canvas.Top="$noseY" Width="$noseW" Height="5" Fill="$($p.nose)"/>
+      <Path Stroke="$($p.nose)" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M29,$m Q25,$($m + 3.2) 22.5,$m M29,$m Q33,$($m + 3.2) 35.5,$m"/>
+"@
+}
+
 function New-CatHead($p) {
     $patches = ''
     if ($p.patchA) {
-        # Calico-style patches: one over an ear and eye, one on the opposite cheek.
+        # Calico-style patches: one over an ear, one on the opposite cheek.
         $patches = @"
-      <Path Fill="$($p.patchA)" Data="M12,12 Q22,6 27,14 Q20,24 11,22 Z"/>
-      <Path Fill="$($p.patchB)" Data="M46,16 Q50,26 42,32 Q36,26 39,17 Z"/>
+      <Path Fill="$($p.patchA)" Data="M11,14 Q22,6 28,15 Q20,25 10,23 Z"/>
+      <Path Fill="$($p.patchB)" Data="M47,17 Q52,27 44,33 Q38,26 41,18 Z"/>
 "@
     }
     $mask = ''
     if ($p.mask) {
-        # Siamese-style points: a darker mask around the muzzle.
-        $mask = "      <Ellipse Canvas.Left=`"17`" Canvas.Top=`"22`" Width=`"24`" Height=`"20`" Fill=`"$($p.mask)`"/>"
+        # Siamese-style points.
+        $mask = "      <Ellipse Canvas.Left=`"16`" Canvas.Top=`"23`" Width=`"26`" Height=`"22`" Fill=`"$($p.mask)`"/>"
     }
     @"
-      <Polygon Points="9,20 13,2 25,13"  Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Polygon Points="49,20 45,2 33,13" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Polygon Points="13,17 15,7 21,14"  Fill="$($p.earInner)"/>
-      <Polygon Points="45,17 43,7 37,14" Fill="$($p.earInner)"/>
-      <Ellipse Canvas.Left="5" Canvas.Top="10" Width="48" Height="38" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Polygon Points="11,20 16,2 27,13" Fill="$($p.ear)" Stroke="$($p.ear)" StrokeThickness="4" StrokeLineJoin="Round"/>
+      <Polygon Points="47,20 42,2 31,13" Fill="$($p.ear)" Stroke="$($p.ear)" StrokeThickness="4" StrokeLineJoin="Round"/>
+      <Polygon Points="14,17 17,7 22,13" Fill="$($p.earInner)" Stroke="$($p.earInner)" StrokeThickness="2.6" StrokeLineJoin="Round"/>
+      <Polygon Points="44,17 41,7 36,13" Fill="$($p.earInner)" Stroke="$($p.earInner)" StrokeThickness="2.6" StrokeLineJoin="Round"/>
+      <Ellipse Canvas.Left="3" Canvas.Top="4" Width="52" Height="39" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
 $patches
 $mask
-      <Ellipse Canvas.Left="12" Canvas.Top="22" Width="11" Height="12" Fill="$($p.eye)"/>
-      <Ellipse Canvas.Left="35" Canvas.Top="22" Width="11" Height="12" Fill="$($p.eye)"/>
-      <Ellipse Canvas.Left="15.5" Canvas.Top="24" Width="4" Height="9" Fill="#FF1E1A18"/>
-      <Ellipse Canvas.Left="38.5" Canvas.Top="24" Width="4" Height="9" Fill="#FF1E1A18"/>
-      <Ellipse Canvas.Left="16.6" Canvas.Top="25" Width="2.6" Height="2.6" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="39.6" Canvas.Top="25" Width="2.6" Height="2.6" Fill="#FFFFFFFF"/>
-      <Polygon Points="26,34 32,34 29,38" Fill="$($p.nose)"/>
-      <Path Stroke="$($p.shade)" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-            Data="M29,38 Q25,42 22,38 M29,38 Q33,42 36,38"/>
-      <Path Stroke="$($p.shade)" StrokeThickness="0.9" Opacity="0.75"
-            Data="M4,31 L15,33 M4,36 L15,36 M54,31 L43,33 M54,36 L43,36"/>
+$(New-Blush $p)
+$(New-CuteEyes $p)
+$(New-Snout $p 8 30.5)
+      <Path Stroke="$($p.shade)" StrokeThickness="0.9" Opacity="0.5" StrokeStartLineCap="Round"
+            Data="M1,25 L8,26.5 M1,31 L8,30.5 M57,25 L50,26.5 M57,31 L50,30.5"/>
 "@
 }
 
 function New-QuokkaHead($p) {
     @"
-      <Ellipse Canvas.Left="8"  Canvas.Top="1"  Width="16" Height="18" Fill="$($p.ear)"/>
-      <Ellipse Canvas.Left="32" Canvas.Top="1"  Width="16" Height="18" Fill="$($p.ear)"/>
-      <Ellipse Canvas.Left="12" Canvas.Top="5"  Width="8"  Height="10" Fill="$($p.earInner)"/>
-      <Ellipse Canvas.Left="36" Canvas.Top="5"  Width="8"  Height="10" Fill="$($p.earInner)"/>
-      <Ellipse Canvas.Left="6"  Canvas.Top="9"  Width="44" Height="43" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Ellipse Canvas.Left="15" Canvas.Top="25" Width="26" Height="25" Fill="$($p.muzzle)"/>
-      <Ellipse Canvas.Left="11" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
-      <Ellipse Canvas.Left="36" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
-      <Line X1="8"  Y1="21" X2="14" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
-      <Line X1="48" Y1="21" X2="42" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
-      <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
-      <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
-      <Ellipse Canvas.Left="17" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
-      <Ellipse Canvas.Left="32" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
-      <Ellipse Canvas.Left="18.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="33.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
-      <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
-      <Line X1="26.5" Y1="25.5" X2="29.5" Y2="25.5" Stroke="#FF242424" StrokeThickness="2.2"/>
-      <Ellipse Canvas.Left="15" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
-      <Ellipse Canvas.Left="30" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
-      <Ellipse Canvas.Left="24" Canvas.Top="30" Width="8"  Height="5"  Fill="$($p.nose)"/>
-      <Path Stroke="$($p.nose)" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-            Data="M20,35 Q28,42 36,35"/>
+      <Ellipse Canvas.Left="5"  Canvas.Top="1" Width="16" Height="17" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="37" Canvas.Top="1" Width="16" Height="17" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="8.5"  Canvas.Top="4.5" Width="9" Height="10" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="40.5" Canvas.Top="4.5" Width="9" Height="10" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="3" Canvas.Top="4" Width="52" Height="39" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="17" Canvas.Top="25" Width="24" Height="17" Fill="$($p.muzzle)"/>
+$(New-Blush $p)
+$(New-CuteEyes $p)
+      <Line X1="8.8" Y1="19.5" X2="3.5" Y2="16.5" Stroke="#FF33302E" StrokeThickness="1.6"/>
+      <Line X1="49.2" Y1="19.5" X2="54.5" Y2="16.5" Stroke="#FF33302E" StrokeThickness="1.6"/>
+      <Ellipse Canvas.Left="8.8"  Canvas.Top="13.8" Width="17.4" Height="17.4" Stroke="#FF33302E" StrokeThickness="1.9" Fill="#12EAF7FF"/>
+      <Ellipse Canvas.Left="31.8" Canvas.Top="13.8" Width="17.4" Height="17.4" Stroke="#FF33302E" StrokeThickness="1.9" Fill="#12EAF7FF"/>
+      <Line X1="26.2" Y1="22.5" X2="31.8" Y2="22.5" Stroke="#FF33302E" StrokeThickness="1.9"/>
+$(New-Snout $p 8 30.5)
 "@
 }
 
 function New-DogHead($p) {
     @"
-      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M8,22 L11,3 L24,14 Z"/>
-      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M50,22 L47,3 L34,14 Z"/>
-      <Path Fill="$($p.earInner)" Data="M12,18 L14,8 L20,15 Z"/>
-      <Path Fill="$($p.earInner)" Data="M46,18 L44,8 L38,15 Z"/>
-      <Ellipse Canvas.Left="5"  Canvas.Top="11" Width="48" Height="37" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Ellipse Canvas.Left="14" Canvas.Top="26" Width="30" Height="21" Fill="$($p.muzzle)"/>
-      <Ellipse Canvas.Left="10" Canvas.Top="20" Width="12" Height="9" Fill="$($p.muzzle)" Opacity="0.85"/>
-      <Ellipse Canvas.Left="36" Canvas.Top="20" Width="12" Height="9" Fill="$($p.muzzle)" Opacity="0.85"/>
-      <Ellipse Canvas.Left="15" Canvas.Top="21" Width="7" Height="9" Fill="#FF231C18"/>
-      <Ellipse Canvas.Left="36" Canvas.Top="21" Width="7" Height="9" Fill="#FF231C18"/>
-      <Ellipse Canvas.Left="16.3" Canvas.Top="22.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="37.3" Canvas.Top="22.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="24" Canvas.Top="30" Width="10" Height="7" Fill="$($p.nose)"/>
-      <Path Stroke="$($p.shade)" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-            Data="M29,37 L29,40 M29,40 Q24,44 21,39 M29,40 Q34,44 37,39"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.ear)" StrokeThickness="4" StrokeLineJoin="Round" Data="M9,21 L14,2 L26,13 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.ear)" StrokeThickness="4" StrokeLineJoin="Round" Data="M49,21 L44,2 L32,13 Z"/>
+      <Path Fill="$($p.earInner)" Stroke="$($p.earInner)" StrokeThickness="2.4" StrokeLineJoin="Round" Data="M13,17 L16,7 L21,13 Z"/>
+      <Path Fill="$($p.earInner)" Stroke="$($p.earInner)" StrokeThickness="2.4" StrokeLineJoin="Round" Data="M45,17 L42,7 L37,13 Z"/>
+      <Ellipse Canvas.Left="3" Canvas.Top="4" Width="52" Height="39" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="15" Canvas.Top="23" Width="28" Height="19" Fill="$($p.muzzle)"/>
+      <Ellipse Canvas.Left="7"  Canvas.Top="13" Width="14" Height="12" Fill="$($p.muzzle)" Opacity="0.55"/>
+      <Ellipse Canvas.Left="37" Canvas.Top="13" Width="14" Height="12" Fill="$($p.muzzle)" Opacity="0.55"/>
+$(New-Blush $p)
+$(New-CuteEyes $p)
+$(New-Snout $p 9 30)
 "@
 }
 
 function New-FoxHead($p) {
     @"
-      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M7,21 L10,1 L25,13 Z"/>
-      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M51,21 L48,1 L33,13 Z"/>
-      <Path Fill="#FF2E2A28" Data="M10,10 L10,1 L17,7 Z"/>
-      <Path Fill="#FF2E2A28" Data="M48,10 L48,1 L41,7 Z"/>
-      <Path Fill="$($p.earInner)" Data="M12,17 L14,7 L21,14 Z"/>
-      <Path Fill="$($p.earInner)" Data="M46,17 L44,7 L37,14 Z"/>
-      <Ellipse Canvas.Left="5" Canvas.Top="11" Width="48" Height="36" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Path Fill="$($p.muzzle)" Data="M16,28 Q29,24 42,28 Q40,46 29,47 Q18,46 16,28 Z"/>
-      <Ellipse Canvas.Left="14" Canvas.Top="22" Width="8" Height="9" Fill="#FF2B211C"/>
-      <Ellipse Canvas.Left="36" Canvas.Top="22" Width="8" Height="9" Fill="#FF2B211C"/>
-      <Ellipse Canvas.Left="15.4" Canvas.Top="23.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="37.4" Canvas.Top="23.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="25" Canvas.Top="33" Width="8" Height="6" Fill="$($p.nose)"/>
-      <Path Stroke="$($p.shade)" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-            Data="M29,39 Q25,43 22,39 M29,39 Q33,43 36,39"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.ear)" StrokeThickness="3.6" StrokeLineJoin="Round" Data="M8,20 L12,1 L26,12 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.ear)" StrokeThickness="3.6" StrokeLineJoin="Round" Data="M50,20 L46,1 L32,12 Z"/>
+      <Path Fill="#FF3A322E" Stroke="#FF3A322E" StrokeThickness="2.4" StrokeLineJoin="Round" Data="M11,9 L12,1 L18,6 Z"/>
+      <Path Fill="#FF3A322E" Stroke="#FF3A322E" StrokeThickness="2.4" StrokeLineJoin="Round" Data="M47,9 L46,1 L40,6 Z"/>
+      <Path Fill="$($p.earInner)" Stroke="$($p.earInner)" StrokeThickness="2.2" StrokeLineJoin="Round" Data="M13,16 L15,7 L21,12 Z"/>
+      <Path Fill="$($p.earInner)" Stroke="$($p.earInner)" StrokeThickness="2.2" StrokeLineJoin="Round" Data="M45,16 L43,7 L37,12 Z"/>
+      <Ellipse Canvas.Left="3" Canvas.Top="4" Width="52" Height="39" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Path Fill="$($p.muzzle)" Data="M15,25 Q29,20 43,25 Q41,44 29,45 Q17,44 15,25 Z"/>
+$(New-Blush $p)
+$(New-CuteEyes $p)
+$(New-Snout $p 8 30.5)
 "@
 }
 
 function New-BunnyHead($p) {
     @"
-      <Ellipse Canvas.Left="13" Canvas.Top="0"  Width="11" Height="24" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Ellipse Canvas.Left="34" Canvas.Top="0"  Width="11" Height="24" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Ellipse Canvas.Left="15.6" Canvas.Top="3" Width="6" Height="18" Fill="$($p.earInner)"/>
-      <Ellipse Canvas.Left="36.6" Canvas.Top="3" Width="6" Height="18" Fill="$($p.earInner)"/>
-      <Ellipse Canvas.Left="7"  Canvas.Top="17" Width="44" Height="33" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Ellipse Canvas.Left="16" Canvas.Top="24" Width="9" Height="11" Fill="#FF2A2320"/>
-      <Ellipse Canvas.Left="33" Canvas.Top="24" Width="9" Height="11" Fill="#FF2A2320"/>
-      <Ellipse Canvas.Left="17.6" Canvas.Top="25.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="34.6" Canvas.Top="25.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="25" Canvas.Top="35" Width="8" Height="6" Fill="$($p.nose)"/>
-      <Path Stroke="$($p.shade)" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-            Data="M29,41 L29,43 M29,43 Q25,46 23,43 M29,43 Q33,46 35,43"/>
-      <Path Stroke="$($p.shade)" StrokeThickness="0.9" Opacity="0.7" Data="M6,36 L17,37 M52,36 L41,37"/>
+      <Ellipse Canvas.Left="12" Canvas.Top="0" Width="12" Height="21" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="34" Canvas.Top="0" Width="12" Height="21" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="14.8" Canvas.Top="2.5" Width="6.4" Height="15.5" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="36.8" Canvas.Top="2.5" Width="6.4" Height="15.5" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="3" Canvas.Top="9" Width="52" Height="35" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+$(New-Blush $p)
+$(New-CuteEyes $p)
+      <Path Fill="$($p.nose)" Data="M25.5,30.5 Q29,29 32.5,30.5 Q29,35 25.5,30.5 Z"/>
+      <Path Stroke="$($p.nose)" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M29,34 L29,35.6 M29,35.6 Q25.5,37.8 24,35.4 M29,35.6 Q32.5,37.8 34,35.4"/>
 "@
 }
 
 function New-PenguinHead($p) {
     @"
-      <Ellipse Canvas.Left="6"  Canvas.Top="8"  Width="46" Height="42" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Path Fill="$($p.muzzle)" Data="M15,20 Q29,12 43,20 Q45,42 29,48 Q13,42 15,20 Z"/>
-      <Ellipse Canvas.Left="16" Canvas.Top="21" Width="9" Height="11" Fill="#FF17171A"/>
-      <Ellipse Canvas.Left="33" Canvas.Top="21" Width="9" Height="11" Fill="#FF17171A"/>
-      <Ellipse Canvas.Left="17.6" Canvas.Top="22.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="34.6" Canvas.Top="22.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
-      <Path Fill="$($p.nose)" Data="M22,34 L36,34 L29,43 Z"/>
-      <Path Fill="$($p.ear)" Opacity="0.55" Data="M11,28 Q6,22 9,16 Q14,20 15,27 Z"/>
-      <Path Fill="$($p.ear)" Opacity="0.55" Data="M47,28 Q52,22 49,16 Q44,20 43,27 Z"/>
+      <Ellipse Canvas.Left="3" Canvas.Top="3" Width="52" Height="40" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Path Fill="$($p.ear)" Opacity="0.6" Data="M8,28 Q2,20 6,12 Q12,17 13,27 Z"/>
+      <Path Fill="$($p.ear)" Opacity="0.6" Data="M50,28 Q56,20 52,12 Q46,17 45,27 Z"/>
+      <Path Fill="$($p.muzzle)" Data="M9,17 Q29,7 49,17 Q50,41 29,46 Q8,41 9,17 Z"/>
+$(New-Blush $p)
+$(New-CuteEyes $p)
+      <Path Fill="$($p.nose)" Data="M23,30.5 L35,30.5 L29,37.5 Z"/>
 "@
 }
 
 function New-TunaHead($p) {
     @"
-      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M4,18 L14,29 L4,40 Q1,29 4,18 Z"/>
-      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M54,18 L44,29 L54,40 Q57,29 54,18 Z"/>
-      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M23,9 Q29,1 35,9 Z"/>
-      <Ellipse Canvas.Left="9" Canvas.Top="9" Width="40" Height="38" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Path Fill="$($p.muzzle)" Data="M13,30 Q29,24 45,30 Q42,47 29,48 Q16,47 13,30 Z"/>
-      <Path Stroke="$($p.shade)" StrokeThickness="1.2" Opacity="0.8" Data="M14,17 Q29,13 44,17 M12,23 Q29,19 46,23"/>
-      <Ellipse Canvas.Left="14" Canvas.Top="21" Width="12" Height="12" Fill="#FFFFFFFF" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Ellipse Canvas.Left="32" Canvas.Top="21" Width="12" Height="12" Fill="#FFFFFFFF" Stroke="$($p.shade)" StrokeThickness="1"/>
-      <Ellipse Canvas.Left="17" Canvas.Top="24" Width="6.5" Height="6.5" Fill="#FF14181F"/>
-      <Ellipse Canvas.Left="35" Canvas.Top="24" Width="6.5" Height="6.5" Fill="#FF14181F"/>
-      <Ellipse Canvas.Left="18.4" Canvas.Top="25" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="36.4" Canvas.Top="25" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
-      <Path Stroke="$($p.nose)" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-            Data="M24,39 Q29,44 34,39"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M2,14 L13,26 L2,39 Q-1,26 2,14 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M56,14 L45,26 L56,39 Q59,26 56,14 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M21,5 Q29,-2 37,5 Z"/>
+      <Ellipse Canvas.Left="5" Canvas.Top="3" Width="48" Height="40" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Path Fill="$($p.muzzle)" Data="M9,26 Q29,18 49,26 Q47,43 29,45 Q11,43 9,26 Z"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="1.1" Opacity="0.5" Data="M9,12 Q29,7 49,12"/>
+$(New-Blush $p)
+$(New-CuteEyes $p)
+      <Path Stroke="$($p.nose)" StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M24,32.5 Q29,37 34,32.5"/>
 "@
 }
 
@@ -905,50 +912,50 @@ $MascotBuilders = @{
 # white first as requested, then everyone else.
 $Mascots = [ordered]@{
     'quokka' = @{ Label = 'Quokka'; Species = 'quokka'; Palette = @{
-        fur='#FFC58A5E'; shade='#FF8A5A38'; ear='#FFB87A50'; earInner='#FFE3A6A6'
-        muzzle='#FFF0DBBC'; nose='#FF5A3A2A'; eye='#FF2B1A12'; paw='#FFB87A50' } }
+        fur='#FFCE9163'; shade='#FF9A6440'; ear='#FFC0855A'; earInner='#FFF0B6B0'
+        muzzle='#FFF6E4CA'; nose='#FF6B4433'; eye='#FF8A5A3C'; blush='#FFF08C8C'; paw='#FFC0855A' } }
 
     'cat-white' = @{ Label = 'Cat - White'; Species = 'cat'; Palette = @{
-        fur='#FFF6F3EE'; shade='#FFB9B0A4'; ear='#FFF0EBE3'; earInner='#FFF3BFC1'
-        muzzle='#FFFFFFFF'; nose='#FFE79AA4'; eye='#FF7FC4E8'; paw='#FFF0EBE3' } }
+        fur='#FFFAF7F2'; shade='#FFC8BFB2'; ear='#FFF4EFE7'; earInner='#FFF8BFC4'
+        muzzle='#FFFFFFFF'; nose='#FFEC9AA6'; eye='#FF7CC7EE'; blush='#FFF7A0AC'; paw='#FFF4EFE7' } }
 
     'cat-siamese' = @{ Label = 'Cat - Siamese'; Species = 'cat'; Palette = @{
-        fur='#FFEFE2CB'; shade='#FF7A6045'; ear='#FF5B4636'; earInner='#FF8C6B58'
-        muzzle='#FFEFE2CB'; nose='#FF6E5346'; eye='#FF6FC0E4'; paw='#FF7A6049'
-        mask='#FF6B5343' } }
+        fur='#FFF3E7D2'; shade='#FF8A6C4E'; ear='#FF67503E'; earInner='#FFA07E68'
+        muzzle='#FFF3E7D2'; nose='#FF7A5C4C'; eye='#FF6FC4EC'; blush='#FFE9A08E'; paw='#FF8A6C50'
+        mask='#FF7A5F4A' } }
 
     'cat-calico' = @{ Label = 'Cat - Calico'; Species = 'cat'; Palette = @{
-        fur='#FFF7F2EA'; shade='#FFA9968A'; ear='#FFEDE4D8'; earInner='#FFF0B7B7'
-        muzzle='#FFFFFFFF'; nose='#FFE08E96'; eye='#FFD7A03C'; paw='#FFEDE4D8'
-        patchA='#FFE49A47'; patchB='#FF44392F' } }
+        fur='#FFFBF6ED'; shade='#FFBBA99A'; ear='#FFF4EBDD'; earInner='#FFF6BABA'
+        muzzle='#FFFFFFFF'; nose='#FFEE94A0'; eye='#FFE8A93F'; blush='#FFF5A0A8'; paw='#FFF4EBDD'
+        patchA='#FFF0A44E'; patchB='#FF4C4038' } }
 
     'cat-black' = @{ Label = 'Cat - Black'; Species = 'cat'; Palette = @{
-        fur='#FF3A3634'; shade='#FF171514'; ear='#FF322E2C'; earInner='#FF7A5A5A'
-        muzzle='#FF3A3634'; nose='#FF262220'; eye='#FFD9CE59'; paw='#FF322E2C' } }
+        fur='#FF433D3A'; shade='#FF1E1B19'; ear='#FF3B3532'; earInner='#FF8E6A6A'
+        muzzle='#FF433D3A'; nose='#FF2C2724'; eye='#FFE4D96A'; blush='#FF8A6470'; paw='#FF3B3532' } }
 
     'cat-russian' = @{ Label = 'Cat - Russian Blue'; Species = 'cat'; Palette = @{
-        fur='#FF97A3B2'; shade='#FF5F6C7C'; ear='#FF8B98A8'; earInner='#FFCBAEB2'
-        muzzle='#FF97A3B2'; nose='#FF6E7A88'; eye='#FF7FC98A'; paw='#FF8B98A8' } }
+        fur='#FFA3AFBE'; shade='#FF69768A'; ear='#FF97A3B4'; earInner='#FFD8B8BC'
+        muzzle='#FFA3AFBE'; nose='#FF77838F'; eye='#FF84D394'; blush='#FFD79AA4'; paw='#FF97A3B4' } }
 
     'tuna' = @{ Label = 'Tuna'; Species = 'tuna'; Palette = @{
-        fur='#FF4E7FA6'; shade='#FF2E4E68'; ear='#FF3F6C90'; earInner='#FF3F6C90'
-        muzzle='#FFDCE6EE'; nose='#FF2E4E68'; eye='#FF14181F'; paw='#FF3F6C90' } }
+        fur='#FF5A8CB4'; shade='#FF33566F'; ear='#FF497BA0'; earInner='#FF497BA0'
+        muzzle='#FFE4EEF6'; nose='#FF33566F'; eye='#FF9BD8E8'; blush='#FF7FB8D8'; paw='#FF497BA0' } }
 
     'shiba' = @{ Label = 'Shiba'; Species = 'dog'; Palette = @{
-        fur='#FFD9A15C'; shade='#FF9A6B34'; ear='#FFCE9553'; earInner='#FFE9C79A'
-        muzzle='#FFF6EBDC'; nose='#FF2E2724'; eye='#FF231C18'; paw='#FFE4C39B' } }
+        fur='#FFE0A868'; shade='#FFA5703B'; ear='#FFD59B5C'; earInner='#FFF2CDA4'
+        muzzle='#FFFAF1E3'; nose='#FF3A302B'; eye='#FF7A4F30'; blush='#FFF2A08E'; paw='#FFEDCFA8' } }
 
     'fox' = @{ Label = 'Fox'; Species = 'fox'; Palette = @{
-        fur='#FFDE7F3E'; shade='#FF9E4F1C'; ear='#FFD2743A'; earInner='#FFF0B48A'
-        muzzle='#FFF7EFE6'; nose='#FF2B2320'; eye='#FF2B211C'; paw='#FFF2E9DF' } }
+        fur='#FFE8873F'; shade='#FFA85520'; ear='#FFDC7B36'; earInner='#FFF6BE96'
+        muzzle='#FFFCF5EC'; nose='#FF3A302C'; eye='#FF8A4A22'; blush='#FFF2957F'; paw='#FFF7EEE3' } }
 
     'bunny' = @{ Label = 'Bunny'; Species = 'bunny'; Palette = @{
-        fur='#FFF3EEE9'; shade='#FFB6ABA0'; ear='#FFF0EAE4'; earInner='#FFF2B9BE'
-        muzzle='#FFFFFFFF'; nose='#FFE894A0'; eye='#FF2A2320'; paw='#FFF0EAE4' } }
+        fur='#FFF8F4EF'; shade='#FFC4B9AC'; ear='#FFF5F0E9'; earInner='#FFF8BCC2'
+        muzzle='#FFFFFFFF'; nose='#FFEE93A2'; eye='#FF6B4A44'; blush='#FFF7A2AE'; paw='#FFF5F0E9' } }
 
     'penguin' = @{ Label = 'Penguin'; Species = 'penguin'; Palette = @{
-        fur='#FF2C3038'; shade='#FF15181D'; ear='#FF3A4049'; earInner='#FF3A4049'
-        muzzle='#FFF7F5F2'; nose='#FFF0A63C'; eye='#FF17171A'; paw='#FFF0A63C' } }
+        fur='#FF343945'; shade='#FF1A1D24'; ear='#FF464C5A'; earInner='#FF464C5A'
+        muzzle='#FFFAF8F5'; nose='#FFF5AE44'; eye='#FF5E6B80'; blush='#FF8FA2C0'; paw='#FFF5AE44' } }
 }
 
 $script:MascotHead = $null
