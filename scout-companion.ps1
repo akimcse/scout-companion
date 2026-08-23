@@ -58,6 +58,9 @@ if (-not ('ScoutNative' -as [type])) {
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern bool DestroyIcon(System.IntPtr hIcon);
+
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(System.IntPtr hwnd, int attr, ref int value, int size);
 '@
 }
 
@@ -86,6 +89,8 @@ $Config = [ordered]@{
     # Mascot frame interval. 80 ms (12.5 fps) is smooth enough for a bob and a
     # typing paw, and costs roughly half of the old 50 ms (20 fps).
     animIntervalMs      = 80
+    # Mascot animation can be switched off entirely from the tray or settings.
+    animationEnabled    = $true
     maxSteps            = 4
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
@@ -100,6 +105,29 @@ if (Test-Path $cfgPath) {
         }
     } catch {
         Write-Warning "Could not parse config.json: $($_.Exception.Message)"
+    }
+}
+
+# Writes a subset of settings back to config.json, preserving anything the user
+# put there by hand. Used by the settings window and the tray menu.
+function Save-Setting([hashtable]$changes) {
+    $merged = [ordered]@{}
+    if (Test-Path $cfgPath) {
+        try {
+            $existing = Get-Content $cfgPath -Raw | ConvertFrom-Json
+            foreach ($prop in $existing.PSObject.Properties) { $merged[$prop.Name] = $prop.Value }
+        } catch { }
+    }
+    foreach ($key in $changes.Keys) {
+        $merged[$key] = $changes[$key]
+        $Config[$key] = $changes[$key]
+    }
+    try {
+        ($merged | ConvertTo-Json -Depth 6) | Set-Content -Path $cfgPath -Encoding UTF8
+        return $true
+    } catch {
+        Write-Warning "Could not write config.json: $($_.Exception.Message)"
+        return $false
     }
 }
 
@@ -570,6 +598,9 @@ function Focus-Agent {
         <Button x:Name="CloseBtn" Content="&#x2715;" DockPanel.Dock="Right" Width="22" Height="22"
                 Background="Transparent" Foreground="#FF8A93A6" BorderThickness="0" FontSize="12"
                 VerticalAlignment="Top" Cursor="Hand"/>
+        <Button x:Name="SettingsBtn" Content="&#x2699;" DockPanel.Dock="Right" Width="22" Height="22"
+                Background="Transparent" Foreground="#FF8A93A6" BorderThickness="0" FontSize="13"
+                VerticalAlignment="Top" Cursor="Hand" ToolTip="Settings"/>
         <Button x:Name="OpenBtn" Content="Open" DockPanel.Dock="Right" Height="22" Margin="0,0,6,0"
                 Background="#FF2A3142" Foreground="#FFB9C2D6" BorderThickness="0" Padding="8,0" FontSize="11"
                 VerticalAlignment="Top" Cursor="Hand"/>
@@ -625,6 +656,7 @@ $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
 $OpenBtn      = $Window.FindName('OpenBtn')
 $CloseBtn     = $Window.FindName('CloseBtn')
+$SettingsBtn  = $Window.FindName('SettingsBtn')
 $BodyT        = $Window.FindName('BodyT')
 $BodyS        = $Window.FindName('BodyS')
 $LeftPawT     = $Window.FindName('LeftPawT')
@@ -714,6 +746,7 @@ $DenyBtn.Add_Click({
 })
 $OpenBtn.Add_Click({ Focus-Agent })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
+$SettingsBtn.Add_Click({ Show-SettingsWindow })
 
 # ---------------------------------------------------------------------------
 # Tray icon.
@@ -723,7 +756,30 @@ $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 # icon doubles as the state indicator: it carries the same three colours as the
 # toast, so a glance at the tray answers "is Scout busy?".
 # ---------------------------------------------------------------------------
-$script:AnimPaused = $false
+$script:AnimEnabled = [bool]$Config.animationEnabled
+$script:SyncingAnim = $false
+
+# Single source of truth for the animation toggle, which is reachable from both
+# the tray menu and the settings window. The guard stops the two controls from
+# bouncing updates off each other.
+function Sync-AnimationEnabled([bool]$on, [switch]$Persist) {
+    if ($script:SyncingAnim) { return }
+    $script:SyncingAnim = $true
+    try {
+        $script:AnimEnabled = $on
+        if (-not $on) {
+            try { $anim.Stop() } catch { }
+            try { Reset-Mascot } catch { }
+        }
+        if ($MenuPause -and $MenuPause.Checked -ne (-not $on)) { $MenuPause.Checked = -not $on }
+        if ($script:SettingsAnimCheck -and $script:SettingsAnimCheck.IsChecked -ne $on) {
+            $script:SettingsSuppress = $true
+            try { $script:SettingsAnimCheck.IsChecked = $on }
+            finally { $script:SettingsSuppress = $false }
+        }
+        if ($Persist) { [void](Save-Setting @{ animationEnabled = $on }) }
+    } finally { $script:SyncingAnim = $false }
+}
 
 function New-TrayIcon([string]$hex) {
     # Drawn at runtime rather than shipped as a .ico, so the project stays a
@@ -797,6 +853,7 @@ function Stop-Companion {
     # the tray until the user hovers over it, which looks like a crash.
     try { $timer.Stop() } catch { }
     try { $anim.Stop() }  catch { }
+    try { if ($script:SettingsWindow) { $script:SettingsWindow.Close() } } catch { }
     try {
         $Tray.Visible = $false
         $Tray.Dispose()
@@ -805,18 +862,254 @@ function Stop-Companion {
     try { $Window.Close() } catch { }
 }
 
+# ---------------------------------------------------------------------------
+# Start-with-Scout.
+#
+# Watch-Scout.ps1 is the piece that ties the companion's lifetime to the agent,
+# so "start automatically" means putting a shortcut to the watcher in the user's
+# Startup folder. That is a per-user file with no registry writes and no admin
+# rights, and the checkbox reads the real state of the folder rather than a
+# remembered flag, so editing it by hand outside the app still works.
+# ---------------------------------------------------------------------------
+$WatcherPath = Join-Path $ScriptDir 'Watch-Scout.ps1'
+$StartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Scout Companion.lnk'
+
+function Test-AutoStart { return (Test-Path $StartupLink) }
+
+function Set-AutoStart([bool]$on) {
+    try {
+        if (-not $on) {
+            if (Test-Path $StartupLink) { Remove-Item $StartupLink -Force }
+            return $true
+        }
+        if (-not (Test-Path $WatcherPath)) { return $false }
+        $shell = New-Object -ComObject WScript.Shell
+        try {
+            $lnk = $shell.CreateShortcut($StartupLink)
+            $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $lnk.Arguments  = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$WatcherPath`""
+            $lnk.WorkingDirectory = $ScriptDir
+            $lnk.Description = 'Starts Scout Companion when Microsoft Scout is running'
+            $lnk.Save()
+        } finally {
+            [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
+        }
+        return (Test-Path $StartupLink)
+    } catch {
+        Write-Warning "Could not update the Startup shortcut: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Settings window.
+# ---------------------------------------------------------------------------
+$script:SettingsWindow    = $null
+$script:SettingsAnimCheck = $null
+$script:SettingsSuppress  = $false
+$script:SelfProc          = [System.Diagnostics.Process]::GetCurrentProcess()
+
+# Applies the Startup checkbox, and snaps it back if the folder write failed so
+# the control never claims something that did not happen.
+function Apply-AutoStartFromUI {
+    if ($script:SettingsSuppress) { return }
+    if (-not $script:SettingsAutoCheck) { return }
+    $want = [bool]$script:SettingsAutoCheck.IsChecked
+    if (Set-AutoStart $want) { return }
+    $script:SettingsSuppress = $true
+    try { $script:SettingsAutoCheck.IsChecked = Test-AutoStart }
+    finally { $script:SettingsSuppress = $false }
+    $script:SettingsAutoHint.Text = 'Could not update the Startup folder. Check that you can write to it.'
+}
+
+[xml]$settingsXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Scout Companion settings" Width="410" SizeToContent="Height"
+        ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
+        Background="#FF1B1F2A" Foreground="#FFE6EAF2" ShowInTaskbar="True">
+  <Window.Resources>
+    <Style TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#FFE6EAF2"/>
+      <Setter Property="FontSize" Value="12.5"/>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#FFE6EAF2"/>
+      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="Cursor" Value="Hand"/>
+    </Style>
+    <Style x:Key="Hint" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#FF8A93A6"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="Margin" Value="24,3,0,0"/>
+    </Style>
+    <Style x:Key="Section" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#FF6E7A94"/>
+      <Setter Property="FontSize" Value="10.5"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,8"/>
+    </Style>
+  </Window.Resources>
+
+  <StackPanel Margin="18,16,18,14">
+
+    <TextBlock Style="{StaticResource Section}" Text="STARTUP"/>
+    <CheckBox x:Name="AutoStartCheck" Content="Start automatically with Scout"/>
+    <TextBlock x:Name="AutoStartHint" Style="{StaticResource Hint}"
+               Text="Adds a shortcut to your Startup folder. The watcher launches the companion when Scout starts, and the companion closes itself shortly after Scout quits."/>
+
+    <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
+
+    <TextBlock Style="{StaticResource Section}" Text="APPEARANCE"/>
+    <CheckBox x:Name="AnimCheck" Content="Animate the mascot"/>
+    <TextBlock Style="{StaticResource Hint}"
+               Text="Turning this off leaves the mascot in a resting pose and stops its timer entirely."/>
+
+    <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
+
+    <TextBlock Style="{StaticResource Section}" Text="THIS PROCESS"/>
+    <Grid Margin="0,0,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="Memory" Width="120" Foreground="#FF9AA6BE"/>
+      <TextBlock Grid.Row="0" Grid.Column="1" x:Name="MemText" Text="-"/>
+      <TextBlock Grid.Row="1" Grid.Column="0" Text="CPU (of one core)" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
+      <TextBlock Grid.Row="1" Grid.Column="1" x:Name="CpuText" Text="-" Margin="0,5,0,0"/>
+      <TextBlock Grid.Row="2" Grid.Column="0" Text="Uptime" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
+      <TextBlock Grid.Row="2" Grid.Column="1" x:Name="UpText" Text="-" Margin="0,5,0,0"/>
+    </Grid>
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+      <Button x:Name="CloseSettingsBtn" Content="Close" Width="88" Height="28"
+              Background="#FF2A3142" Foreground="#FFE6EAF2" BorderThickness="0" Cursor="Hand"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+'@
+
+function Show-SettingsWindow {
+    if ($script:SettingsWindow) {
+        try { $script:SettingsWindow.Activate(); return } catch { $script:SettingsWindow = $null }
+    }
+
+    $sw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $settingsXaml))
+
+    # Every control the event handlers touch is held at script scope: a
+    # PowerShell event handler runs long after its defining function has
+    # returned, and cannot see that function's locals.
+    $script:SettingsWindow    = $sw
+    $script:SettingsAutoCheck = $sw.FindName('AutoStartCheck')
+    $script:SettingsAutoHint  = $sw.FindName('AutoStartHint')
+    $script:SettingsAnimCheck = $sw.FindName('AnimCheck')
+    $script:SettingsMemText   = $sw.FindName('MemText')
+    $script:SettingsCpuText   = $sw.FindName('CpuText')
+    $script:SettingsUpText    = $sw.FindName('UpText')
+    $closeBtn                 = $sw.FindName('CloseSettingsBtn')
+
+    # Reflect reality, not a remembered flag. Set before the handlers are
+    # attached so priming the controls cannot fire them.
+    $script:SettingsAutoCheck.IsChecked = Test-AutoStart
+    if (-not (Test-Path $WatcherPath)) {
+        $script:SettingsAutoCheck.IsEnabled = $false
+        $script:SettingsAutoHint.Text = "Watch-Scout.ps1 is missing from $ScriptDir, so this cannot be turned on."
+    }
+    $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
+
+    # Checked/Unchecked rather than Click: UI Automation's TogglePattern sets
+    # IsChecked directly without raising Click, so a screen reader or voice
+    # control toggling the box would otherwise flip the visuals and silently
+    # fail to apply the setting.
+    $script:SettingsAutoCheck.Add_Checked({ Apply-AutoStartFromUI })
+    $script:SettingsAutoCheck.Add_Unchecked({ Apply-AutoStartFromUI })
+    $script:SettingsAnimCheck.Add_Checked({
+        if (-not $script:SettingsSuppress) { Sync-AnimationEnabled $true -Persist }
+    })
+    $script:SettingsAnimCheck.Add_Unchecked({
+        if (-not $script:SettingsSuppress) { Sync-AnimationEnabled $false -Persist }
+    })
+
+    # Live resource readout, refreshed only while this window is open.
+    $script:SettingsLastCpu = $script:SelfProc.TotalProcessorTime
+    $script:SettingsLastAt  = [datetime]::UtcNow
+    $script:SettingsResTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:SettingsResTimer.Interval = [TimeSpan]::FromMilliseconds(1000)
+    $script:SettingsResTimer.Add_Tick({
+        try {
+            $script:SelfProc.Refresh()
+            $now    = [datetime]::UtcNow
+            $cpuMs  = ($script:SelfProc.TotalProcessorTime - $script:SettingsLastCpu).TotalMilliseconds
+            $wallMs = ($now - $script:SettingsLastAt).TotalMilliseconds
+            $script:SettingsLastCpu = $script:SelfProc.TotalProcessorTime
+            $script:SettingsLastAt  = $now
+
+            $script:SettingsMemText.Text = '{0:N0} MB' -f ($script:SelfProc.WorkingSet64 / 1MB)
+            if ($wallMs -gt 0) { $script:SettingsCpuText.Text = '{0:N2} %' -f ($cpuMs / $wallMs * 100) }
+            $up = [datetime]::Now - $script:SelfProc.StartTime
+            $script:SettingsUpText.Text = if ($up.TotalHours -ge 1) {
+                '{0}h {1}m' -f [int]$up.TotalHours, $up.Minutes
+            } else {
+                '{0}m {1}s' -f $up.Minutes, $up.Seconds
+            }
+        } catch { }
+    })
+    $script:SettingsResTimer.Start()
+
+    $closeBtn.Add_Click({ if ($script:SettingsWindow) { $script:SettingsWindow.Close() } })
+    $sw.Add_Closed({
+        try { $script:SettingsResTimer.Stop() } catch { }
+        $script:SettingsWindow    = $null
+        $script:SettingsAnimCheck = $null
+    })
+
+    # Match the dark body with a dark title bar instead of leaving a bright
+    # strip above it. 20 is DWMWA_USE_IMMERSIVE_DARK_MODE on current Windows 11;
+    # 19 was the pre-release attribute on older Windows 10 builds.
+    $sw.Add_SourceInitialized({
+        try {
+            $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $script:SettingsWindow).Handle
+            $on = 1
+            if ([ScoutNative]::DwmSetWindowAttribute($hwnd, 20, [ref]$on, 4) -ne 0) {
+                [void][ScoutNative]::DwmSetWindowAttribute($hwnd, 19, [ref]$on, 4)
+            }
+        } catch { }
+    })
+
+    # Reuse the tray artwork so the window carries the mascot rather than the
+    # generic PowerShell icon.
+    try {
+        $sw.Icon = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon(
+            $TrayIcons.idle.Handle,
+            [System.Windows.Int32Rect]::Empty,
+            [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
+    } catch { }
+
+    $sw.Show()
+    $sw.Activate()
+}
+
 $MenuShow  = New-Object System.Windows.Forms.ToolStripMenuItem 'Show toast'
 $MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem 'Open Scout'
 $MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem 'Pause animation'
+$MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem 'Settings...'
 $MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
 $MenuPause.CheckOnClick = $true
+$MenuPause.Checked = -not $script:AnimEnabled
 
 $MenuShow.Add_Click({ $script:Hidden = $false })
 $MenuOpen.Add_Click({ Focus-Agent })
 $MenuPause.Add_Click({
-    $script:AnimPaused = $MenuPause.Checked
-    if ($script:AnimPaused) { $anim.Stop(); Reset-Mascot }
+    # CheckOnClick has already flipped Checked by the time this runs.
+    Sync-AnimationEnabled (-not $MenuPause.Checked) -Persist
 })
+$MenuSet.Add_Click({ Show-SettingsWindow })
 $MenuExit.Add_Click({ Stop-Companion })
 
 $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -824,6 +1117,7 @@ $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$TrayMenu.Items.Add($MenuOpen)
 [void]$TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$TrayMenu.Items.Add($MenuPause)
+[void]$TrayMenu.Items.Add($MenuSet)
 [void]$TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$TrayMenu.Items.Add($MenuExit)
 $Tray.ContextMenuStrip = $TrayMenu
@@ -1008,7 +1302,7 @@ $timer.Add_Tick({
         if (-not $Window.IsVisible) { $Window.Show() }
         $Window.Topmost = $true
         # Only animate while the toast is actually on screen.
-        if (-not $anim.IsEnabled -and -not $script:AnimPaused) { $anim.Start() }
+        if (-not $anim.IsEnabled -and $script:AnimEnabled) { $anim.Start() }
     } else {
         if ($anim.IsEnabled) { $anim.Stop() }
         if ($Window.IsVisible) { $Window.Hide() }

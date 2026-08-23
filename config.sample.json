@@ -26,6 +26,9 @@
   "animIntervalMs": 80,
   "_animIntervalMs": "Mascot frame interval in ms (80 = 12.5 fps). The mascot moves at the same speed whatever you set; a smaller number just spends more CPU on smoother motion. The animation only runs while the toast is on screen.",
 
+  "animationEnabled": true,
+  "_animationEnabled": "Whether the mascot animates at all. Also toggleable at runtime from the tray menu or the settings window, which write the change back to this file.",
+
   "exitWhenAgentGone": true,
   "_exitWhenAgentGone": "Automatically close the companion shortly after the agent app quits. Pair with Watch-Scout.ps1 (in the Startup folder) to tie the companion's lifetime to Scout: it opens when Scout starts and closes when Scout exits.",
 
