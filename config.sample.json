@@ -23,6 +23,9 @@
   "pollIntervalMs": 700,
   "_pollIntervalMs": "How often (ms) to poll the event stream and window focus.",
 
+  "maxSessions": 6,
+  "_maxSessions": "How many concurrently active sessions to follow at once. Each costs one file stat per poll, so this is a guard against pathological session counts rather than a limit anyone should hit. Approvals and questions from any followed session reach the toast.",
+
   "sessionRescanMs": 5000,
   "_sessionRescanMs": "How often (ms) to re-resolve which session is active. Between rescans the companion just tails the file it already found, which keeps the poll loop cheap on machines with a long session history. Lower it if you switch sessions constantly and want the toast to follow faster.",
 

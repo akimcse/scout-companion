@@ -68,6 +68,10 @@ place.
   the turn is parked until you answer, exactly like an approval. The toast turns **cyan**,
   shows the question and its options, and offers to bring the agent window forward. It
   cannot answer for you, so it does not pretend to.
+- **Follows every session you have open** — if a second agent window asks for approval or
+  asks you a question, it reaches the toast too, tagged with which one it came from. The
+  step list and narration follow whichever session moved most recently, so with a single
+  session it looks exactly as it always did.
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
 - **Stays out of the way** — around 1.4% of one CPU core and a flat working set while
@@ -164,19 +168,30 @@ The agent writes a per-session event stream to:
 
 Scout Companion:
 
-1. Finds the **active session** (the one currently locked / most recently written).
-2. **Tails `events.jsonl`** and interprets events:
+1. Finds the **active sessions** — the ones whose `events.jsonl` has been written to
+   recently. Not the ones holding a lock file: one backend process holds
+   `inuse.<pid>.lock` on every session it still has open, so a lock means "some process
+   still has this open", not "someone is using this".
+2. **Tails each of them** and interprets events:
    - `tool.execution_start` / `assistant.message` → current activity text
    - `permission.requested` / `permission.completed` → pending approvals
    - `external_tool.requested` for an ask-the-user tool → pending question
 3. Detects the **agent window** from the running process list and checks whether it's
    minimized or in the foreground to decide when to show the toast.
 4. For approvals, it wakes the agent window's accessibility tree and invokes the
-   matching **Allow/Deny** button through Windows UI Automation.
+   matching **Allow/Deny** button through Windows UI Automation. If more than one agent
+   window is open it refuses to click and focuses instead — a pending approval cannot be
+   traced back to the window that raised it, and approving the wrong thing is worse than
+   making you click it yourself.
 
-The session and the agent window are both cached — the poll tick normally costs one file
-stat and one `IsWindow` call rather than a walk over every session folder and every
-process on the machine.
+Approvals and questions are merged across every followed session; the step list and
+narration come from whichever moved most recently. A session with something pending is
+kept even after it goes quiet, because an approval does not expire just because nobody
+has typed for a while.
+
+The session set and the agent window are both cached — the poll tick normally costs one
+file stat per followed session and one `IsWindow` call, rather than a walk over every
+session folder and every process on the machine.
 
 No network calls. No data leaves your machine. The companion only reads local files and
 interacts with the local agent window.
@@ -195,6 +210,7 @@ and edit. Common overrides:
 | `askToolNames` | `["m_ask_user","ask_user"]` | Tool names that mean "waiting for your answer" |
 | `activeWindowSeconds` | `150` | How long after the last event the session counts as "working" |
 | `pollIntervalMs` | `700` | Event/focus polling interval |
+| `maxSessions` | `6` | How many concurrently active sessions to follow |
 | `sessionRescanMs` | `5000` | How often to re-resolve which session is active. Between rescans the companion just tails the file it already found |
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
@@ -222,6 +238,10 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
   **Allow for session**, **Allow everywhere**, and **Deny**; the toast's **Allow** maps to
   the safest one-time **Allow**. As a fallback the companion focuses the agent window so
   you can click manually.
+- **Allow/Deny stopped clicking when I opened a second agent window** — deliberate. A
+  pending approval cannot be traced back to the window that raised it, so with more than
+  one window open the companion focuses instead of guessing. Close the extra window to get
+  one-click approvals back.
 - **Start-with-Scout won't turn on** — the checkbox disables itself if `Watch-Scout.ps1`
   is missing from the same folder as the script, and reverts if the Startup folder cannot
   be written.

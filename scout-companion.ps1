@@ -86,6 +86,10 @@ $Config = [ordered]@{
     askToolNames  = @('m_ask_user', 'ask_user')
     activeWindowSeconds = 150
     pollIntervalMs      = 700
+    # How many concurrently active sessions to follow. Each one costs a file
+    # stat per tick, so this is a guard against pathological session counts
+    # rather than a limit anyone should hit.
+    maxSessions         = 6
     # A full rescan of every session folder is expensive on machines with a long
     # session history, so the resolved session is cached and only re-resolved
     # this often. Between rescans the companion just stats the file it is tailing.
@@ -169,11 +173,33 @@ $SessionRoot = Join-Path $Config.home 'session-state'
 
 # ---------------------------------------------------------------------------
 # Shared mutable state.
+#
+# $Sessions holds one record per session being followed. $State is the view the
+# UI renders: steps and narration from whichever session moved most recently,
+# and approvals and questions merged from all of them, because the whole point
+# of following several is that a prompt in a window you are not looking at
+# still reaches you.
 # ---------------------------------------------------------------------------
+$Sessions = [ordered]@{}
+
+function New-SessionRecord([string]$dir, [string]$events) {
+    [pscustomobject]@{
+        Dir          = $dir
+        Events       = $events
+        Label        = $null
+        Offset       = [long]0
+        Saying       = $null
+        Steps        = New-Object System.Collections.ArrayList
+        TurnActive   = $false
+        LastEventUtc = [datetime]::UtcNow
+        PendingPerms = [ordered]@{}
+        PendingAsks  = [ordered]@{}
+    }
+}
+
 $State = [pscustomobject]@{
     SessionDir      = $null
     EventsPath      = $null
-    Offset          = [long]0
     Saying          = $null                       # latest assistant narrative
     Steps           = New-Object System.Collections.ArrayList   # recent tool steps
     TurnActive      = $false
@@ -244,16 +270,16 @@ function Describe-Tool([string]$name, $a) {
     }
 }
 
-function Add-Step([string]$id, [string]$reqId, [string]$text) {
+function Add-Step($sess, [string]$id, [string]$reqId, [string]$text) {
     if (-not $text) { return }
     $rec = [pscustomobject]@{ Id = $id; ReqId = $reqId; Text = $text; Done = $false }
-    [void]$State.Steps.Add($rec)
-    while ($State.Steps.Count -gt [int]$Config.maxSteps) { $State.Steps.RemoveAt(0) }
+    [void]$sess.Steps.Add($rec)
+    while ($sess.Steps.Count -gt [int]$Config.maxSteps) { $sess.Steps.RemoveAt(0) }
 }
 
-function Complete-Step([string]$id, [string]$reqId) {
-    for ($i = $State.Steps.Count - 1; $i -ge 0; $i--) {
-        $s = $State.Steps[$i]
+function Complete-Step($sess, [string]$id, [string]$reqId) {
+    for ($i = $sess.Steps.Count - 1; $i -ge 0; $i--) {
+        $s = $sess.Steps[$i]
         if (($id -and $s.Id -eq $id) -or ($reqId -and $s.ReqId -eq $reqId)) { $s.Done = $true; break }
     }
 }
@@ -330,36 +356,21 @@ function Test-AgentProcess {
     return $false
 }
 
-function Test-LiveLock {
-    # A session lock is only meaningful if the PID embedded in its name
-    # (inuse.<pid>.lock) belongs to a process that is still running. Stale lock
-    # files from crashed/closed sessions are ignored so we never latch onto an
-    # ancient session and report it as "active".
+function Find-ActiveSessions {
+    # Sessions that have actually been written to recently, newest first.
     #
-    # $seen memoises PID liveness for the duration of one scan: most machines
-    # accumulate dozens of stale locks and many repeat the same dead PID.
-    param([string]$dir, [hashtable]$seen)
-    foreach ($lock in [System.IO.Directory]::EnumerateFiles($dir, 'inuse.*.lock')) {
-        if ([System.IO.Path]::GetFileName($lock) -match 'inuse\.(\d+)') {
-            $procId = [int]$Matches[1]
-            if ($seen -and $seen.ContainsKey($procId)) {
-                if ($seen[$procId]) { return $true } else { continue }
-            }
-            $alive = $false
-            try { $p = [System.Diagnostics.Process]::GetProcessById($procId); $p.Dispose(); $alive = $true } catch { }
-            if ($seen) { $seen[$procId] = $alive }
-            if ($alive) { return $true }
-        }
-    }
-    return $false
-}
+    # Deliberately not keyed on the lock files. One backend process holds
+    # inuse.<pid>.lock on every session it still has open, so on this machine
+    # ten folders looked "live" while only two had seen an event in the last
+    # hour. A live lock means a process still has the session open, not that
+    # anyone is using it.
+    #
+    # It is not kept as a tiebreak either: mtime has 100 ns resolution, so two
+    # sessions never tie in practice and the lock check would be dead weight on
+    # every scan.
+    if (-not [System.IO.Directory]::Exists($SessionRoot)) { return @() }
 
-function Find-ActiveSession {
-    if (-not [System.IO.Directory]::Exists($SessionRoot)) { return $null }
-
-    # Collect candidates with raw .NET calls - Get-ChildItem/Get-Item allocate a
-    # PSObject wrapper per entry, which dominates the cost once a machine has
-    # accumulated a few hundred session folders.
+    $cutoff = [datetime]::UtcNow.AddSeconds(-[double]$Config.activeWindowSeconds)
     $candidates = New-Object System.Collections.ArrayList
     foreach ($dir in [System.IO.Directory]::EnumerateDirectories($SessionRoot)) {
         $ev = [System.IO.Path]::Combine($dir, 'events.jsonl')
@@ -367,89 +378,161 @@ function Find-ActiveSession {
         if (-not $fi.Exists) { continue }
         [void]$candidates.Add([pscustomobject]@{ Dir = $dir; Events = $ev; Mtime = $fi.LastWriteTimeUtc })
     }
-    if ($candidates.Count -eq 0) { return $null }
+    if ($candidates.Count -eq 0) { return @() }
 
-    # Prefer a session with a live lock, then the most recently written events
-    # file. Walking newest-first and returning the first live lock gives the same
-    # answer as ranking every folder, but normally only tests a single lock.
-    $sorted = $candidates | Sort-Object -Property Mtime -Descending
-    $seen = @{}
-    foreach ($c in $sorted) {
-        if (Test-LiveLock $c.Dir $seen) { return $c }
+    $sorted = @($candidates | Sort-Object -Property Mtime -Descending)
+    $fresh  = @($sorted | Where-Object { $_.Mtime -ge $cutoff })
+    # Nothing recent: fall back to the single newest so the companion still has
+    # something to show rather than going blank.
+    if ($fresh.Count -eq 0) { $fresh = @($sorted[0]) }
+    if ($fresh.Count -gt [int]$Config.maxSessions) {
+        $fresh = @($fresh | Select-Object -First ([int]$Config.maxSessions))
     }
-    # Nothing holds a live lock - fall back to plain recency so we still track
-    # the newest session.
-    return $sorted[0]
+    return $fresh
 }
 
-function Read-NewEvents {
-    # Between full rescans, keep tailing the file we already latched onto. This
-    # turns the common tick into a single file stat instead of a walk over every
-    # session folder on the machine.
-    $sess = $null
-    $needScan = $true
-    if ($State.EventsPath) {
-        $cur = New-Object System.IO.FileInfo $State.EventsPath
-        if ($cur.Exists -and ([datetime]::UtcNow - $script:SessionScanUtc).TotalMilliseconds -lt [double]$Config.sessionRescanMs) {
-            $needScan = $false
-            $sess = [pscustomobject]@{ Dir = $State.SessionDir; Events = $State.EventsPath }
-            $len = $cur.Length
-        }
-    }
-
-    if ($needScan) {
-        $script:SessionScanUtc = [datetime]::UtcNow
-        $sess = Find-ActiveSession
-        if (-not $sess) { return }
-
-        if ($State.EventsPath -ne $sess.Events) {
-            $State.SessionDir = $sess.Dir
-            $State.EventsPath = $sess.Events
-            $State.Offset     = (New-Object System.IO.FileInfo $sess.Events).Length
-            $State.PendingPerms = [ordered]@{}
-            $State.PendingAsks  = [ordered]@{}
-            $State.Steps.Clear()
-            $State.Saying = $null
-            $State.TurnActive = $false
-            return
-        }
-        $len = (New-Object System.IO.FileInfo $sess.Events).Length
-    }
-
-    if ($len -lt $State.Offset) { $State.Offset = 0 }
-    if ($len -eq $State.Offset) { return }
-
-    $fs = [System.IO.File]::Open($sess.Events, 'Open', 'Read', 'ReadWrite')
+function Get-SessionLabel([string]$dir, [string]$events) {
+    # session.start is the first line of the file and carries the working
+    # directory, which is the only human-readable handle on a session - the
+    # folder name is a GUID. Read the head only; these files reach tens of MB.
     try {
-        $fs.Seek($State.Offset, 'Begin') | Out-Null
+        $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            for ($i = 0; $i -lt 5; $i++) {
+                $line = $sr.ReadLine()
+                if ($null -eq $line) { break }
+                if ($line -notmatch '"session\.start"') { continue }
+                $cwd = ($line | ConvertFrom-Json).data.context.cwd
+                if ($cwd) { return (Split-Path $cwd -Leaf) }
+            }
+        } finally { $fs.Dispose() }
+    } catch { }
+    return (Split-Path $dir -Leaf).Substring(0, 8)
+}
+
+function Sync-Sessions {
+    # Refresh which sessions are being followed. A session with something
+    # pending is kept regardless of age: an approval does not expire just
+    # because nobody has typed for a while, and dropping it would take the
+    # prompt off the toast.
+    $active = Find-ActiveSessions
+    $keep = @{}
+    foreach ($s in $active) { $keep[$s.Dir] = $true }
+
+    foreach ($s in $active) {
+        if ($Sessions.Contains($s.Dir)) { continue }
+        $rec = New-SessionRecord $s.Dir $s.Events
+        $rec.Label = Get-SessionLabel $s.Dir $s.Events
+        # Start at the end: replaying a whole history would re-raise approvals
+        # that were answered long ago.
+        $rec.Offset = (New-Object System.IO.FileInfo $s.Events).Length
+        $rec.LastEventUtc = $s.Mtime
+        $Sessions[$s.Dir] = $rec
+    }
+
+    foreach ($dir in @($Sessions.Keys)) {
+        if ($keep.ContainsKey($dir)) { continue }
+        $rec = $Sessions[$dir]
+        if ($rec.PendingPerms.Count -gt 0 -or $rec.PendingAsks.Count -gt 0) { continue }
+        $Sessions.Remove($dir)
+    }
+}
+
+function Read-SessionEvents($rec) {
+    $fi = New-Object System.IO.FileInfo $rec.Events
+    if (-not $fi.Exists) { return }
+    $len = $fi.Length
+    if ($len -lt $rec.Offset) { $rec.Offset = 0 }
+    if ($len -eq $rec.Offset) { return }
+
+    $fs = [System.IO.File]::Open($rec.Events, 'Open', 'Read', 'ReadWrite')
+    try {
+        $fs.Seek($rec.Offset, 'Begin') | Out-Null
         $sr = New-Object System.IO.StreamReader($fs)
         $chunk = $sr.ReadToEnd()
-        $State.Offset = $fs.Position
+        $rec.Offset = $fs.Position
     } finally { $fs.Dispose() }
 
     foreach ($line in ($chunk -split "`n")) {
         $line = $line.Trim()
         if (-not $line) { continue }
         try { $evt = $line | ConvertFrom-Json } catch { continue }
-        Handle-Event $evt
+        Handle-Event $rec $evt
     }
 }
 
-function Handle-Event($evt) {
-    $State.LastEventUtc = [datetime]::UtcNow
+function Read-NewEvents {
+    # Between full rescans, just tail the sessions already being followed. That
+    # turns the common tick into one file stat per session instead of a walk
+    # over every session folder on the machine.
+    if (([datetime]::UtcNow - $script:SessionScanUtc).TotalMilliseconds -ge [double]$Config.sessionRescanMs -or
+        $Sessions.Count -eq 0) {
+        $script:SessionScanUtc = [datetime]::UtcNow
+        Sync-Sessions
+    }
+    foreach ($dir in @($Sessions.Keys)) {
+        try { Read-SessionEvents $Sessions[$dir] } catch { }
+    }
+}
+
+# Names the session a prompt came from, but only when more than one is being
+# followed - in the ordinary single-session case the label is noise.
+function Where-From($item) {
+    if ($Sessions.Count -le 1) { return '' }
+    if (-not $item -or -not $item.session) { return '' }
+    return "  -  $($item.session)"
+}
+
+function Merge-SessionState {
+    # Collapse the per-session records into the single view the toast renders.
+    $primary = $null
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if (-not $primary -or $rec.LastEventUtc -gt $primary.LastEventUtc) { $primary = $rec }
+    }
+
+    $perms = [ordered]@{}
+    $asks  = [ordered]@{}
+    $turn  = $false
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if ($rec.TurnActive) { $turn = $true }
+        foreach ($k in $rec.PendingPerms.Keys) {
+            $v = $rec.PendingPerms[$k]; $v.session = $rec.Label; $perms[$k] = $v
+        }
+        foreach ($k in $rec.PendingAsks.Keys) {
+            $v = $rec.PendingAsks[$k]; $v.session = $rec.Label; $asks[$k] = $v
+        }
+    }
+
+    $State.PendingPerms = $perms
+    $State.PendingAsks  = $asks
+    $State.TurnActive   = $turn
+    if ($primary) {
+        $State.SessionDir   = $primary.Dir
+        $State.EventsPath   = $primary.Events
+        $State.Saying       = $primary.Saying
+        $State.Steps        = $primary.Steps
+        $State.LastEventUtc = $primary.LastEventUtc
+    }
+}
+
+function Handle-Event($sess, $evt) {
+    $sess.LastEventUtc = [datetime]::UtcNow
     switch ($evt.type) {
-        'assistant.turn_start' { $State.TurnActive = $true }
-        'assistant.turn_end'   { $State.TurnActive = $false }
+        'assistant.turn_start' { $sess.TurnActive = $true }
+        'assistant.turn_end'   { $sess.TurnActive = $false }
         'assistant.message' {
             $txt = $evt.data.content; if (-not $txt) { $txt = $evt.data.text }
-            if ($txt) { $State.Saying = Truncate $txt 200 }
+            if ($txt) { $sess.Saying = Truncate $txt 200 }
         }
         'tool.execution_start' {
             $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
-            Add-Step $evt.data.toolCallId $null $desc
+            Add-Step $sess $evt.data.toolCallId $null $desc
         }
         'tool.execution_complete' {
-            Complete-Step $evt.data.toolCallId $null
+            Complete-Step $sess $evt.data.toolCallId $null
         }
         'external_tool.requested' {
             # An "ask the user" tool is not progress, it is a stop: the turn is
@@ -463,19 +546,20 @@ function Handle-Event($evt) {
                 foreach ($a in @($evt.data.arguments.answers)) {
                     if ($a -and $a.title) { $choices += $a.title }
                 }
-                $State.PendingAsks[$evt.data.requestId] = @{
+                $sess.PendingAsks[$evt.data.requestId] = @{
                     text    = (Truncate $q 280)
                     choices = $choices
+                    session = $sess.Label
                 }
             } else {
                 $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
-                Add-Step $evt.data.toolCallId $evt.data.requestId $desc
+                Add-Step $sess $evt.data.toolCallId $evt.data.requestId $desc
             }
         }
         'external_tool.completed' {
             $id = $evt.data.requestId
-            if ($State.PendingAsks.Contains($id)) { $State.PendingAsks.Remove($id) }
-            else { Complete-Step $null $id }
+            if ($sess.PendingAsks.Contains($id)) { $sess.PendingAsks.Remove($id) }
+            else { Complete-Step $sess $null $id }
         }
         'permission.requested' {
             $req = $evt.data.permissionRequest
@@ -489,11 +573,11 @@ function Handle-Event($evt) {
             }
             if (-not $text) { $text = '(approval requested)' }
             $kind = if ($req) { $req.kind } else { 'permission' }
-            $State.PendingPerms[$id] = @{ text = (Truncate $text 280); kind = $kind }
+            $sess.PendingPerms[$id] = @{ text = (Truncate $text 280); kind = $kind; session = $sess.Label }
         }
         'permission.completed' {
             $id = $evt.data.requestId
-            if ($State.PendingPerms.Contains($id)) { $State.PendingPerms.Remove($id) }
+            if ($sess.PendingPerms.Contains($id)) { $sess.PendingPerms.Remove($id) }
         }
     }
 }
@@ -503,7 +587,31 @@ function Wake-AgentA11y([IntPtr]$hwnd) {
     [void][ScoutNative]::SendMessage($hwnd, 0x003D, [IntPtr]::Zero, [IntPtr](-25))
 }
 
+function Count-AgentWindows {
+    # How many agent windows are on screen. Matters because a pending approval
+    # cannot be traced back to the window that raised it: the session lock names
+    # a backend process, not the UI one.
+    $n = 0
+    $procs = $null
+    try { $procs = Get-Process -ErrorAction SilentlyContinue } catch { return 1 }
+    $seen = @{}
+    foreach ($name in $Config.processNames) {
+        foreach ($p in @($procs | Where-Object { $_.ProcessName -like "*$name*" })) {
+            if ($p.MainWindowHandle -eq [IntPtr]::Zero) { continue }
+            if ($seen.ContainsKey($p.Id)) { continue }
+            $seen[$p.Id] = $true
+            $n++
+        }
+    }
+    return $n
+}
+
 function Invoke-AgentButton([string[]]$labels) {
+    # Refuse to guess when several agent windows are open. Clicking Allow in the
+    # wrong window would approve something the user never saw, which is a far
+    # worse failure than making them click it themselves.
+    if ((Count-AgentWindows) -gt 1) { return $false }
+
     $win = Get-AgentWindow
     if (-not $win) { return $false }
     Wake-AgentA11y $win.Hwnd
@@ -1743,6 +1851,7 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds([int]$Config.pollIntervalMs)
 $timer.Add_Tick({
     try { Read-NewEvents } catch { }
+    try { Merge-SessionState } catch { }
 
     $win = Get-AgentWindow
     $agentRunning = $null -ne $win
@@ -1767,7 +1876,7 @@ $timer.Add_Tick({
     $hasAsk     = $State.PendingAsks.Count -gt 0
     $ageSec = ([datetime]::UtcNow - $State.LastEventUtc).TotalSeconds
     $running = ($State.Steps | Where-Object { -not $_.Done } | Measure-Object).Count -gt 0
-    $isActive = $hasPending -or $hasAsk -or $running -or ($State.TurnActive) -or ($State.EventsPath -and $ageSec -le [double]$Config.activeWindowSeconds)
+    $isActive = $hasPending -or $hasAsk -or $running -or ($State.TurnActive) -or ($Sessions.Count -gt 0 -and $ageSec -le [double]$Config.activeWindowSeconds)
 
     # A question parks the turn just like an approval does, so neither counts as
     # "busy" - the mascot should be waiting, not typing.
@@ -1805,7 +1914,7 @@ $timer.Add_Tick({
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
         $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
         $HeaderText.Text = "Approval needed$extra"
-        $PermTitle.Text  = [char]0x26A0 + ' Permission requested'
+        $PermTitle.Text  = [char]0x26A0 + ' Permission requested' + (Where-From $first)
         $PermText.Text = $first.text
         $AllowBtn.Visibility  = 'Visible'
         $DenyBtn.Visibility   = 'Visible'
@@ -1820,7 +1929,7 @@ $timer.Add_Tick({
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
         $extra = if ($State.PendingAsks.Count -gt 1) { " (+$($State.PendingAsks.Count - 1))" } else { '' }
         $HeaderText.Text = "Waiting on you$extra"
-        $PermTitle.Text  = [char]0x2753 + ' The agent asked you a question'
+        $PermTitle.Text  = [char]0x2753 + ' The agent asked you a question' + (Where-From $first)
         $body = $first.text
         if ($first.choices -and $first.choices.Count) {
             $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
@@ -1855,8 +1964,8 @@ $timer.Add_Tick({
 
     if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
         try {
-            $dbg = "{0} show={1} pend={2} ask={3} active={4} run={5} agent={6} fg={7} min={8} hidden={9} age={10} hwnd='{11}'" -f `
-                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, [int]$ageSec, ($win.Hwnd)
+            $dbg = "{0} show={1} pend={2} ask={3} sess={4} active={5} run={6} agent={7} fg={8} min={9} hidden={10} age={11}" -f `
+                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, [int]$ageSec
             Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') -Value $dbg
         } catch { }
     }
@@ -1872,16 +1981,11 @@ $timer.Add_Tick({
     }
 })
 
-# prime to current end of the active session
-$initial = Find-ActiveSession
-if ($initial) {
-    $fi = New-Object System.IO.FileInfo $initial.Events
-    $State.SessionDir = $initial.Dir
-    $State.EventsPath = $initial.Events
-    $State.Offset     = $fi.Length
-    $State.LastEventUtc = $fi.LastWriteTimeUtc
-}
+# Prime to the current end of every active session, so a fresh start does not
+# replay approvals that were answered long ago.
+Sync-Sessions
 $script:SessionScanUtc = [datetime]::UtcNow
+Merge-SessionState
 
 # Draw the configured mascot. This has to run after the mascot functions are
 # defined, so it deliberately lives here rather than next to Set-Theme.
