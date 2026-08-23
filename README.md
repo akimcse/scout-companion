@@ -40,8 +40,16 @@ place.
 - **Live progress toast** — streams the agent's current activity as readable steps
   (e.g. "Reading config.json", "Running: git commit ...") with a ✓/▸ status list, plus
   the agent's latest narration.
-- **Cheerful animated mascot** — a quokka that bobs and "types" while the agent is busy,
-  and gently breathes when idle, so you can tell at a glance whether work is happening.
+- **A mascot to keep you company** — pick from eleven, including five cats. It bobs and
+  "types" while the agent is busy and gently breathes when idle, so you can tell at a
+  glance whether work is happening (see [Mascots](#mascots)).
+- **Tray icon** — the companion has no taskbar button and hides its toast most of the
+  time, so the tray icon is how you know it is running. It carries the same three state
+  colours as the toast, and right-clicking gives Show toast, Open Scout, Pause animation,
+  Settings and Exit.
+- **Settings window** — reachable from the tray or the ⚙ on the toast. Turn on
+  start-with-Scout, switch the mascot, turn the animation off, and see exactly how much
+  memory and CPU the companion is using (see [Settings](#settings)).
 - **Color-coded status** — the whole toast shifts color with the agent's state: calm
   **green** while working, dim **navy** when idle, and bright pulsing **yellow** when an
   approval is needed (see [Status at a glance](#status-at-a-glance)).
@@ -51,12 +59,28 @@ place.
   **bright pulsing yellow** so you can't miss it.
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
+- **Stays out of the way** — around 1.4% of one CPU core and a flat working set while
+  running. The mascot timer stops whenever the toast is off screen, and the session and
+  window lookups are cached rather than rescanned every tick.
 - **Zero personal data, zero config** — discovers the agent home folder, the active
   session, and the agent window automatically at runtime. Nothing is hardcoded.
 - **Lives and dies with Scout** — an optional watcher launches the companion when Scout
   starts and the companion closes itself when Scout quits, so it's only ever running when
   you need it (see [Start and stop with Scout](#start-and-stop-with-scout-recommended)).
 - **Single file, no install** — pure PowerShell + WPF. No dependencies, no build step.
+  Even the tray icon and every mascot are drawn at runtime; there are no binary assets.
+
+## Mascots
+
+Eleven to choose from, switchable from the settings window without restarting:
+
+<img src="docs/mascots.png" width="720">
+
+Each is a species (the drawing) plus a palette (the colours), which is why the five cats
+cost so little to keep around — they share one drawing and differ only in fur, markings
+and eye colour. Adding a new colourway is a few lines; adding a new animal is one
+function.
+
 
 ## Requirements
 
@@ -74,7 +98,13 @@ That's it. The toast stays hidden until the agent is working in the background.
 ### Start and stop with Scout (recommended)
 
 Instead of running it for your whole Windows session, you can tie the companion to
-Scout's lifetime — it **opens when Scout starts and closes when Scout quits**:
+Scout's lifetime — it **opens when Scout starts and closes when Scout quits**.
+
+The easy way: open **Settings** from the tray icon and tick **Start automatically with
+Scout**. That writes the shortcut below into your Startup folder for you, and unticking
+it removes the shortcut again.
+
+To do it by hand instead:
 
 1. Open your Startup folder: `Win`+`R` → `shell:startup`.
 2. Create a shortcut whose target is:
@@ -92,8 +122,22 @@ If you'd rather have it simply run from login onward, put a shortcut to
 `Start-ScoutCompanion.cmd` in the Startup folder instead and set `exitWhenAgentGone` to
 `false`.
 
-To stop it: click the **✕** on the toast (hides it until the next approval), or close
-the background PowerShell process from Task Manager.
+To stop it: right-click the tray icon and choose **Exit**. Clicking the **✕** on the
+toast only hides it until the next approval.
+
+## Settings
+
+Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast.
+
+| Setting | What it does |
+|---------|--------------|
+| **Start automatically with Scout** | Adds or removes the `Watch-Scout.ps1` shortcut in your Startup folder. Per-user, no registry writes, no admin rights. The checkbox reads the real state of the folder, so editing it outside the app still shows up correctly. |
+| **Animate the mascot** | Off leaves the mascot in a resting pose and stops its timer entirely. Shares one setting with **Pause animation** in the tray menu. |
+| **Mascot** | Switches between the eleven mascots live, no restart needed. |
+| **This process** | Live working set, CPU and uptime for the companion itself, so "how much is this costing me?" does not require hunting through Task Manager for the right `powershell.exe`. |
+
+Changes are written straight into `config.json`, so they survive a restart. Anything you
+put in that file by hand is preserved.
 
 ## How it works
 
@@ -114,31 +158,44 @@ Scout Companion:
 4. For approvals, it wakes the agent window's accessibility tree and invokes the
    matching **Allow/Deny** button through Windows UI Automation.
 
+The session and the agent window are both cached — the poll tick normally costs one file
+stat and one `IsWindow` call rather than a walk over every session folder and every
+process on the machine.
+
 No network calls. No data leaves your machine. The companion only reads local files and
 interacts with the local agent window.
 
 ## Configuration (optional)
 
-Everything works out of the box. To customize, copy `config.sample.json` to
-`config.json` (next to the script) and edit. Common overrides:
+Everything works out of the box, and the settings window covers the things worth changing
+day to day. To go further, copy `config.sample.json` to `config.json` (next to the script)
+and edit. Common overrides:
 
 | Field | Default | Purpose |
 |-------|---------|---------|
-| `home` | `%USERPROFILE%\.copilot` | Agent home folder |
+| `home` | auto-detected | Agent home folder |
 | `processNames` | `["Microsoft Scout","OpenClaw",...]` | Agent window process names |
 | `allowLabels` / `denyLabels` | `["Allow",...]` / `["Deny",...]` | Buttons to click for approvals |
 | `activeWindowSeconds` | `150` | How long after the last event the session counts as "working" |
 | `pollIntervalMs` | `700` | Event/focus polling interval |
+| `sessionRescanMs` | `5000` | How often to re-resolve which session is active. Between rescans the companion just tails the file it already found |
+| `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
+| `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
+| `mascot` | `quokka` | Which mascot to show. Also in the settings window |
 | `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
 | `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
 
 You can also point it at a different home folder with the `SCOUT_COMPANION_HOME`
 environment variable.
 
-`config.json` is git-ignored so your local tweaks never get committed.
+`config.json` is git-ignored so your local tweaks never get committed. The settings window
+writes to this same file, merging rather than overwriting, so hand-written keys survive.
 
 ## Troubleshooting
 
+- **Is it even running?** — look for the mascot in the notification area. Windows 11 puts
+  new tray icons behind the **^** chevron by default; drag it onto the taskbar to keep it
+  visible.
 - **Toast never appears** — make sure the agent is actually running a task. The toast is
   intentionally hidden while the agent window is focused. Minimize it and start a task.
 - **"Agent not detected"** — your build may use a different process name; add it to
@@ -148,6 +205,9 @@ environment variable.
   **Allow for session**, **Allow everywhere**, and **Deny**; the toast's **Allow** maps to
   the safest one-time **Allow**. As a fallback the companion focuses the agent window so
   you can click manually.
+- **Start-with-Scout won't turn on** — the checkbox disables itself if `Watch-Scout.ps1`
+  is missing from the same folder as the script, and reverts if the Startup folder cannot
+  be written.
 
 ## Privacy & safety
 
