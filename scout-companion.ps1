@@ -91,6 +91,8 @@ $Config = [ordered]@{
     animIntervalMs      = 80
     # Mascot animation can be switched off entirely from the tray or settings.
     animationEnabled    = $true
+    # Which mascot the toast shows. See $Mascots for the available ids.
+    mascot              = 'quokka'
     maxSteps            = 4
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
@@ -537,8 +539,10 @@ function Focus-Agent {
     <StackPanel>
       <DockPanel LastChildFill="True">
 
-        <!-- Quokka mascot -->
-        <Canvas x:Name="Quokka" Width="58" Height="60" DockPanel.Dock="Left" Margin="0,0,12,0"
+        <!-- Mascot. The head is swapped in at runtime (see Set-Mascot); the
+             laptop and paws are shared by every mascot and carry the animated
+             transforms, so switching mascot never has to rebind them. -->
+        <Canvas x:Name="MascotHost" Width="58" Height="60" DockPanel.Dock="Left" Margin="0,0,12,0"
                 RenderTransformOrigin="0.5,0.6" VerticalAlignment="Center">
           <Canvas.RenderTransform>
             <TransformGroup>
@@ -546,39 +550,7 @@ function Focus-Agent {
               <TranslateTransform x:Name="BodyT"/>
             </TransformGroup>
           </Canvas.RenderTransform>
-          <!-- ears -->
-          <Ellipse Canvas.Left="8"  Canvas.Top="1"  Width="16" Height="18" Fill="#FFB87A50"/>
-          <Ellipse Canvas.Left="32" Canvas.Top="1"  Width="16" Height="18" Fill="#FFB87A50"/>
-          <Ellipse Canvas.Left="12" Canvas.Top="5"  Width="8"  Height="10" Fill="#FFE3A6A6"/>
-          <Ellipse Canvas.Left="36" Canvas.Top="5"  Width="8"  Height="10" Fill="#FFE3A6A6"/>
-          <!-- head/body -->
-          <Ellipse Canvas.Left="6"  Canvas.Top="9"  Width="44" Height="43" Fill="#FFC58A5E"/>
-          <Ellipse Canvas.Left="15" Canvas.Top="25" Width="26" Height="25" Fill="#FFF0DBBC"/>
-          <!-- cheeks -->
-          <Ellipse Canvas.Left="11" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
-          <Ellipse Canvas.Left="36" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
-          <!-- glasses temples (behind) -->
-          <Line X1="8"  Y1="21" X2="14" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
-          <Line X1="48" Y1="21" X2="42" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
-          <!-- big round lenses -->
-          <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
-          <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
-          <!-- cute big eyes inside the lenses -->
-          <Ellipse Canvas.Left="17" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
-          <Ellipse Canvas.Left="32" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
-          <Ellipse Canvas.Left="18.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
-          <Ellipse Canvas.Left="33.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
-          <!-- bold round frames on top -->
-          <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
-          <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
-          <Line X1="26.5" Y1="25.5" X2="29.5" Y2="25.5" Stroke="#FF242424" StrokeThickness="2.2"/>
-          <!-- lens shine -->
-          <Ellipse Canvas.Left="15" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
-          <Ellipse Canvas.Left="30" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
-          <!-- nose + signature smile -->
-          <Ellipse Canvas.Left="24" Canvas.Top="30" Width="8"  Height="5"  Fill="#FF5A3A2A"/>
-          <Path Stroke="#FF5A3A2A" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                Data="M20,35 Q28,42 36,35"/>
+          <!-- head is inserted here at index 0 -->
           <!-- laptop: screen lid (seen from behind) -->
           <Border Canvas.Left="17" Canvas.Top="40" Width="24" Height="13" CornerRadius="2" Background="#FF3A4257"/>
           <Border Canvas.Left="19" Canvas.Top="42" Width="20" Height="9"  CornerRadius="1" Background="#FF5C6B86"/>
@@ -586,11 +558,11 @@ function Focus-Agent {
           <!-- laptop: keyboard base -->
           <Polygon Points="11,52 47,52 53,60 5,60" Fill="#FFC9D0DC"/>
           <Polygon Points="14,53 44,53 48,58 10,58" Fill="#FFA9B3C4"/>
-          <!-- paws on the keyboard (animated typing) -->
-          <Ellipse Canvas.Left="14" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
+          <!-- paws on the keyboard (animated typing); recoloured per mascot -->
+          <Ellipse x:Name="LeftPaw" Canvas.Left="14" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
             <Ellipse.RenderTransform><TranslateTransform x:Name="LeftPawT"/></Ellipse.RenderTransform>
           </Ellipse>
-          <Ellipse Canvas.Left="32" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
+          <Ellipse x:Name="RightPaw" Canvas.Left="32" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
             <Ellipse.RenderTransform><TranslateTransform x:Name="RightPawT"/></Ellipse.RenderTransform>
           </Ellipse>
         </Canvas>
@@ -663,6 +635,9 @@ $LeftPawT     = $Window.FindName('LeftPawT')
 $RightPawT    = $Window.FindName('RightPawT')
 $RootBorder   = $Window.FindName('RootBorder')
 $GlowBorder   = $Window.FindName('GlowBorder')
+$MascotHost   = $Window.FindName('MascotHost')
+$LeftPaw      = $Window.FindName('LeftPaw')
+$RightPaw     = $Window.FindName('RightPaw')
 $RootGlow     = $Window.FindName('RootGlow')
 $PermTitle    = $Window.FindName('PermTitle')
 
@@ -749,19 +724,267 @@ $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
 
 # ---------------------------------------------------------------------------
-# Tray icon.
+# Mascots.
 #
-# The companion runs with no taskbar button and keeps its toast hidden most of
-# the time, so without this there is no way to tell it is running at all. The
-# icon doubles as the state indicator: it carries the same three colours as the
-# toast, so a glance at the tray answers "is Scout busy?".
+# Each mascot is a species (the geometry) plus a palette (the colours), so the
+# five cats share one drawing and differ only in fur, markings and eye colour.
+# Only the head is swapped at runtime: the laptop and the typing paws live in
+# the host canvas and carry the animated transforms, so switching mascot never
+# rebinds anything the animation touches.
+#
+# Every head carries a thin stroke in its own shade colour, otherwise pale
+# mascots vanish against the bright yellow approval background.
+# ---------------------------------------------------------------------------
+function New-CatHead($p) {
+    $patches = ''
+    if ($p.patchA) {
+        # Calico-style patches: one over an ear and eye, one on the opposite cheek.
+        $patches = @"
+      <Path Fill="$($p.patchA)" Data="M12,12 Q22,6 27,14 Q20,24 11,22 Z"/>
+      <Path Fill="$($p.patchB)" Data="M46,16 Q50,26 42,32 Q36,26 39,17 Z"/>
+"@
+    }
+    $mask = ''
+    if ($p.mask) {
+        # Siamese-style points: a darker mask around the muzzle.
+        $mask = "      <Ellipse Canvas.Left=`"17`" Canvas.Top=`"22`" Width=`"24`" Height=`"20`" Fill=`"$($p.mask)`"/>"
+    }
+    @"
+      <Polygon Points="9,20 13,2 25,13"  Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Polygon Points="49,20 45,2 33,13" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Polygon Points="13,17 15,7 21,14"  Fill="$($p.earInner)"/>
+      <Polygon Points="45,17 43,7 37,14" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="5" Canvas.Top="10" Width="48" Height="38" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+$patches
+$mask
+      <Ellipse Canvas.Left="12" Canvas.Top="22" Width="11" Height="12" Fill="$($p.eye)"/>
+      <Ellipse Canvas.Left="35" Canvas.Top="22" Width="11" Height="12" Fill="$($p.eye)"/>
+      <Ellipse Canvas.Left="15.5" Canvas.Top="24" Width="4" Height="9" Fill="#FF1E1A18"/>
+      <Ellipse Canvas.Left="38.5" Canvas.Top="24" Width="4" Height="9" Fill="#FF1E1A18"/>
+      <Ellipse Canvas.Left="16.6" Canvas.Top="25" Width="2.6" Height="2.6" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="39.6" Canvas.Top="25" Width="2.6" Height="2.6" Fill="#FFFFFFFF"/>
+      <Polygon Points="26,34 32,34 29,38" Fill="$($p.nose)"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M29,38 Q25,42 22,38 M29,38 Q33,42 36,38"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="0.9" Opacity="0.75"
+            Data="M4,31 L15,33 M4,36 L15,36 M54,31 L43,33 M54,36 L43,36"/>
+"@
+}
+
+function New-QuokkaHead($p) {
+    @"
+      <Ellipse Canvas.Left="8"  Canvas.Top="1"  Width="16" Height="18" Fill="$($p.ear)"/>
+      <Ellipse Canvas.Left="32" Canvas.Top="1"  Width="16" Height="18" Fill="$($p.ear)"/>
+      <Ellipse Canvas.Left="12" Canvas.Top="5"  Width="8"  Height="10" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="36" Canvas.Top="5"  Width="8"  Height="10" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="6"  Canvas.Top="9"  Width="44" Height="43" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="15" Canvas.Top="25" Width="26" Height="25" Fill="$($p.muzzle)"/>
+      <Ellipse Canvas.Left="11" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
+      <Ellipse Canvas.Left="36" Canvas.Top="30" Width="9"  Height="7"  Fill="#66F2A0A0"/>
+      <Line X1="8"  Y1="21" X2="14" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
+      <Line X1="48" Y1="21" X2="42" Y2="26" Stroke="#FF2B2B2B" StrokeThickness="1.8"/>
+      <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
+      <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Fill="#0FEAF7FF"/>
+      <Ellipse Canvas.Left="17" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
+      <Ellipse Canvas.Left="32" Canvas.Top="23" Width="7" Height="10" Fill="#FF2B1A12"/>
+      <Ellipse Canvas.Left="18.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="33.4" Canvas.Top="24.6" Width="3.2" Height="3.2" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="13" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
+      <Ellipse Canvas.Left="28" Canvas.Top="20" Width="15" Height="15" Stroke="#FF242424" StrokeThickness="2.2" Fill="Transparent"/>
+      <Line X1="26.5" Y1="25.5" X2="29.5" Y2="25.5" Stroke="#FF242424" StrokeThickness="2.2"/>
+      <Ellipse Canvas.Left="15" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
+      <Ellipse Canvas.Left="30" Canvas.Top="22" Width="4" Height="3" Fill="#66FFFFFF"/>
+      <Ellipse Canvas.Left="24" Canvas.Top="30" Width="8"  Height="5"  Fill="$($p.nose)"/>
+      <Path Stroke="$($p.nose)" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M20,35 Q28,42 36,35"/>
+"@
+}
+
+function New-DogHead($p) {
+    @"
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M8,22 L11,3 L24,14 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M50,22 L47,3 L34,14 Z"/>
+      <Path Fill="$($p.earInner)" Data="M12,18 L14,8 L20,15 Z"/>
+      <Path Fill="$($p.earInner)" Data="M46,18 L44,8 L38,15 Z"/>
+      <Ellipse Canvas.Left="5"  Canvas.Top="11" Width="48" Height="37" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="14" Canvas.Top="26" Width="30" Height="21" Fill="$($p.muzzle)"/>
+      <Ellipse Canvas.Left="10" Canvas.Top="20" Width="12" Height="9" Fill="$($p.muzzle)" Opacity="0.85"/>
+      <Ellipse Canvas.Left="36" Canvas.Top="20" Width="12" Height="9" Fill="$($p.muzzle)" Opacity="0.85"/>
+      <Ellipse Canvas.Left="15" Canvas.Top="21" Width="7" Height="9" Fill="#FF231C18"/>
+      <Ellipse Canvas.Left="36" Canvas.Top="21" Width="7" Height="9" Fill="#FF231C18"/>
+      <Ellipse Canvas.Left="16.3" Canvas.Top="22.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="37.3" Canvas.Top="22.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="24" Canvas.Top="30" Width="10" Height="7" Fill="$($p.nose)"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M29,37 L29,40 M29,40 Q24,44 21,39 M29,40 Q34,44 37,39"/>
+"@
+}
+
+function New-FoxHead($p) {
+    @"
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M7,21 L10,1 L25,13 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M51,21 L48,1 L33,13 Z"/>
+      <Path Fill="#FF2E2A28" Data="M10,10 L10,1 L17,7 Z"/>
+      <Path Fill="#FF2E2A28" Data="M48,10 L48,1 L41,7 Z"/>
+      <Path Fill="$($p.earInner)" Data="M12,17 L14,7 L21,14 Z"/>
+      <Path Fill="$($p.earInner)" Data="M46,17 L44,7 L37,14 Z"/>
+      <Ellipse Canvas.Left="5" Canvas.Top="11" Width="48" Height="36" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Path Fill="$($p.muzzle)" Data="M16,28 Q29,24 42,28 Q40,46 29,47 Q18,46 16,28 Z"/>
+      <Ellipse Canvas.Left="14" Canvas.Top="22" Width="8" Height="9" Fill="#FF2B211C"/>
+      <Ellipse Canvas.Left="36" Canvas.Top="22" Width="8" Height="9" Fill="#FF2B211C"/>
+      <Ellipse Canvas.Left="15.4" Canvas.Top="23.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="37.4" Canvas.Top="23.4" Width="2.8" Height="2.8" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="25" Canvas.Top="33" Width="8" Height="6" Fill="$($p.nose)"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M29,39 Q25,43 22,39 M29,39 Q33,43 36,39"/>
+"@
+}
+
+function New-BunnyHead($p) {
+    @"
+      <Ellipse Canvas.Left="13" Canvas.Top="0"  Width="11" Height="24" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="34" Canvas.Top="0"  Width="11" Height="24" Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="15.6" Canvas.Top="3" Width="6" Height="18" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="36.6" Canvas.Top="3" Width="6" Height="18" Fill="$($p.earInner)"/>
+      <Ellipse Canvas.Left="7"  Canvas.Top="17" Width="44" Height="33" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="16" Canvas.Top="24" Width="9" Height="11" Fill="#FF2A2320"/>
+      <Ellipse Canvas.Left="33" Canvas.Top="24" Width="9" Height="11" Fill="#FF2A2320"/>
+      <Ellipse Canvas.Left="17.6" Canvas.Top="25.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="34.6" Canvas.Top="25.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="25" Canvas.Top="35" Width="8" Height="6" Fill="$($p.nose)"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M29,41 L29,43 M29,43 Q25,46 23,43 M29,43 Q33,46 35,43"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="0.9" Opacity="0.7" Data="M6,36 L17,37 M52,36 L41,37"/>
+"@
+}
+
+function New-PenguinHead($p) {
+    @"
+      <Ellipse Canvas.Left="6"  Canvas.Top="8"  Width="46" Height="42" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Path Fill="$($p.muzzle)" Data="M15,20 Q29,12 43,20 Q45,42 29,48 Q13,42 15,20 Z"/>
+      <Ellipse Canvas.Left="16" Canvas.Top="21" Width="9" Height="11" Fill="#FF17171A"/>
+      <Ellipse Canvas.Left="33" Canvas.Top="21" Width="9" Height="11" Fill="#FF17171A"/>
+      <Ellipse Canvas.Left="17.6" Canvas.Top="22.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="34.6" Canvas.Top="22.6" Width="3" Height="3" Fill="#FFFFFFFF"/>
+      <Path Fill="$($p.nose)" Data="M22,34 L36,34 L29,43 Z"/>
+      <Path Fill="$($p.ear)" Opacity="0.55" Data="M11,28 Q6,22 9,16 Q14,20 15,27 Z"/>
+      <Path Fill="$($p.ear)" Opacity="0.55" Data="M47,28 Q52,22 49,16 Q44,20 43,27 Z"/>
+"@
+}
+
+function New-TunaHead($p) {
+    @"
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M4,18 L14,29 L4,40 Q1,29 4,18 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M54,18 L44,29 L54,40 Q57,29 54,18 Z"/>
+      <Path Fill="$($p.ear)" Stroke="$($p.shade)" StrokeThickness="1" Data="M23,9 Q29,1 35,9 Z"/>
+      <Ellipse Canvas.Left="9" Canvas.Top="9" Width="40" Height="38" Fill="$($p.fur)" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Path Fill="$($p.muzzle)" Data="M13,30 Q29,24 45,30 Q42,47 29,48 Q16,47 13,30 Z"/>
+      <Path Stroke="$($p.shade)" StrokeThickness="1.2" Opacity="0.8" Data="M14,17 Q29,13 44,17 M12,23 Q29,19 46,23"/>
+      <Ellipse Canvas.Left="14" Canvas.Top="21" Width="12" Height="12" Fill="#FFFFFFFF" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="32" Canvas.Top="21" Width="12" Height="12" Fill="#FFFFFFFF" Stroke="$($p.shade)" StrokeThickness="1"/>
+      <Ellipse Canvas.Left="17" Canvas.Top="24" Width="6.5" Height="6.5" Fill="#FF14181F"/>
+      <Ellipse Canvas.Left="35" Canvas.Top="24" Width="6.5" Height="6.5" Fill="#FF14181F"/>
+      <Ellipse Canvas.Left="18.4" Canvas.Top="25" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
+      <Ellipse Canvas.Left="36.4" Canvas.Top="25" Width="2.4" Height="2.4" Fill="#FFFFFFFF"/>
+      <Path Stroke="$($p.nose)" StrokeThickness="2" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+            Data="M24,39 Q29,44 34,39"/>
+"@
+}
+
+$MascotBuilders = @{
+    quokka  = ${function:New-QuokkaHead}
+    cat     = ${function:New-CatHead}
+    dog     = ${function:New-DogHead}
+    fox     = ${function:New-FoxHead}
+    bunny   = ${function:New-BunnyHead}
+    penguin = ${function:New-PenguinHead}
+    tuna    = ${function:New-TunaHead}
+}
+
+# Ordered so the picker reads sensibly: the original mascot, then the cats with
+# white first as requested, then everyone else.
+$Mascots = [ordered]@{
+    'quokka' = @{ Label = 'Quokka'; Species = 'quokka'; Palette = @{
+        fur='#FFC58A5E'; shade='#FF8A5A38'; ear='#FFB87A50'; earInner='#FFE3A6A6'
+        muzzle='#FFF0DBBC'; nose='#FF5A3A2A'; eye='#FF2B1A12'; paw='#FFB87A50' } }
+
+    'cat-white' = @{ Label = 'Cat - White'; Species = 'cat'; Palette = @{
+        fur='#FFF6F3EE'; shade='#FFB9B0A4'; ear='#FFF0EBE3'; earInner='#FFF3BFC1'
+        muzzle='#FFFFFFFF'; nose='#FFE79AA4'; eye='#FF7FC4E8'; paw='#FFF0EBE3' } }
+
+    'cat-siamese' = @{ Label = 'Cat - Siamese'; Species = 'cat'; Palette = @{
+        fur='#FFEFE2CB'; shade='#FF7A6045'; ear='#FF5B4636'; earInner='#FF8C6B58'
+        muzzle='#FFEFE2CB'; nose='#FF6E5346'; eye='#FF6FC0E4'; paw='#FF7A6049'
+        mask='#FF6B5343' } }
+
+    'cat-calico' = @{ Label = 'Cat - Calico'; Species = 'cat'; Palette = @{
+        fur='#FFF7F2EA'; shade='#FFA9968A'; ear='#FFEDE4D8'; earInner='#FFF0B7B7'
+        muzzle='#FFFFFFFF'; nose='#FFE08E96'; eye='#FFD7A03C'; paw='#FFEDE4D8'
+        patchA='#FFE49A47'; patchB='#FF44392F' } }
+
+    'cat-black' = @{ Label = 'Cat - Black'; Species = 'cat'; Palette = @{
+        fur='#FF3A3634'; shade='#FF171514'; ear='#FF322E2C'; earInner='#FF7A5A5A'
+        muzzle='#FF3A3634'; nose='#FF262220'; eye='#FFD9CE59'; paw='#FF322E2C' } }
+
+    'cat-russian' = @{ Label = 'Cat - Russian Blue'; Species = 'cat'; Palette = @{
+        fur='#FF97A3B2'; shade='#FF5F6C7C'; ear='#FF8B98A8'; earInner='#FFCBAEB2'
+        muzzle='#FF97A3B2'; nose='#FF6E7A88'; eye='#FF7FC98A'; paw='#FF8B98A8' } }
+
+    'tuna' = @{ Label = 'Tuna'; Species = 'tuna'; Palette = @{
+        fur='#FF4E7FA6'; shade='#FF2E4E68'; ear='#FF3F6C90'; earInner='#FF3F6C90'
+        muzzle='#FFDCE6EE'; nose='#FF2E4E68'; eye='#FF14181F'; paw='#FF3F6C90' } }
+
+    'shiba' = @{ Label = 'Shiba'; Species = 'dog'; Palette = @{
+        fur='#FFD9A15C'; shade='#FF9A6B34'; ear='#FFCE9553'; earInner='#FFE9C79A'
+        muzzle='#FFF6EBDC'; nose='#FF2E2724'; eye='#FF231C18'; paw='#FFE4C39B' } }
+
+    'fox' = @{ Label = 'Fox'; Species = 'fox'; Palette = @{
+        fur='#FFDE7F3E'; shade='#FF9E4F1C'; ear='#FFD2743A'; earInner='#FFF0B48A'
+        muzzle='#FFF7EFE6'; nose='#FF2B2320'; eye='#FF2B211C'; paw='#FFF2E9DF' } }
+
+    'bunny' = @{ Label = 'Bunny'; Species = 'bunny'; Palette = @{
+        fur='#FFF3EEE9'; shade='#FFB6ABA0'; ear='#FFF0EAE4'; earInner='#FFF2B9BE'
+        muzzle='#FFFFFFFF'; nose='#FFE894A0'; eye='#FF2A2320'; paw='#FFF0EAE4' } }
+
+    'penguin' = @{ Label = 'Penguin'; Species = 'penguin'; Palette = @{
+        fur='#FF2C3038'; shade='#FF15181D'; ear='#FF3A4049'; earInner='#FF3A4049'
+        muzzle='#FFF7F5F2'; nose='#FFF0A63C'; eye='#FF17171A'; paw='#FFF0A63C' } }
+}
+
+$script:MascotHead = $null
+
+function Set-Mascot([string]$id) {
+    if (-not $Mascots.Contains($id)) { $id = 'quokka' }
+    $def = $Mascots[$id]
+    $build = $MascotBuilders[$def.Species]
+    if (-not $build) { return }
+
+    $inner = & $build $def.Palette
+    $frag = "<Canvas xmlns=`"http://schemas.microsoft.com/winfx/2006/xaml/presentation`" Width=`"58`" Height=`"60`">$inner</Canvas>"
+    try {
+        $head = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$frag)))
+    } catch {
+        Write-Warning "Could not build mascot '$id': $($_.Exception.Message)"
+        return
+    }
+
+    if ($script:MascotHead) { $MascotHost.Children.Remove($script:MascotHead) }
+    $script:MascotHead = $head
+    # Index 0 keeps the head behind the laptop and paws.
+    $MascotHost.Children.Insert(0, $head)
+
+    $pawBrush = B $def.Palette.paw
+    $LeftPaw.Fill  = $pawBrush
+    $RightPaw.Fill = $pawBrush
+    $script:MascotId = $id
+}
+
+# ---------------------------------------------------------------------------
+# Animation enable/disable, shared by the tray menu and the settings window.
+# The guard stops the two controls bouncing updates off each other.
 # ---------------------------------------------------------------------------
 $script:AnimEnabled = [bool]$Config.animationEnabled
 $script:SyncingAnim = $false
-
-# Single source of truth for the animation toggle, which is reachable from both
-# the tray menu and the settings window. The guard stops the two controls from
-# bouncing updates off each other.
 function Sync-AnimationEnabled([bool]$on, [switch]$Persist) {
     if ($script:SyncingAnim) { return }
     $script:SyncingAnim = $true
@@ -781,6 +1004,14 @@ function Sync-AnimationEnabled([bool]$on, [switch]$Persist) {
     } finally { $script:SyncingAnim = $false }
 }
 
+# ---------------------------------------------------------------------------
+# Tray icon.
+#
+# The companion runs with no taskbar button and keeps its toast hidden most of
+# the time, so without this there is no way to tell it is running at all. The
+# icon doubles as the state indicator: it carries the same three colours as the
+# toast, so a glance at the tray answers "is Scout busy?".
+# ---------------------------------------------------------------------------
 function New-TrayIcon([string]$hex) {
     # Drawn at runtime rather than shipped as a .ico, so the project stays a
     # single script with no binary assets to keep in sync.
@@ -938,6 +1169,70 @@ function Apply-AutoStartFromUI {
       <Setter Property="FontSize" Value="12.5"/>
       <Setter Property="Cursor" Value="Hand"/>
     </Style>
+    <!-- The stock ComboBox chrome is light and ignores a plain Background
+         setter, which leaves near-white text on a near-white box. Templating
+         both the box and its items is the only way to theme it without taking
+         a dependency. -->
+    <Style TargetType="ComboBox">
+      <Setter Property="Foreground" Value="#FFE6EAF2"/>
+      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <ToggleButton Focusable="False" ClickMode="Press"
+                            IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                <ToggleButton.Template>
+                  <ControlTemplate TargetType="ToggleButton">
+                    <Border x:Name="Chrome" Background="#FF232838" BorderBrush="#FF3A4358"
+                            BorderThickness="1" CornerRadius="4">
+                      <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,9,0"
+                            Data="M0,0 L4,4.5 L8,0 Z" Fill="#FF9AA6BE"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                      <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="Chrome" Property="Background" Value="#FF2C3346"/>
+                      </Trigger>
+                    </ControlTemplate.Triggers>
+                  </ControlTemplate>
+                </ToggleButton.Template>
+              </ToggleButton>
+              <ContentPresenter Margin="9,0,26,0" VerticalAlignment="Center" IsHitTestVisible="False"
+                                Content="{TemplateBinding SelectionBoxItem}"
+                                ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                TextElement.Foreground="{TemplateBinding Foreground}"/>
+              <Popup IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" Focusable="False"
+                     AllowsTransparency="True" PopupAnimation="Fade">
+                <Border Background="#FF232838" BorderBrush="#FF3A4358" BorderThickness="1"
+                        CornerRadius="4" MinWidth="{TemplateBinding ActualWidth}" MaxHeight="260">
+                  <ScrollViewer><StackPanel IsItemsHost="True"/></ScrollViewer>
+                </Border>
+              </Popup>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+      <Setter Property="Foreground" Value="#FFE6EAF2"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border x:Name="Row" Background="Transparent" Padding="9,5">
+              <ContentPresenter TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="Row" Property="Background" Value="#FF35405A"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="Row" Property="Background" Value="#FF2E7D46"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
     <Style x:Key="Hint" TargetType="TextBlock">
       <Setter Property="Foreground" Value="#FF8A93A6"/>
       <Setter Property="FontSize" Value="11"/>
@@ -965,6 +1260,10 @@ function Apply-AutoStartFromUI {
     <CheckBox x:Name="AnimCheck" Content="Animate the mascot"/>
     <TextBlock Style="{StaticResource Hint}"
                Text="Turning this off leaves the mascot in a resting pose and stops its timer entirely."/>
+    <DockPanel Margin="0,12,0,0" LastChildFill="True">
+      <TextBlock Text="Mascot" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+      <ComboBox x:Name="MascotPicker" Height="26" Cursor="Hand"/>
+    </DockPanel>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
@@ -1012,6 +1311,7 @@ function Show-SettingsWindow {
     $script:SettingsMemText   = $sw.FindName('MemText')
     $script:SettingsCpuText   = $sw.FindName('CpuText')
     $script:SettingsUpText    = $sw.FindName('UpText')
+    $script:SettingsMascot    = $sw.FindName('MascotPicker')
     $closeBtn                 = $sw.FindName('CloseSettingsBtn')
 
     # Reflect reality, not a remembered flag. Set before the handlers are
@@ -1022,6 +1322,26 @@ function Show-SettingsWindow {
         $script:SettingsAutoHint.Text = "Watch-Scout.ps1 is missing from $ScriptDir, so this cannot be turned on."
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
+
+    # Mascot picker. Tag carries the id so the label stays free to be prose.
+    foreach ($key in $Mascots.Keys) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = $Mascots[$key].Label
+        $item.Tag     = $key
+        [void]$script:SettingsMascot.Items.Add($item)
+        if ($key -eq $script:MascotId) { $script:SettingsMascot.SelectedItem = $item }
+    }
+    if (-not $script:SettingsMascot.SelectedItem -and $script:SettingsMascot.Items.Count) {
+        $script:SettingsMascot.SelectedIndex = 0
+    }
+    $script:SettingsMascot.Add_SelectionChanged({
+        if ($script:SettingsSuppress) { return }
+        $sel = $script:SettingsMascot.SelectedItem
+        if (-not $sel -or -not $sel.Tag) { return }
+        if ($sel.Tag -eq $script:MascotId) { return }
+        Set-Mascot ([string]$sel.Tag)
+        [void](Save-Setting @{ mascot = [string]$sel.Tag })
+    })
 
     # Checked/Unchecked rather than Click: UI Automation's TogglePattern sets
     # IsChecked directly without raising Click, so a screen reader or voice
@@ -1319,6 +1639,10 @@ if ($initial) {
     $State.LastEventUtc = $fi.LastWriteTimeUtc
 }
 $script:SessionScanUtc = [datetime]::UtcNow
+
+# Draw the configured mascot. This has to run after the mascot functions are
+# defined, so it deliberately lives here rather than next to Set-Theme.
+Set-Mascot ([string]$Config.mascot)
 
 # The mascot timer is driven by the poll loop and only runs while the toast is
 # on screen, so it deliberately does not start here.
