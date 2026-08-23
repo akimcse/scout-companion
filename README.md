@@ -44,9 +44,10 @@ place.
   "types" while the agent is busy and gently breathes when idle, so you can tell at a
   glance whether work is happening (see [Mascots](#mascots)).
 - **Tray icon** — the companion has no taskbar button and hides its toast most of the
-  time, so the tray icon is how you know it is running. It carries the same three state
-  colours as the toast, and right-clicking gives Show toast, Open Scout, Pause animation,
-  Settings and Exit.
+  time, so the tray icon is how you know it is running. Colour carries the state and the
+  silhouette carries your chosen mascot, so a glance answers both "is it running?" and
+  "is Scout busy?". Right-clicking gives Show toast, Open Scout, Pause animation, Settings
+  and Exit.
 - **Settings window** — reachable from the tray or the ⚙ on the toast. Turn on
   start-with-Scout, switch the mascot, turn the animation off, and see exactly how much
   memory and CPU the companion is using (see [Settings](#settings)).
@@ -80,6 +81,10 @@ Each is a species (the drawing) plus a palette (the colours), which is why the f
 cost so little to keep around — they share one drawing and differ only in fur, markings
 and eye colour. Adding a new colourway is a few lines; adding a new animal is one
 function.
+
+The tray icon follows your choice too, reduced to whatever survives at 16 px — ear shape
+for the mammals, fins for the tuna, beak for the penguin — while still carrying the state
+colour.
 
 
 ## Requirements

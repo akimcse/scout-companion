@@ -984,6 +984,9 @@ function Set-Mascot([string]$id) {
     $LeftPaw.Fill  = $pawBrush
     $RightPaw.Fill = $pawBrush
     $script:MascotId = $id
+    # Keep the tray silhouette in step with the toast. Guarded because the first
+    # Set-Mascot runs during startup priming, before the tray exists.
+    if ($script:TrayIcons) { Rebuild-TrayIcons $def.Species }
 }
 
 # ---------------------------------------------------------------------------
@@ -1019,11 +1022,15 @@ function Sync-AnimationEnabled([bool]$on, [switch]$Persist) {
 # icon doubles as the state indicator: it carries the same three colours as the
 # toast, so a glance at the tray answers "is Scout busy?".
 # ---------------------------------------------------------------------------
-function New-TrayIcon([string]$hex) {
+function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
     # Drawn at runtime rather than shipped as a .ico, so the project stays a
     # single script with no binary assets to keep in sync.
+    #
+    # Colour carries the state, silhouette carries the mascot. At 16 px only the
+    # outline survives, so each species is reduced to its most identifiable
+    # feature - ear shape, or fins for the tuna.
     $fill = [System.Drawing.ColorTranslator]::FromHtml($hex)
-    $edge = [System.Drawing.Color]::FromArgb(200,
+    $edge = [System.Drawing.Color]::FromArgb(210,
         [Math]::Max(0, $fill.R - 70), [Math]::Max(0, $fill.G - 70), [Math]::Max(0, $fill.B - 70))
 
     $bmp = New-Object System.Drawing.Bitmap 32, 32
@@ -1033,24 +1040,86 @@ function New-TrayIcon([string]$hex) {
 
     $brush = New-Object System.Drawing.SolidBrush $fill
     $pen   = New-Object System.Drawing.Pen $edge, 2.0
+    $dark  = New-Object System.Drawing.SolidBrush $edge
+    $pale  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(235, 250, 250, 248))
+
+    function Tri([single[]]$pts) {
+        $poly = @(
+            (New-Object System.Drawing.PointF $pts[0], $pts[1]),
+            (New-Object System.Drawing.PointF $pts[2], $pts[3]),
+            (New-Object System.Drawing.PointF $pts[4], $pts[5]))
+        $g.FillPolygon($brush, $poly)
+        $g.DrawPolygon($pen, $poly)
+    }
+
+    # head rect, then the eyes are placed relative to it
+    $hx = 3.0; $hy = 8.0; $hw = 26.0; $hh = 22.0
     try {
-        # A quokka head: two ears over a round face. Recognisable at 16 px and
-        # distinct from the many other round tray icons.
-        foreach ($x in 4, 18) {
-            $g.FillEllipse($brush, $x, 2, 10, 11)
-            $g.DrawEllipse($pen,   $x, 2, 10, 11)
+        switch ($species) {
+            'cat' {
+                $hy = 9; $hh = 21
+                Tri @(5,17, 9,2, 17,11)
+                Tri @(27,17, 23,2, 15,11)
+            }
+            'dog' {
+                $hy = 9; $hh = 21
+                $g.FillEllipse($brush, 0.5, 8, 9, 15); $g.DrawEllipse($pen, 0.5, 8, 9, 15)
+                $g.FillEllipse($brush, 22.5, 8, 9, 15); $g.DrawEllipse($pen, 22.5, 8, 9, 15)
+            }
+            'fox' {
+                $hy = 10; $hh = 20
+                Tri @(4,16, 7,1, 16,11)
+                Tri @(28,16, 25,1, 16,11)
+                $g.FillPolygon($dark, @(
+                    (New-Object System.Drawing.PointF 6.2, 7.0),
+                    (New-Object System.Drawing.PointF 7.0, 1.0),
+                    (New-Object System.Drawing.PointF 11.0, 4.6)))
+                $g.FillPolygon($dark, @(
+                    (New-Object System.Drawing.PointF 25.8, 7.0),
+                    (New-Object System.Drawing.PointF 25.0, 1.0),
+                    (New-Object System.Drawing.PointF 21.0, 4.6)))
+            }
+            'bunny' {
+                $hy = 13; $hh = 17
+                $g.FillEllipse($brush, 8, 0, 6.5, 16); $g.DrawEllipse($pen, 8, 0, 6.5, 16)
+                $g.FillEllipse($brush, 17.5, 0, 6.5, 16); $g.DrawEllipse($pen, 17.5, 0, 6.5, 16)
+            }
+            'penguin' {
+                $hy = 5; $hh = 25
+            }
+            'tuna' {
+                $hx = 6; $hy = 7; $hw = 20; $hh = 21
+                Tri @(0.5,9, 8,17.5, 0.5,26)
+                Tri @(31.5,9, 24,17.5, 31.5,26)
+                Tri @(12,7, 16,0.5, 20,7)
+            }
+            default {
+                # quokka: soft round ears
+                $g.FillEllipse($brush, 3.5, 1.5, 10, 11); $g.DrawEllipse($pen, 3.5, 1.5, 10, 11)
+                $g.FillEllipse($brush, 18.5, 1.5, 10, 11); $g.DrawEllipse($pen, 18.5, 1.5, 10, 11)
+            }
         }
-        $g.FillEllipse($brush, 3, 8, 26, 22)
-        $g.DrawEllipse($pen,   3, 8, 26, 22)
+
+        $g.FillEllipse($brush, $hx, $hy, $hw, $hh)
+        $g.DrawEllipse($pen,   $hx, $hy, $hw, $hh)
+
+        if ($species -eq 'penguin') {
+            $g.FillEllipse($pale, ($hx + 4), ($hy + 4), ($hw - 8), ($hh - 5))
+        }
 
         # Eyes, in the edge colour so they read on any taskbar background.
-        $dark = New-Object System.Drawing.SolidBrush $edge
-        try {
-            $g.FillEllipse($dark, 10, 15, 5, 6)
-            $g.FillEllipse($dark, 18, 15, 5, 6)
-        } finally { $dark.Dispose() }
+        $ey = $hy + $hh * 0.32
+        $g.FillEllipse($dark, ($hx + $hw * 0.20), $ey, 5.4, 6.4)
+        $g.FillEllipse($dark, ($hx + $hw * 0.60), $ey, 5.4, 6.4)
+
+        if ($species -eq 'penguin') {
+            $g.FillPolygon($dark, @(
+                (New-Object System.Drawing.PointF 13.0, 21.0),
+                (New-Object System.Drawing.PointF 19.0, 21.0),
+                (New-Object System.Drawing.PointF 16.0, 26.0)))
+        }
     } finally {
-        $brush.Dispose(); $pen.Dispose(); $g.Dispose()
+        $brush.Dispose(); $pen.Dispose(); $dark.Dispose(); $pale.Dispose(); $g.Dispose()
     }
 
     # GetHicon hands back an unmanaged handle; clone into a managed icon and
@@ -1065,21 +1134,38 @@ function New-TrayIcon([string]$hex) {
     }
 }
 
-# Pre-built once per state: swapping a cached icon costs nothing, and nothing
-# is allocated on the hot path.
-$TrayIcons = @{
-    idle    = New-TrayIcon '#5B6780'
-    working = New-TrayIcon '#4ADE80'
-    alert   = New-TrayIcon '#FFD23D'
+# One icon per state for the current mascot. Switching mascot rebuilds the set
+# and disposes the old one; switching state is just a cached swap.
+$script:TrayIcons       = $null
+$script:TrayIconSpecies = $null
+
+function Rebuild-TrayIcons([string]$species) {
+    if ($script:TrayIcons -and $script:TrayIconSpecies -eq $species) { return }
+    $previous = $script:TrayIcons
+    $script:TrayIcons = @{
+        idle    = New-TrayIcon '#5B6780' $species
+        working = New-TrayIcon '#4ADE80' $species
+        alert   = New-TrayIcon '#FFD23D' $species
+    }
+    $script:TrayIconSpecies = $species
+    # Point the tray at the new set before freeing the old one.
+    if ($Tray) {
+        $state = if ($script:ThemeState) { $script:ThemeState } else { 'idle' }
+        if (-not $script:TrayIcons.ContainsKey($state)) { $state = 'idle' }
+        try { $Tray.Icon = $script:TrayIcons[$state] } catch { }
+    }
+    if ($previous) { foreach ($i in $previous.Values) { try { $i.Dispose() } catch { } } }
 }
 
+Rebuild-TrayIcons 'quokka'
+
 $Tray = New-Object System.Windows.Forms.NotifyIcon
-$Tray.Icon = $TrayIcons.idle
+$Tray.Icon = $script:TrayIcons.idle
 $Tray.Text = 'Scout Companion - idle'
 $Tray.Visible = $true
 
 function Set-TrayState([string]$state, [string]$detail) {
-    if ($TrayIcons.ContainsKey($state)) { $Tray.Icon = $TrayIcons[$state] }
+    if ($script:TrayIcons -and $script:TrayIcons.ContainsKey($state)) { $Tray.Icon = $script:TrayIcons[$state] }
     # NotifyIcon.Text is capped at 63 characters and throws above it.
     $t = "Scout Companion - $detail"
     if ($t.Length -gt 63) { $t = $t.Substring(0, 60) + '...' }
@@ -1095,7 +1181,7 @@ function Stop-Companion {
     try {
         $Tray.Visible = $false
         $Tray.Dispose()
-        foreach ($i in $TrayIcons.Values) { $i.Dispose() }
+        if ($script:TrayIcons) { foreach ($i in $script:TrayIcons.Values) { $i.Dispose() } }
     } catch { }
     try { $Window.Close() } catch { }
 }
@@ -1413,7 +1499,7 @@ function Show-SettingsWindow {
     # generic PowerShell icon.
     try {
         $sw.Icon = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon(
-            $TrayIcons.idle.Handle,
+            $script:TrayIcons.idle.Handle,
             [System.Windows.Int32Rect]::Empty,
             [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions())
     } catch { }
