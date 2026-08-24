@@ -99,6 +99,9 @@ $Config = [ordered]@{
     animIntervalMs      = 80
     # Mascot animation can be switched off entirely from the tray or settings.
     animationEnabled    = $true
+    # Toast opacity, 0.35 to 1.0. Floored deliberately: a toast faded to nothing
+    # is one you cannot find again to turn back up.
+    opacity             = 1.0
     # Which mascot the toast shows. See $Mascots for the available ids.
     mascot              = 'quokka'
     maxSteps            = 4
@@ -934,9 +937,43 @@ $Window.Add_SizeChanged({ Place-BottomRight })
 $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
 $script:Hidden = $false
+# Set by the tray toggle only. The automatic rules decide when the toast is
+# worth showing; this is the user overriding them, so it outranks both the
+# rules and $Hidden and stays on until it is switched off again.
+$script:Pinned = $false
 $script:Pending = $false
 $script:Asking = $false
 $script:AgentGoneSince = $null
+
+# The whole visibility policy, in one place and with no side effects, so the
+# ordering of the rules is reviewable and testable rather than buried in the
+# poll loop. Order matters and is the point:
+#   1. anything waiting on the user is worth showing,
+#   2. otherwise show only while the agent is working out of sight,
+#   3. a dismissal suppresses both of those,
+#   4. an explicit pin overrides everything, including the dismissal.
+function Get-ShouldShow {
+    param(
+        [bool]$HasPending, [bool]$HasAsk, [bool]$IsActive,
+        [bool]$AgentRunning, [bool]$IsMinimized, [bool]$IsForeground,
+        [bool]$Hidden, [bool]$Pinned
+    )
+    $show = $false
+    if ($HasPending -or $HasAsk) { $show = $true }
+    elseif ($IsActive -and $AgentRunning -and ($IsMinimized -or -not $IsForeground)) { $show = $true }
+    if ($Hidden) { $show = $false }
+    if ($Pinned) { $show = $true }
+    return $show
+}
+
+# Applied to the whole toast. Clamped rather than trusted: a hand-edited config
+# with 0 in it would leave an invisible window that still takes clicks.
+function Set-ToastOpacity([double]$v) {    if ($v -lt 0.35) { $v = 0.35 }
+    if ($v -gt 1.0)  { $v = 1.0 }
+    $Window.Opacity = $v
+    return $v
+}
+$Config.opacity = Set-ToastOpacity ([double]$Config.opacity)
 Set-Theme 'idle'
 
 $AllowBtn.Add_Click({
@@ -951,7 +988,7 @@ $DenyBtn.Add_Click({
 })
 $OpenBtn.Add_Click({ Focus-Agent })
 $AnswerBtn.Add_Click({ Focus-Agent })
-$CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
+$CloseBtn.Add_Click({ $script:Hidden = $true; $script:Pinned = $false; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
 
 # ---------------------------------------------------------------------------
@@ -1477,6 +1514,8 @@ function Set-AutoStart([bool]$on) {
 $script:SettingsWindow    = $null
 $script:SettingsAnimCheck = $null
 $script:SettingsSuppress  = $false
+$script:OpacitySaveTimer  = $null
+$script:OpacityPendingValue = 1.0
 $script:SelfProc          = [System.Diagnostics.Process]::GetCurrentProcess()
 
 # Applies the Startup checkbox, and snaps it back if the folder write failed so
@@ -1603,6 +1642,13 @@ function Apply-AutoStartFromUI {
       <TextBlock Text="Mascot" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
       <ComboBox x:Name="MascotPicker" Height="26" Cursor="Hand"/>
     </DockPanel>
+    <DockPanel Margin="0,12,0,0" LastChildFill="True">
+      <TextBlock Text="Opacity" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+      <TextBlock x:Name="OpacityValue" Text="100%" Width="46" Foreground="#FFE6EAF2" VerticalAlignment="Center"
+                 TextAlignment="Right" DockPanel.Dock="Right"/>
+      <Slider x:Name="OpacitySlider" Minimum="0.35" Maximum="1.0" Value="1.0"
+              TickFrequency="0.05" IsSnapToTickEnabled="True" VerticalAlignment="Center" Cursor="Hand"/>
+    </DockPanel>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
@@ -1651,6 +1697,8 @@ function Show-SettingsWindow {
     $script:SettingsCpuText   = $sw.FindName('CpuText')
     $script:SettingsUpText    = $sw.FindName('UpText')
     $script:SettingsMascot    = $sw.FindName('MascotPicker')
+    $script:SettingsOpacity   = $sw.FindName('OpacitySlider')
+    $script:SettingsOpacityText = $sw.FindName('OpacityValue')
     $closeBtn                 = $sw.FindName('CloseSettingsBtn')
 
     # Reflect reality, not a remembered flag. Set before the handlers are
@@ -1661,6 +1709,28 @@ function Show-SettingsWindow {
         $script:SettingsAutoHint.Text = "Watch-Scout.ps1 is missing from $ScriptDir, so this cannot be turned on."
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
+
+    # Opacity. Primed before the handler is attached so setting the initial
+    # value does not fire a save.
+    $script:SettingsOpacity.Value = [double]$Config.opacity
+    $script:SettingsOpacityText.Text = '{0:N0}%' -f ([double]$Config.opacity * 100)
+    $script:SettingsOpacity.Add_ValueChanged({
+        $v = Set-ToastOpacity ([double]$script:SettingsOpacity.Value)
+        $script:SettingsOpacityText.Text = '{0:N0}%' -f ($v * 100)
+        # Dragging a slider fires this continuously, so coalesce the writes and
+        # persist once the value has settled.
+        $script:OpacityPendingValue = $v
+        if (-not $script:OpacitySaveTimer) {
+            $script:OpacitySaveTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:OpacitySaveTimer.Interval = [TimeSpan]::FromMilliseconds(600)
+            $script:OpacitySaveTimer.Add_Tick({
+                $script:OpacitySaveTimer.Stop()
+                [void](Save-Setting @{ opacity = $script:OpacityPendingValue })
+            })
+        }
+        $script:OpacitySaveTimer.Stop()
+        $script:OpacitySaveTimer.Start()
+    })
 
     # Mascot picker. Tag carries the id so the label stays free to be prose.
     foreach ($key in $Mascots.Keys) {
@@ -1762,7 +1832,20 @@ $MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
 $MenuPause.CheckOnClick = $true
 $MenuPause.Checked = -not $script:AnimEnabled
 
-$MenuShow.Add_Click({ $script:Hidden = $false })
+$MenuShow.Add_Click({
+    # A pin, not a nudge. "Show" has to work even when nothing is happening --
+    # a click that silently did nothing because the automatic rules disagreed
+    # would look broken. "Hide" clears the pin and dismisses, exactly like the
+    # toast's own close button.
+    if ($script:Pinned) {
+        $script:Pinned = $false
+        $script:Hidden = $true
+        try { $Window.Hide() } catch { }
+    } else {
+        $script:Pinned = $true
+        $script:Hidden = $false
+    }
+})
 $MenuOpen.Add_Click({ Focus-Agent })
 $MenuPause.Add_Click({
     # CheckOnClick has already flipped Checked by the time this runs.
@@ -2026,15 +2109,14 @@ $timer.Add_Tick({
     }
 
     # visibility policy
-    $shouldShow = $false
-    if ($hasPending -or $hasAsk) { $shouldShow = $true }
-    elseif ($isActive -and $agentRunning -and ($isMinimized -or -not $isForeground)) { $shouldShow = $true }
-    if ($script:Hidden) { $shouldShow = $false }
+    $shouldShow = Get-ShouldShow -HasPending $hasPending -HasAsk $hasAsk `
+        -IsActive $isActive -AgentRunning $agentRunning -IsMinimized $isMinimized `
+        -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned
 
     if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
         try {
-            $dbg = "{0} show={1} pend={2} ask={3} sess={4} active={5} run={6} agent={7} fg={8} min={9} hidden={10} age={11}" -f `
-                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, [int]$ageSec
+            $dbg = "{0} show={1} pend={2} ask={3} sess={4} active={5} run={6} agent={7} fg={8} min={9} hidden={10} pin={11} age={12}" -f `
+                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, $script:Pinned, [int]$ageSec
             Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') -Value $dbg
         } catch { }
     }
@@ -2048,6 +2130,11 @@ $timer.Add_Tick({
         if ($anim.IsEnabled) { $anim.Stop() }
         if ($Window.IsVisible) { $Window.Hide() }
     }
+
+    # The tray item is a toggle, so its caption has to say what clicking it will
+    # do rather than name a state.
+    $wantCaption = if ($shouldShow) { 'Hide toast' } else { 'Show toast' }
+    if ($MenuShow.Text -ne $wantCaption) { $MenuShow.Text = $wantCaption }
 })
 
 # Prime to the current end of every active session, so a fresh start does not

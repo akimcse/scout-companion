@@ -52,11 +52,11 @@ place.
 - **Tray icon** — the companion has no taskbar button and hides its toast most of the
   time, so the tray icon is how you know it is running. Colour carries the state and the
   silhouette carries your chosen mascot, so a glance answers both "is it running?" and
-  "is Scout busy?". Right-clicking gives Show toast, Open Scout, Pause animation, Settings
-  and Exit.
+  "is Scout busy?". Right-clicking gives Show/Hide toast, Open Scout, Pause animation,
+  Settings and Exit.
 - **Settings window** — reachable from the tray or the ⚙ on the toast. Turn on
-  start-with-Scout, switch the mascot, turn the animation off, and see exactly how much
-  memory and CPU the companion is using (see [Settings](#settings)).
+  start-with-Scout, switch the mascot, dim the toast, turn the animation off, and see
+  exactly how much memory and CPU the companion is using (see [Settings](#settings)).
 - **Color-coded status** — the whole toast shifts color with the agent's state: calm
   **green** while working, dim **navy** when idle, and bright pulsing **yellow** when an
   approval is needed (see [Status at a glance](#status-at-a-glance)).
@@ -144,6 +144,10 @@ If you'd rather have it simply run from login onward, put a shortcut to
 To stop it: right-click the tray icon and choose **Exit**. Clicking the **✕** on the
 toast only hides it until the next approval.
 
+The tray menu's first item is a toggle: **Show toast** pins the toast on screen even when
+nothing is happening, and **Hide toast** puts it away again. The caption always names what
+the click will do, so it doubles as a readout of whether the toast is currently up.
+
 ## Settings
 
 Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast.
@@ -153,6 +157,7 @@ Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast
 | **Start automatically with Scout** | Adds or removes the `Watch-Scout.ps1` shortcut in your Startup folder. Per-user, no registry writes, no admin rights. The checkbox reads the real state of the folder, so editing it outside the app still shows up correctly. |
 | **Animate the mascot** | Off leaves the mascot in a resting pose and stops its timer entirely. Shares one setting with **Pause animation** in the tray menu. |
 | **Mascot** | Switches between the eleven mascots live, no restart needed. |
+| **Opacity** | Fades the whole toast, from solid down to 35%. Useful if you want it present but not loud. Applies as you drag; the value is saved once you settle. The 35% floor is deliberate — a fully transparent window would still swallow clicks. |
 | **This process** | Live working set, CPU and uptime for the companion itself, so "how much is this costing me?" does not require hunting through Task Manager for the right `powershell.exe`. |
 
 Changes are written straight into `config.json`, so they survive a restart. Anything you
@@ -215,6 +220,7 @@ and edit. Common overrides:
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
 | `mascot` | `quokka` | Which mascot to show. Also in the settings window |
+| `opacity` | `1.0` | Toast opacity, clamped to 0.35–1.0 on load. Also in the settings window |
 | `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
 | `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
 
