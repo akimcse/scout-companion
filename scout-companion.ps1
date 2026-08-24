@@ -104,6 +104,11 @@ $Config = [ordered]@{
     opacity             = 1.0
     # Which mascot the toast shows. See $Mascots for the available ids.
     mascot              = 'quokka'
+    # UI language. 'auto' follows the Windows display language; set a tag from
+    # lang/ (e.g. 'ko', 'ja', 'pt-BR') to pin it. Windows keeps display language
+    # and regional format separate, so auto-detection is right for most people
+    # but wrong for anyone running, say, an English UI with Korean formats.
+    language            = 'auto'
     maxSteps            = 4
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
@@ -120,6 +125,92 @@ if (Test-Path $cfgPath) {
         Write-Warning "Could not parse config.json: $($_.Exception.Message)"
     }
 }
+
+# ---------------------------------------------------------------------------
+# Language.
+#
+# English lives in the script and every other language is a file in lang/, so a
+# missing or malformed translation degrades to English instead of breaking the
+# app, and a translator only has to touch one JSON file. Any key absent from a
+# translation falls back to English individually, which means a partial
+# translation is useful immediately rather than all-or-nothing.
+#
+# Detection reads CurrentUICulture and walks its parent chain: zh-CN resolves to
+# zh-Hans, pt-BR to pt-BR then pt, and so on. It is deliberately overridable,
+# because UI language and regional format are independent settings in Windows
+# and the machine this was written on runs an English UI with Korean formats --
+# guessing from either one alone would be wrong half the time.
+# ---------------------------------------------------------------------------
+$script:Strings = @{}
+
+function Import-Language([string]$pref) {
+    $dir = Join-Path $ScriptDir 'lang'
+    if (-not (Test-Path $dir)) { return 'en' }
+
+    $order = @()
+    if ($pref -and $pref -ne 'auto') {
+        $order += $pref
+    } else {
+        $ci = [System.Globalization.CultureInfo]::CurrentUICulture
+        while ($ci -and $ci.Name) { $order += $ci.Name; $ci = $ci.Parent }
+    }
+
+    foreach ($tag in $order) {
+        $file = Join-Path $dir "$tag.json"
+        if (-not (Test-Path $file)) { continue }
+        try {
+            $json = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
+            $map = @{}
+            foreach ($p in $json.PSObject.Properties) {
+                # Keys starting with _ are notes for translators, not strings.
+                if ($p.Name -notlike '_*') { $map[$p.Name] = [string]$p.Value }
+            }
+            $script:Strings = $map
+            return $tag
+        } catch {
+            Write-Warning "Could not parse lang/$tag.json, falling back to English: $($_.Exception.Message)"
+        }
+    }
+    return 'en'
+}
+
+# T for "translate". Takes the English string as the key, so the script stays
+# readable and an untranslated build is still correct English. Optional -f
+# arguments are applied after lookup, because word order differs between
+# languages and the translation has to own the whole sentence.
+function T([string]$key) {
+    $s = $script:Strings[$key]
+    if (-not $s) { $s = $key }
+    if ($args.Count -gt 0) {
+        try { return [string]::Format($s, $args) } catch { return $s }
+    }
+    return $s
+}
+
+# Translates the user-facing attributes of a XAML document in place. Doing it
+# here rather than interpolating T into the markup keeps the XAML a plain
+# single-quoted here-string, and means a string added to the markup later is
+# picked up automatically instead of being quietly left in English.
+#
+# Only Text, Content, ToolTip and Title are touched, and bindings, glyph escapes
+# and pure format placeholders are skipped -- translating "{TemplateBinding
+# SelectionBoxItem}" would break the control it belongs to.
+function Convert-XamlText([xml]$doc) {
+    if ($script:Strings.Count -eq 0) { return $doc }
+    $attrs = 'Text', 'Content', 'ToolTip', 'Title'
+    foreach ($node in $doc.SelectNodes('//*')) {
+        foreach ($a in $attrs) {
+            $v = $node.GetAttribute($a)
+            if (-not $v) { continue }
+            if ($v -match '^\{' -or $v -match '^&#x' -or $v -match '^\s*$') { continue }
+            $t = $script:Strings[$v]
+            if ($t) { $node.SetAttribute($a, $t) }
+        }
+    }
+    return $doc
+}
+
+$script:Lang = Import-Language $Config.language
 
 # Writes a subset of settings back to config.json, preserving anything the user
 # put there by hand. Used by the settings window and the tray menu.
@@ -253,39 +344,44 @@ function Leaf([string]$p) {
 
 function Describe-Tool([string]$name, $a) {
     # Turn a tool call into a short, human-readable action.
-    if (-not $name) { return 'Working' }
+    #
+    # Labels with a value in them go through T with a {0} placeholder rather than
+    # being built by interpolation, because word order is not universal: the file
+    # name comes after the verb in English and before it in Korean and Japanese,
+    # so the translation has to own the whole sentence.
+    if (-not $name) { return T 'Working' }
     switch -Regex ($name) {
-        '^report_intent$'              { if ($a.intent) { return [string]$a.intent } ; return 'Planning' }
+        '^report_intent$'              { if ($a.intent) { return [string]$a.intent } ; return T 'Planning' }
         '^(powershell|bash|shell|run_command)$' {
             $c = $a.command; if (-not $c) { $c = $a.script }
             if ($c) { $first = ($c -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
-                      return "Running: $(Truncate $first 64)" }
-            return 'Running a command'
+                      return T 'Running: {0}' (Truncate $first 64) }
+            return T 'Running a command'
         }
-        '^view$'                       { return "Reading $(Leaf $a.path)" }
-        '^edit$'                       { return "Editing $(Leaf $a.path)" }
-        '^create$'                     { return "Creating $(Leaf $a.path)" }
-        '^grep$'                       { return "Searching `"$(Truncate $a.pattern 40)`"" }
-        '^glob$'                       { return "Finding files: $(Truncate $a.pattern 40)" }
-        '^task$'                       { if ($a.description) { return "Delegating: $(Truncate $a.description 50)" } ; return 'Delegating a subtask' }
-        '^web_fetch$'                  { return "Fetching $(Truncate $a.url 50)" }
-        '^web_search$'                 { return "Web search: $(Truncate $a.query 44)" }
-        '^m_filesystem_(list|tree)$'   { return "Listing $(Leaf $a.path)" }
-        '^m_filesystem_stat$'          { return "Checking $(Leaf $a.path)" }
-        '^m_filesystem_mkdir$'         { return "New folder $(Leaf $a.path)" }
-        '^m_filesystem_move$'          { return "Moving $(Leaf $a.source)" }
-        '^sql$'                        { if ($a.description) { return "DB: $(Truncate $a.description 46)" } ; return 'Querying database' }
-        '^workiq_list_emails$'         { return 'Checking emails' }
-        '^workiq_(search_emails|get_email)$' { return "Email: $(Truncate $a.query 40)" }
-        '^workiq_(send_email|reply_to_email|create_draft).*' { return 'Composing email' }
-        '^workiq_.*chat.*'             { return 'Teams chat' }
-        '^workiq_.*event.*'            { return 'Calendar' }
-        '^workiq_.*(people|profile|manager).*' { return 'Looking up people' }
-        '^workiq_.*file.*'             { return 'OneDrive files' }
-        '^m_remember$'                 { return 'Saving a memory' }
-        '^m_recall$'                   { return 'Recalling memory' }
-        '^skill$'                      { if ($a.skill) { return "Skill: $($a.skill)" } ; return 'Using a skill' }
-        '^browser_'                    { return 'Browsing the web' }
+        '^view$'                       { return T 'Reading {0}' (Leaf $a.path) }
+        '^edit$'                       { return T 'Editing {0}' (Leaf $a.path) }
+        '^create$'                     { return T 'Creating {0}' (Leaf $a.path) }
+        '^grep$'                       { return T 'Searching "{0}"' (Truncate $a.pattern 40) }
+        '^glob$'                       { return T 'Finding files: {0}' (Truncate $a.pattern 40) }
+        '^task$'                       { if ($a.description) { return T 'Delegating: {0}' (Truncate $a.description 50) } ; return T 'Delegating a subtask' }
+        '^web_fetch$'                  { return T 'Fetching {0}' (Truncate $a.url 50) }
+        '^web_search$'                 { return T 'Web search: {0}' (Truncate $a.query 44) }
+        '^m_filesystem_(list|tree)$'   { return T 'Listing {0}' (Leaf $a.path) }
+        '^m_filesystem_stat$'          { return T 'Checking {0}' (Leaf $a.path) }
+        '^m_filesystem_mkdir$'         { return T 'New folder {0}' (Leaf $a.path) }
+        '^m_filesystem_move$'          { return T 'Moving {0}' (Leaf $a.source) }
+        '^sql$'                        { if ($a.description) { return T 'DB: {0}' (Truncate $a.description 46) } ; return T 'Querying database' }
+        '^workiq_list_emails$'         { return T 'Checking emails' }
+        '^workiq_(search_emails|get_email)$' { return T 'Email: {0}' (Truncate $a.query 40) }
+        '^workiq_(send_email|reply_to_email|create_draft).*' { return T 'Composing email' }
+        '^workiq_.*chat.*'             { return T 'Teams chat' }
+        '^workiq_.*event.*'            { return T 'Calendar' }
+        '^workiq_.*(people|profile|manager).*' { return T 'Looking up people' }
+        '^workiq_.*file.*'             { return T 'OneDrive files' }
+        '^m_remember$'                 { return T 'Saving a memory' }
+        '^m_recall$'                   { return T 'Recalling memory' }
+        '^skill$'                      { if ($a.skill) { return T 'Skill: {0}' $a.skill } ; return T 'Using a skill' }
+        '^browser_'                    { return T 'Browsing the web' }
         default                        { return (($name -replace '^m_','') -replace '_',' ') }
     }
 }
@@ -628,7 +724,7 @@ function Handle-Event($sess, $evt) {
             if ($Config.askToolNames -contains $evt.data.toolName) {
                 $q = $evt.data.arguments.question
                 if (-not $q) { $q = $evt.data.arguments.prompt }
-                if (-not $q) { $q = 'The agent is waiting for your answer.' }
+                if (-not $q) { $q = T 'The agent is waiting for your answer.' }
                 $choices = @()
                 foreach ($a in @($evt.data.arguments.answers)) {
                     if ($a -and $a.title) { $choices += $a.title }
@@ -826,12 +922,17 @@ function Focus-Agent {
           <TextBlock x:Name="PermTitle" Text="&#x26A0; Permission requested" Foreground="#FF6A4A00" FontWeight="Bold" FontSize="13"/>
           <TextBlock x:Name="PermText" Margin="0,5,0,0" Foreground="#FFD6CFC2" FontSize="11.5"
                      TextWrapping="Wrap" MaxHeight="90" TextTrimming="CharacterEllipsis"/>
+          <!-- MinWidth, not Width. Fixed widths were fine in English and clipped
+               the moment the captions were translated: "Отклонить" and
+               "Odmítnout" both overrun a 74 px Deny button. MinWidth keeps the
+               English layout identical while letting a longer caption push the
+               button out instead of truncating it. -->
           <StackPanel Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
-            <Button x:Name="DenyBtn" Content="Deny" Width="74" Height="28" Margin="0,0,8,0"
+            <Button x:Name="DenyBtn" Content="Deny" MinWidth="74" Height="28" Margin="0,0,8,0" Padding="10,0"
                     Background="#FF3A2730" Foreground="#FFF0B4B4" BorderThickness="0" Cursor="Hand"/>
-            <Button x:Name="AllowBtn" Content="Allow" Width="90" Height="28"
+            <Button x:Name="AllowBtn" Content="Allow" MinWidth="90" Height="28" Padding="10,0"
                     Background="#FF2E7D46" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold" Cursor="Hand"/>
-            <Button x:Name="AnswerBtn" Content="Answer in Scout" Width="140" Height="28"
+            <Button x:Name="AnswerBtn" Content="Answer in Scout" MinWidth="140" Height="28" Padding="10,0"
                     Background="#FF0E7FB8" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold"
                     Cursor="Hand" Visibility="Collapsed"/>
           </StackPanel>
@@ -843,7 +944,7 @@ function Focus-Agent {
 </Window>
 '@
 
-$reader = New-Object System.Xml.XmlNodeReader $xaml
+$reader = New-Object System.Xml.XmlNodeReader (Convert-XamlText $xaml)
 $Window = [Windows.Markup.XamlReader]::Load($reader)
 
 $HeaderText   = $Window.FindName('HeaderText')
@@ -1617,7 +1718,7 @@ Rebuild-TrayIcons 'quokka'
 
 $Tray = New-Object System.Windows.Forms.NotifyIcon
 $Tray.Icon = $script:TrayIcons.idle
-$Tray.Text = 'Scout Companion - idle'
+$Tray.Text = 'Scout Companion - ' + (T 'Idle')
 $Tray.Visible = $true
 
 function Set-TrayState([string]$state, [string]$detail) {
@@ -1707,7 +1808,7 @@ function Apply-AutoStartFromUI {
     $script:SettingsSuppress = $true
     try { $script:SettingsAutoCheck.IsChecked = Test-AutoStart }
     finally { $script:SettingsSuppress = $false }
-    $script:SettingsAutoHint.Text = 'Could not update the Startup folder. Check that you can write to it.'
+    $script:SettingsAutoHint.Text = T 'Could not update the Startup folder. Check that you can write to it.'
 }
 
 [xml]$settingsXaml = @'
@@ -1863,7 +1964,7 @@ function Show-SettingsWindow {
         try { $script:SettingsWindow.Activate(); return } catch { $script:SettingsWindow = $null }
     }
 
-    $sw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $settingsXaml))
+    $sw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader (Convert-XamlText $settingsXaml)))
 
     # Every control the event handlers touch is held at script scope: a
     # PowerShell event handler runs long after its defining function has
@@ -1885,7 +1986,7 @@ function Show-SettingsWindow {
     $script:SettingsAutoCheck.IsChecked = Test-AutoStart
     if (-not (Test-Path $WatcherPath)) {
         $script:SettingsAutoCheck.IsEnabled = $false
-        $script:SettingsAutoHint.Text = "Watch-Scout.ps1 is missing from $ScriptDir, so this cannot be turned on."
+        $script:SettingsAutoHint.Text = T 'Watch-Scout.ps1 is missing from {0}, so this cannot be turned on.' $ScriptDir
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
 
@@ -2005,11 +2106,11 @@ function Show-SettingsWindow {
     $sw.Activate()
 }
 
-$MenuShow  = New-Object System.Windows.Forms.ToolStripMenuItem 'Show toast'
-$MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem 'Open Scout'
-$MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem 'Pause animation'
-$MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem 'Settings...'
-$MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
+$MenuShow  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Show toast')
+$MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Open Scout')
+$MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Pause animation')
+$MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Settings...')
+$MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Exit')
 $MenuPause.CheckOnClick = $true
 $MenuPause.Checked = -not $script:AnimEnabled
 
@@ -2328,11 +2429,15 @@ $timer.Add_Tick({
     if ($desiredState -ne $script:ThemeState) {
         Set-Theme $desiredState
         $script:ThemeState = $desiredState
+        # Same strings as the header, not lowercase variants. JSON object keys
+        # are matched case-insensitively by ConvertFrom-Json, so "Idle" and
+        # "idle" as separate keys made every language file fail to parse -- and
+        # the loader's catch turned that into a silent fall back to English.
         $detail = switch ($desiredState) {
-            'alert'   { 'approval needed' }
-            'ask'     { 'waiting on your answer' }
-            'working' { 'Scout is working' }
-            default   { if ($agentRunning) { 'idle' } else { 'agent not detected' } }
+            'alert'   { T 'Approval needed' }
+            'ask'     { T 'Waiting on you' }
+            'working' { T 'Scout is working' }
+            default   { if ($agentRunning) { T 'Idle' } else { T 'Agent not detected' } }
         }
         Set-TrayState $desiredState $detail
     }
@@ -2341,8 +2446,8 @@ $timer.Add_Tick({
     if ($hasPending) {
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
         $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
-        $HeaderText.Text = "Approval needed$extra"
-        $PermTitle.Text  = [char]0x26A0 + ' Permission requested' + (Where-From $first)
+        $HeaderText.Text = (T 'Approval needed') + $extra
+        $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested') + (Where-From $first)
         $PermText.Text = $first.text
         $AllowBtn.Visibility  = 'Visible'
         $DenyBtn.Visibility   = 'Visible'
@@ -2356,8 +2461,8 @@ $timer.Add_Tick({
     elseif ($hasAsk) {
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
         $extra = if ($State.PendingAsks.Count -gt 1) { " (+$($State.PendingAsks.Count - 1))" } else { '' }
-        $HeaderText.Text = "Waiting on you$extra"
-        $PermTitle.Text  = [char]0x2753 + ' The agent asked you a question' + (Where-From $first)
+        $HeaderText.Text = (T 'Waiting on you') + $extra
+        $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question') + (Where-From $first)
         $body = $first.text
         if ($first.choices -and $first.choices.Count) {
             $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
@@ -2374,9 +2479,9 @@ $timer.Add_Tick({
     }
     else {
         $PermPanel.Visibility = 'Collapsed'
-        if (-not $agentRunning) { $HeaderText.Text = 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
-        elseif ($script:Busy)   { $HeaderText.Text = 'Working hard...';     $Dot.Fill = '#FF4ADE80' }
-        else                    { $HeaderText.Text = 'Idle';                $Dot.Fill = '#FF8A93A6' }
+        if (-not $agentRunning) { $HeaderText.Text = T 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
+        elseif ($script:Busy)   { $HeaderText.Text = T 'Working hard...';    $Dot.Fill = '#FF4ADE80' }
+        else                    { $HeaderText.Text = T 'Idle';               $Dot.Fill = '#FF8A93A6' }
 
         if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
         else { $SayingText.Visibility = 'Collapsed' }
@@ -2409,7 +2514,7 @@ $timer.Add_Tick({
 
     # The tray item is a toggle, so its caption has to say what clicking it will
     # do rather than name a state.
-    $wantCaption = if ($shouldShow) { 'Hide toast' } else { 'Show toast' }
+    $wantCaption = if ($shouldShow) { T 'Hide toast' } else { T 'Show toast' }
     if ($MenuShow.Text -ne $wantCaption) { $MenuShow.Text = $wantCaption }
 })
 

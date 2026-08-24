@@ -41,6 +41,9 @@
   "opacity": 1.0,
   "_opacity": "How opaque the toast is, from 0.35 (barely there) to 1.0 (solid). Clamped into that range on load, so a hand-edited 0 cannot leave an invisible window that still swallows clicks. Also adjustable from the settings window, which writes the change back to this file.",
 
+  "language": "auto",
+  "_language": "UI language. 'auto' follows the Windows display language, falling back through the culture's parent chain (zh-CN finds zh-Hans, pt-PT finds pt) and finally to English. Set a tag from lang/ to pin it: en, ko, ja, zh-Hans, zh-Hant, fr, de, it, es, ru, pt-BR, tr, pl, cs, hu. Worth pinning if your Windows display language and your regional format differ, since auto-detection follows the display language.",
+
   "exitWhenAgentGone": true,
   "_exitWhenAgentGone": "Automatically close the companion shortly after the agent app quits. Pair with Watch-Scout.ps1 (in the Startup folder) to tie the companion's lifetime to Scout: it opens when Scout starts and closes when Scout exits.",
 

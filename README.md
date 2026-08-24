@@ -58,6 +58,8 @@ place.
 - **Settings window** — reachable from the tray or the ⚙ on the toast. Turn on
   start-with-Scout, switch the mascot, dim the toast, turn the animation off, and see
   exactly how much memory and CPU the companion is using (see [Settings](#settings)).
+- **Fifteen languages** — follows your Windows display language, or pin one in
+  `config.json` (see [Languages](#languages)).
 - **Color-coded status** — the whole toast shifts color with the agent's state: calm
   **green** while working, dim **navy** when idle, and bright pulsing **yellow** when an
   approval is needed (see [Status at a glance](#status-at-a-glance)).
@@ -105,8 +107,34 @@ rather than competing with it. Mascots carry an optional `Desk` flag for this �
 "does not sit at a laptop", and the laptop and paws are hidden.
 
 The tray icon follows your choice too, reduced to whatever survives at 16 px — ear shape
-for the mammals, fins for the tuna, beak for the penguin, a ring under an orb for the
+for the mammals, fins for the tuna, beak for the penguin, a diagonal sash for the
 ribbon — while still carrying the state colour.
+
+
+## Languages
+
+Fifteen, matching the set VS Code ships language packs for: English, 简体中文, 繁體中文,
+Français, Deutsch, Italiano, Español, 日本語, 한국어, Русский, Português (Brasil), Türkçe,
+Polski, Čeština, Magyar.
+
+It follows your Windows display language by default, walking the culture's parent chain
+so `zh-CN` finds `zh-Hans` and `pt-PT` finds `pt`. If nothing matches it stays English.
+
+Set `"language"` in `config.json` to pin one — worth doing if your display language and
+your regional format differ, since detection follows the display language:
+
+```json
+{ "language": "ko" }
+```
+
+English lives in the script itself, so a missing or malformed `lang/*.json` degrades to
+English rather than breaking the app, and any key a translation omits falls back on its
+own. That means a partial translation is useful immediately.
+
+**Improving a translation** is one file: edit the values in `lang/<tag>.json` and leave
+the keys alone. The keys are the English source text. `{0}` is filled in at runtime with
+a file name or search term — put it wherever your language wants it, which is often not
+where English puts it.
 
 
 ## Requirements
@@ -228,6 +256,7 @@ and edit. Common overrides:
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
 | `mascot` | `quokka` | Which mascot to show. Also in the settings window |
+| `language` | `auto` | UI language. `auto` follows the Windows display language; set a tag from `lang/` to pin it |
 | `opacity` | `1.0` | Toast opacity, clamped to 0.35–1.0 on load. Also in the settings window |
 | `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
 | `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
