@@ -146,6 +146,12 @@ $Config = [ordered]@{
     # rather than just whatever Scout was last showing. Turn this off to get the
     # older behaviour of only bringing the window forward.
     openMatchingSession = $true
+    # Show the toast for a moment at startup, whatever the rules would say.
+    # Launching the companion otherwise produces no visible sign that it worked:
+    # the toast hides while Scout has focus - which it does, because you just
+    # launched something - and Windows files a new tray icon into the hidden
+    # overflow flyout. Set to 0 to start silently.
+    startupGreetingSeconds = 5
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
 }
@@ -1509,6 +1515,13 @@ $script:Pinned = $false
 $script:Pending = $false
 $script:Asking = $false
 $script:AgentGoneSince = $null
+# WPF's idea of whether the toast is on screen, and the window's real state,
+# start out disagreeing - see the reconciliation on the first tick.
+$script:VisibilityReconciled = $false
+# Until when the startup greeting keeps the toast up. Set once the poll loop is
+# about to start, so the greeting covers the moment the app becomes usable
+# rather than the moment the script began parsing.
+$script:GreetUntil = [datetime]::MinValue
 
 # The whole visibility policy, in one place and with no side effects, so the
 # ordering of the rules is reviewable and testable rather than buried in the
@@ -1521,10 +1534,14 @@ function Get-ShouldShow {
     param(
         [bool]$HasPending, [bool]$HasAsk, [bool]$IsActive,
         [bool]$AgentRunning, [bool]$IsMinimized, [bool]$IsForeground,
-        [bool]$Hidden, [bool]$Pinned
+        [bool]$Hidden, [bool]$Pinned, [bool]$Greeting
     )
     $show = $false
     if ($HasPending -or $HasAsk) { $show = $true }
+    # Ranked above the activity rule and below $Hidden on purpose: the greeting
+    # only has to survive the rule that would otherwise hide it at startup, and
+    # closing the toast has to still mean closed.
+    elseif ($Greeting) { $show = $true }
     elseif ($IsActive -and $AgentRunning -and ($IsMinimized -or -not $IsForeground)) { $show = $true }
     if ($Hidden) { $show = $false }
     if ($Pinned) { $show = $true }
@@ -2959,16 +2976,29 @@ $timer.Add_Tick({
     }
 
     # visibility policy
+    $greeting = [datetime]::UtcNow -lt $script:GreetUntil
     $shouldShow = Get-ShouldShow -HasPending $hasPending -HasAsk $hasAsk `
         -IsActive $isActive -AgentRunning $agentRunning -IsMinimized $isMinimized `
-        -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned
+        -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned `
+        -Greeting $greeting
 
     if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
         try {
-            $dbg = "{0} show={1} pend={2} ask={3} sess={4} active={5} run={6} agent={7} fg={8} min={9} hidden={10} pin={11} age={12}" -f `
-                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, $script:Pinned, [int]$ageSec
+            $dbg = "{0} show={1} vis={2} pend={3} ask={4} sess={5} active={6} run={7} agent={8} fg={9} min={10} hidden={11} pin={12} greet={13} age={14}" -f `
+                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $Window.IsVisible, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, $script:Pinned, $greeting, [int]$ageSec
             Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') -Value $dbg
         } catch { }
+    }
+
+    # Application.Run is handed a window whose Visibility was preset to Hidden,
+    # and returns with WPF believing the toast is shown while its window never
+    # was - IsVisible reads True with WS_VISIBLE off. Every later Show() is then
+    # skipped as redundant and the toast never appears at all. Hiding it once,
+    # explicitly, puts the two back in agreement before anything reads them.
+    # Latent until now only because the first tick always wanted it hidden.
+    if (-not $script:VisibilityReconciled) {
+        $script:VisibilityReconciled = $true
+        try { $Window.Hide() } catch { }
     }
 
     if ($shouldShow) {
@@ -2996,6 +3026,14 @@ Merge-SessionState
 # Draw the configured mascot. This has to run after the mascot functions are
 # defined, so it deliberately lives here rather than next to Set-Theme.
 Set-Mascot ([string]$Config.mascot)
+
+# Say hello, so launching the companion has a visible result. Armed here rather
+# than at the top of the script: everything above this line is setup, and a
+# greeting that started counting before the window could be drawn would spend
+# most of itself invisible.
+$greetFor = 0.0
+try { $greetFor = [double]$Config.startupGreetingSeconds } catch { $greetFor = 0.0 }
+if ($greetFor -gt 0) { $script:GreetUntil = [datetime]::UtcNow.AddSeconds($greetFor) }
 
 # The mascot timer is driven by the poll loop and only runs while the toast is
 # on screen, so it deliberately does not start here.

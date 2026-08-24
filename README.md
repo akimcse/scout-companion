@@ -324,6 +324,7 @@ and edit. Common overrides:
 | `mascot` | `quokka` | Which mascot to show. Also in the settings window |
 | `language` | `auto` | UI language. `auto` follows the Windows display language; set a tag from `lang/` to pin it |
 | `opacity` | `1.0` | Toast opacity, clamped to 0.35–1.0 on load. Also in the settings window |
+| `startupGreetingSeconds` | `5` | Show the toast briefly at startup so launching the companion has a visible result. `0` starts silently |
 | `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
 | `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
 
@@ -342,6 +343,13 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
   intentionally hidden while the agent window is focused. Minimize it and start a task.
 - **"Agent not detected"** — your build may use a different process name; add it to
   `processNames` in `config.json`.
+- **I launched it and nothing happened** — it says hello for five seconds now, so you
+  should see the toast once. After that it follows the normal rules, and the main one is
+  that it stays out of the way while Scout has focus — so if you launch it and then keep
+  typing in Scout, you will not see it again until Scout is in the background or something
+  needs you. Its tray icon also starts life in Windows' hidden overflow flyout (the `^`
+  next to the clock); drag it onto the taskbar to keep it in sight. From that icon,
+  **Show toast** pins the toast on screen permanently.
 - **Allow/Deny clicks the wrong thing or does nothing** — the button captions in your
   build may differ; adjust `allowLabels` / `denyLabels`. Scout currently shows **Allow**,
   **Allow for session**, **Allow everywhere**, and **Deny**; the toast's **Allow** maps to

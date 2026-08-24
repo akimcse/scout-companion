@@ -19,7 +19,8 @@ if (-not (Test-Path $src)) { Write-Host "scout-companion.ps1 not found next to t
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$null)
 $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
 foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow',
-                 'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix')) {
+                 'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix',
+                 'Get-ShouldShow')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -176,6 +177,30 @@ Same 'nothing waiting'          (Get-QueueSuffix 0) ''
 Same 'the one being shown'      (Get-QueueSuffix 1) ''
 Same 'one approval, two asks'   (Get-QueueSuffix 3) ' (+2)'
 Same 'two of the same kind'     (Get-QueueSuffix 2) ' (+1)'
+
+Write-Host "`nGet-ShouldShow"
+# Working, agent in front. The rule that hides the toast while you are looking
+# at Scout is the whole reason a fresh launch looked like it had done nothing.
+$busyFg = @{ HasPending=$false; HasAsk=$false; IsActive=$true; AgentRunning=$true
+             IsMinimized=$false; IsForeground=$true; Hidden=$false; Pinned=$false; Greeting=$false }
+Same 'busy but agent in front -> hidden'  (Get-ShouldShow @busyFg) $false
+$greet = $busyFg.Clone(); $greet.Greeting = $true
+Same 'greeting shows at startup'          (Get-ShouldShow @greet) $true
+# The close button has to keep meaning closed, even mid-greeting.
+$greetClosed = $greet.Clone(); $greetClosed.Hidden = $true
+Same 'closing beats the greeting'         (Get-ShouldShow @greetClosed) $false
+# A greeting must not suppress anything, and must not be needed to show a prompt.
+$prompt = $busyFg.Clone(); $prompt.HasPending = $true
+Same 'approval shows regardless'          (Get-ShouldShow @prompt) $true
+# Idle with nothing happening stays quiet once the greeting lapses.
+$idle = @{ HasPending=$false; HasAsk=$false; IsActive=$false; AgentRunning=$true
+           IsMinimized=$false; IsForeground=$false; Hidden=$false; Pinned=$false; Greeting=$false }
+Same 'idle and quiet -> hidden'           (Get-ShouldShow @idle) $false
+$idleGreet = $idle.Clone(); $idleGreet.Greeting = $true
+Same 'greeting shows even when idle'      (Get-ShouldShow @idleGreet) $true
+# Background + working is the case the toast was written for.
+$bg = $busyFg.Clone(); $bg.IsForeground = $false
+Same 'busy in background -> shown'        (Get-ShouldShow @bg) $true
 
 Write-Host ("`n{0} passed, {1} failed" -f $script:Pass, $script:Fail)
 if ($script:Fail -gt 0) { exit 1 }
