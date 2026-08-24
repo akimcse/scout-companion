@@ -110,6 +110,10 @@ $Config = [ordered]@{
     # but wrong for anyone running, say, an English UI with Korean formats.
     language            = 'auto'
     maxSteps            = 4
+    # Open, Answer and the tray try to land on the chat that raised the prompt
+    # rather than just whatever Scout was last showing. Turn this off to get the
+    # older behaviour of only bringing the window forward.
+    openMatchingSession = $true
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
 }
@@ -834,6 +838,311 @@ function Focus-Agent {
 }
 
 # ---------------------------------------------------------------------------
+# Opening the chat a prompt actually came from.
+#
+# Scout's chats and the folders this companion follows are two different id
+# namespaces. A chat in the sidebar is keyed by an id that never appears in
+# session-state, and the index that would bridge them is encrypted on disk, so
+# there is no lookup to do - the session cannot be named from the outside.
+#
+# What the sidebar does hand over, once its search field is open, is every
+# chat's title and how long ago it was last touched. So the chat is found the
+# way a person would find it: type something the session has talked about,
+# then take the row whose "when" agrees with when this session last moved.
+#
+# The search is semantic, so it is only trusted to bring the chat into view -
+# a long sentence pulls back near-noise, while a couple of words pulls back
+# the right handful. The timestamp is what decides, and when nothing agrees
+# the switch is abandoned rather than guessed at: sending someone to the wrong
+# conversation is worse than leaving them where they were.
+# ---------------------------------------------------------------------------
+$UiaEl   = [System.Windows.Automation.AutomationElement]
+$UiaTree = [System.Windows.Automation.TreeScope]
+$UiaType = [System.Windows.Automation.ControlType]
+
+function Find-UiaByName($root, [string]$name, $type) {
+    if (-not $root) { return $null }
+    try {
+        $cond = New-Object System.Windows.Automation.AndCondition(
+            (New-Object System.Windows.Automation.PropertyCondition($UiaEl::ControlTypeProperty, $type)),
+            (New-Object System.Windows.Automation.PropertyCondition($UiaEl::NameProperty, $name)))
+        return $root.FindFirst($UiaTree::Descendants, $cond)
+    } catch { return $null }
+}
+
+function Invoke-UiaElement($el) {
+    if (-not $el) { return $false }
+    try { $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true }
+    catch { return $false }
+}
+
+# A row reads "Pinned: <title> <when> More actions", with an optional
+# " Automation run" badge in between. Only <when> is load-bearing.
+function Split-ChatRow([string]$raw) {
+    $s = $raw -replace '^Pinned:\s*',''
+    $s = $s -replace '\s*More actions\s*$',''
+    $s = $s -replace '\s*Automation run\s*$',''
+    $when = $null
+    $pat = '\s+(Just now|\d+[smhd] ago|\d{1,2}/\d{1,2}/\d{4})$'
+    if ($s -match $pat) { $when = $Matches[1]; $s = $s -replace $pat,'' }
+    return [pscustomobject]@{ Title = $s.Trim(); When = $when }
+}
+
+function ConvertTo-AgeMinutes([string]$when) {
+    if (-not $when) { return $null }
+    if ($when -eq 'Just now')      { return 0.0 }
+    if ($when -match '^(\d+)s ago$') { return [double]$Matches[1] / 60.0 }
+    if ($when -match '^(\d+)m ago$') { return [double]$Matches[1] }
+    if ($when -match '^(\d+)h ago$') { return [double]$Matches[1] * 60 }
+    if ($when -match '^(\d+)d ago$') { return [double]$Matches[1] * 1440 }
+    # A bare date means the chat is old enough that Scout stopped counting, and
+    # it is parsed only so such rows can be ruled out rather than ignored.
+    if ($when -match '^\d{1,2}/\d{1,2}/\d{4}$') {
+        try { return ([datetime]::Now - [datetime]::Parse($when)).TotalMinutes } catch { return $null }
+    }
+    return $null
+}
+
+# Chat rows are the full-width buttons in the left column. Height is not fixed:
+# a row grows a line once the search field is open and it has to carry a
+# timestamp, which is exactly the state this runs in.
+function Get-ChatRows($root) {
+    $out = New-Object System.Collections.ArrayList
+    if (-not $root) { return @() }
+    $win = $root.Current.BoundingRectangle
+    $cond = New-Object System.Windows.Automation.PropertyCondition($UiaEl::ControlTypeProperty, $UiaType::Button)
+    foreach ($b in $root.FindAll($UiaTree::Descendants, $cond)) {
+        $c = $null; try { $c = $b.Current } catch { continue }
+        if ($c.IsOffscreen) { continue }
+        $r = $c.BoundingRectangle
+        # An element that was never laid out reports an infinite rect, which
+        # would blow up the cast to int further down.
+        if ([double]::IsInfinity($r.X) -or [double]::IsInfinity($r.Y)) { continue }
+        if ($r.X -gt ($win.X + 340)) { continue }
+        if ($r.Width -lt 260 -or $r.Width -gt 330) { continue }
+        if ($r.Height -lt 40 -or $r.Height -gt 96) { continue }
+        if (-not $c.Name -or $c.Name -notmatch 'More actions$') { continue }
+        $p = Split-ChatRow $c.Name
+        [void]$out.Add([pscustomobject]@{ Y = [int]$r.Y; Title = $p.Title; When = $p.When; El = $b })
+    }
+    return @($out | Sort-Object Y)
+}
+
+# Something the session has talked about, short enough that the search stays
+# sharp. The first thing asked for is the best handle; where the session was
+# resumed and opens with a bare "carry on", the project folder is the fallback.
+function Get-SessionQuery($rec) {
+    if (-not $rec) { return $null }
+    if (-not $rec.Topic) { $rec.Topic = Get-SessionTopic $rec.Events }
+    $q = $rec.Topic
+    if ($q) { $q = ($q -replace '\.\.\.$','').Trim() }
+    if (-not $q -or $q.Length -lt 3) { $q = $rec.BaseLabel }
+    if (-not $q) { return $null }
+    return (Truncate $q 40)
+}
+
+# The session a visible prompt belongs to, falling back to whichever session
+# moved last so the tray and the Open button still do something sensible when
+# nothing is pending.
+# Scout stamps a chat when a message lands in it, not when a tool runs, so a
+# session that has spent ten minutes grinding through tool calls still reads
+# "10m ago" in the sidebar while the companion has seen events all along.
+# Comparing those two clocks directly never matches, so the message clock is
+# read straight out of the file instead - only on a click, and only from the
+# tail, since these files reach tens of megabytes.
+function Get-LastMessageUtc([string]$events) {
+    try {
+        $fi = New-Object System.IO.FileInfo $events
+        if (-not $fi.Exists) { return $null }
+        $len  = $fi.Length
+        $take = [Math]::Min($len, 262144)
+        $chunk = $null
+        $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+        try {
+            $fs.Seek($len - $take, 'Begin') | Out-Null
+            $sr = New-Object System.IO.StreamReader($fs)
+            $chunk = $sr.ReadToEnd()
+        } finally { $fs.Dispose() }
+        if (-not $chunk) { return $null }
+
+        $best = $null
+        foreach ($line in ($chunk -split "`n")) {
+            if ($line -notmatch '"(assistant|user)\.message"') { continue }
+            # An event's own timestamp is the last one on the line; anything
+            # earlier belongs to the payload it carries.
+            $ms = [regex]::Matches($line, '"timestamp":"([^"]+)"')
+            if ($ms.Count -eq 0) { continue }
+            $t = $null
+            try { $t = [datetime]::Parse($ms[$ms.Count - 1].Groups[1].Value).ToUniversalTime() } catch { continue }
+            if (-not $best -or $t -gt $best) { $best = $t }
+        }
+        return $best
+    } catch { return $null }
+}
+
+# Picks the chat that belongs to a session last heard from $age minutes ago,
+# or nothing at all when the list holds no plausible candidate.
+#
+# The sidebar's timestamps lag, sometimes by ten minutes or more for a chat
+# that is not the one on screen. Crucially they only ever lag: a chat can be
+# shown as older than it really is, never younger. So the window is asymmetric
+# - a little slack below to absorb rounding, a lot above to absorb the lag -
+# and within it the freshest row wins, since the chat that raised the prompt is
+# the one that moved most recently.
+function Select-ChatRow($rows, [double]$age) {
+    if ($age -lt 0) { $age = 0 }
+    $lo = [Math]::Max(0.0, $age * 0.5 - 2.0)
+    $hi = $age + [Math]::Max(20.0, $age * 0.5)
+
+    $cands = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt @($rows).Count; $i++) {
+        $m = ConvertTo-AgeMinutes $rows[$i].When
+        if ($null -eq $m) { continue }
+        if ($m -lt $lo -or $m -gt $hi) { continue }
+        [void]$cands.Add([pscustomobject]@{ Row = $rows[$i]; Age = $m; Rank = $i })
+    }
+    # Nothing moved anywhere near when this session did. Rather than pick the
+    # most plausible-looking row, give up: the caller has already brought the
+    # window forward, which is what the user actually asked for.
+    if ($cands.Count -eq 0) { return $null }
+
+    # Freshest first, and where two chats share a timestamp the search's own
+    # ordering breaks the tie: it was asked about this session's topic, so the
+    # row it put higher is the one more likely to be this session.
+    return (@($cands | Sort-Object Age, Rank))[0].Row
+}
+
+function Get-RaisingSession {
+    foreach ($bag in @($State.PendingPerms, $State.PendingAsks)) {
+        foreach ($k in $bag.Keys) {
+            $label = $bag[$k].session
+            if (-not $label) { continue }
+            foreach ($dir in $Sessions.Keys) {
+                if ($Sessions[$dir].Label -eq $label) { return $Sessions[$dir] }
+            }
+        }
+    }
+    $best = $null
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if (-not $best -or $rec.LastEventUtc -gt $best.LastEventUtc) { $best = $rec }
+    }
+    return $best
+}
+
+function Open-AgentSession($rec) {
+    # Returns $true only when the sidebar was actually driven to this session.
+    if (-not $rec) { return $false }
+    if (-not $Config.openMatchingSession) { return $false }
+    $query = Get-SessionQuery $rec
+    if (-not $query) { return $false }
+
+    $win = Get-AgentWindow
+    if (-not $win) { return $false }
+    Wake-AgentA11y $win.Hwnd
+    Start-Sleep -Milliseconds 300
+    $root = $null
+    try { $root = $UiaEl::FromHandle($win.Hwnd) } catch { return $false }
+    if (-not $root) { return $false }
+
+    # The sidebar and its search field are both collapsible, and whatever was
+    # closed on the way in gets closed again on the way out - this is the
+    # user's window, not ours.
+    $openedSidebar = $false
+    $openedSearch  = $false
+    $typed         = $false
+    $navigated     = $false
+    try {
+        if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) {
+            if (Invoke-UiaElement (Find-UiaByName $root 'Show sidebar' $UiaType::Button)) {
+                $openedSidebar = $true
+                Start-Sleep -Milliseconds 350
+                $root = $UiaEl::FromHandle($win.Hwnd)
+            }
+        }
+
+        $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+        if (-not $box) {
+            if (Invoke-UiaElement (Find-UiaByName $root 'Show chat search' $UiaType::Button)) {
+                $openedSearch = $true
+                Start-Sleep -Milliseconds 400
+                $root = $UiaEl::FromHandle($win.Hwnd)
+                $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+            }
+        }
+        if (-not $box) { return $false }
+
+        try { $box.SetFocus() } catch { }
+        Start-Sleep -Milliseconds 120
+        try { $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($query) }
+        catch { return $false }
+        $typed = $true
+
+        # Results arrive asynchronously; poll rather than sleep for a fixed
+        # worst case, so the common fast answer is not paid for every time.
+        $rows = @()
+        for ($i = 0; $i -lt 12; $i++) {
+            Start-Sleep -Milliseconds 200
+            $rows = Get-ChatRows ($UiaEl::FromHandle($win.Hwnd))
+            if (@($rows | Where-Object { $_.When }).Count -gt 0) { break }
+        }
+
+        # Measured from the last message, because that is the kind of thing the
+        # sidebar's own "when" is measuring - a session grinding through tools
+        # for ten minutes has not "just" done anything as far as Scout's chat
+        # list is concerned.
+        $stamp = Get-LastMessageUtc $rec.Events
+        if (-not $stamp) { $stamp = $rec.LastEventUtc }
+        $pick = Select-ChatRow $rows ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+        if (-not $pick) { return $false }
+
+        $navigated = Invoke-UiaElement $pick.El
+        if ($navigated) { Start-Sleep -Milliseconds 500 }
+        return $navigated
+    } finally {
+        # Put the sidebar back, but only touch what this function touched: a
+        # query the user typed themselves is theirs, not ours to clear.
+        try {
+            if ($typed) {
+                $root2 = $UiaEl::FromHandle($win.Hwnd)
+                if (-not (Invoke-UiaElement (Find-UiaByName $root2 'Clear search' $UiaType::Button))) {
+                    $b2 = Find-UiaByName $root2 'Search chats' $UiaType::Edit
+                    if ($b2) {
+                        try { $b2.SetFocus() } catch { }
+                        try { $b2.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('') } catch { }
+                    }
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            if ($openedSearch) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Hide chat search' $UiaType::Button))
+            }
+            if ($openedSidebar) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Hide sidebar' $UiaType::Button))
+            }
+            # Searching had to take the caret to do its work. Hand it back to
+            # the message box, which is where someone who just pressed Answer
+            # was heading anyway.
+            if ($typed) {
+                $msg = Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Message' $UiaType::Edit
+                if ($msg) { try { $msg.SetFocus() } catch { } }
+            }
+        } catch { }
+    }
+}
+
+# What Open, Answer and the tray all mean: show me the thing that is asking.
+# Bringing the window forward is the part that must never fail, so it happens
+# first and the chat switch is a bonus on top of it.
+function Focus-AgentSession {
+    Focus-Agent
+    $rec = $null
+    try { $rec = Get-RaisingSession } catch { }
+    if (-not $rec) { return }
+    try { [void](Open-AgentSession $rec) } catch { }
+}
+
+# ---------------------------------------------------------------------------
 # WPF overlay UI (with animated quokka mascot).
 # ---------------------------------------------------------------------------
 [xml]$xaml = @'
@@ -1108,8 +1417,8 @@ $DenyBtn.Add_Click({
         foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
     } else { Focus-Agent }
 })
-$OpenBtn.Add_Click({ Focus-Agent })
-$AnswerBtn.Add_Click({ Focus-Agent })
+$OpenBtn.Add_Click({ Focus-AgentSession })
+$AnswerBtn.Add_Click({ Focus-AgentSession })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $script:Pinned = $false; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
 
@@ -2128,7 +2437,7 @@ $MenuShow.Add_Click({
         $script:Hidden = $false
     }
 })
-$MenuOpen.Add_Click({ Focus-Agent })
+$MenuOpen.Add_Click({ Focus-AgentSession })
 $MenuPause.Add_Click({
     # CheckOnClick has already flipped Checked by the time this runs.
     Sync-AnimationEnabled (-not $MenuPause.Checked) -Persist
@@ -2148,7 +2457,7 @@ $Tray.ContextMenuStrip = $TrayMenu
 
 # Double-clicking the tray icon brings the agent forward, matching the toast's
 # "Open" button.
-$Tray.Add_MouseDoubleClick({ Focus-Agent })
+$Tray.Add_MouseDoubleClick({ Focus-AgentSession })
 
 # ---------------------------------------------------------------------------
 # Mascot animation: a dedicated timer drives it frame-by-frame.

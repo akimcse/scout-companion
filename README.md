@@ -75,6 +75,10 @@ place.
   asks you a question, it reaches the toast too, tagged with which one it came from. The
   step list and narration follow whichever session moved most recently, so with a single
   session it looks exactly as it always did.
+- **Open lands on the right conversation** — Open, Answer and the tray don't just raise
+  the window, they steer Scout's sidebar to the chat that raised the prompt. If it can't
+  work out which chat that is, it brings the window forward and leaves your sidebar
+  alone (see [How it works](#how-it-works)).
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
 - **Stays out of the way** — around 1.4% of one CPU core and a flat working set while
@@ -224,6 +228,50 @@ Scout Companion:
    window is open it refuses to click and focuses instead — a pending approval cannot be
    traced back to the window that raised it, and approving the wrong thing is worse than
    making you click it yourself.
+5. For **Open**, it also tries to put Scout on the chat the prompt came from.
+
+### Finding the chat a prompt came from
+
+Scout's chats and the folders the companion follows are two different id namespaces: a
+chat in the sidebar is keyed by an id that never appears in `session-state`, and the
+index that would join them is encrypted on disk. There is no lookup to do — a session
+cannot be named from the outside.
+
+What the sidebar *does* hand over, once its chat search field is open, is every chat's
+title and how long ago it was last touched. So the companion finds the chat the way you
+would:
+
+1. Open the sidebar and its search field if they're collapsed.
+2. Type something the session has talked about — the first thing you asked it for, or the
+   project folder if the session opens with a bare "carry on".
+3. Read the rows that come back, each carrying a **title** and a **when** (`Just now`,
+   `4m ago`, `8/15/2026`).
+4. Take the freshest row whose *when* could plausibly be this session. Plausibly, not
+   exactly: Scout's timestamps **lag** for a chat that isn't the one on screen — a chat
+   being written to right now can still read `11m ago` — but they only ever lag, never
+   run ahead. So the window is lopsided: a little slack below to absorb rounding, a lot
+   above to absorb the lag, and the freshest row inside it wins. Where two rows tie, the
+   search's own ordering breaks it.
+5. Clear the search and re-collapse anything that was opened, so the sidebar ends up
+   exactly as it was found, and hand the caret back to the message box.
+
+The session's own clock is read from its last **message**, not its last event — a session
+ten minutes into a run of tool calls hasn't "just" done anything as far as Scout's chat
+list is concerned, and comparing the two clocks directly never matches.
+
+The search is semantic, so it is only trusted to bring the chat *into view* — the
+timestamp is what decides. **If nothing plausible comes back, nothing is clicked**: the
+window has already been brought forward, and sending you to the wrong conversation is
+worse than leaving you where you were. The same is true if the sidebar isn't there at
+all — Scout drops it entirely below a certain window width. Set `openMatchingSession` to
+`false` to skip this whole step.
+
+`Test-SessionMatch.ps1` covers the picker against row lists captured from a real sidebar,
+including the lagging-timestamp case:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Test-SessionMatch.ps1
+```
 
 Approvals and questions are merged across every followed session; the step list and
 narration come from whichever moved most recently. A session with something pending is
@@ -288,7 +336,11 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
 - **Start-with-Scout won't turn on** — the checkbox disables itself if `Watch-Scout.ps1`
   is missing from the same folder as the script, and reverts if the Startup folder cannot
   be written.
-
+- **Open raises the window but doesn't switch chat** — it only switches when it is sure.
+  No chat whose timestamp could plausibly be that session means no click, and if the
+  Scout window is narrow enough that the sidebar is gone there is nothing to search at
+  all. Widen the window, or set `openMatchingSession` to `false` if you would rather it
+  never tried.
 ## Privacy & safety
 
 - Reads only local session files and the local agent window. No telemetry, no network.
