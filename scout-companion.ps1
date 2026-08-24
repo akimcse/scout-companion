@@ -144,6 +144,21 @@ function Save-Setting([hashtable]$changes) {
     }
 }
 
+# The opacity slider coalesces its writes behind a timer, so any path that ends
+# the process or closes the settings window has to drain it first. Without this
+# a value set in the last 600 ms before quitting was lost, which reads to the
+# user as "settings don't save at all".
+$script:OpacitySaveTimer = $null
+$script:OpacityPendingValue = $null
+function Save-PendingOpacity {
+    if (-not $script:OpacitySaveTimer) { return }
+    if (-not $script:OpacitySaveTimer.IsEnabled) { return }
+    $script:OpacitySaveTimer.Stop()
+    if ($null -ne $script:OpacityPendingValue) {
+        [void](Save-Setting @{ opacity = $script:OpacityPendingValue })
+    }
+}
+
 if ($env:SCOUT_COMPANION_HOME) { $Config.home = $env:SCOUT_COMPANION_HOME }
 
 # Auto-detect the agent home. Different Scout/Clawpilot builds store their session
@@ -1616,6 +1631,12 @@ function Set-TrayState([string]$state, [string]$detail) {
 function Stop-Companion {
     # Every exit path funnels through here: an orphaned NotifyIcon lingers in
     # the tray until the user hovers over it, which looks like a crash.
+    #
+    # Flush first. The opacity slider coalesces its writes behind a 600 ms timer
+    # so dragging it does not hammer the disk, which means a value set moments
+    # before quitting was still sitting in that timer and died with the process.
+    # From the outside that looks exactly like "settings don't save".
+    try { Save-PendingOpacity } catch { }
     try { $timer.Stop() } catch { }
     try { $anim.Stop() }  catch { }
     try { if ($script:SettingsWindow) { $script:SettingsWindow.Close() } } catch { }
@@ -1876,15 +1897,14 @@ function Show-SettingsWindow {
         $v = Set-ToastOpacity ([double]$script:SettingsOpacity.Value)
         $script:SettingsOpacityText.Text = '{0:N0}%' -f ($v * 100)
         # Dragging a slider fires this continuously, so coalesce the writes and
-        # persist once the value has settled.
+        # persist once the value has settled. Anything that ends the process has
+        # to flush this first: see Save-PendingOpacity, called from both the
+        # settings window's Closed handler and Stop-Companion.
         $script:OpacityPendingValue = $v
         if (-not $script:OpacitySaveTimer) {
             $script:OpacitySaveTimer = New-Object System.Windows.Threading.DispatcherTimer
             $script:OpacitySaveTimer.Interval = [TimeSpan]::FromMilliseconds(600)
-            $script:OpacitySaveTimer.Add_Tick({
-                $script:OpacitySaveTimer.Stop()
-                [void](Save-Setting @{ opacity = $script:OpacityPendingValue })
-            })
+            $script:OpacitySaveTimer.Add_Tick({ Save-PendingOpacity })
         }
         $script:OpacitySaveTimer.Stop()
         $script:OpacitySaveTimer.Start()
@@ -1951,6 +1971,9 @@ function Show-SettingsWindow {
 
     $closeBtn.Add_Click({ if ($script:SettingsWindow) { $script:SettingsWindow.Close() } })
     $sw.Add_Closed({
+        # Drain the debounced opacity write before the window goes: closing the
+        # settings window right after moving the slider otherwise dropped it.
+        try { Save-PendingOpacity } catch { }
         try { $script:SettingsResTimer.Stop() } catch { }
         $script:SettingsWindow    = $null
         $script:SettingsAnimCheck = $null
@@ -2407,6 +2430,9 @@ $timer.Start()
 $Window.Visibility = 'Hidden'
 # Make sure the tray icon never outlives the process, however it ends.
 $Window.Add_Closed({
+    # Last line of defence: closing the toast ends the app, and a pending
+    # opacity write has to survive that.
+    try { Save-PendingOpacity } catch { }
     try { $Tray.Visible = $false; $Tray.Dispose() } catch { }
 })
 $app = New-Object System.Windows.Application
