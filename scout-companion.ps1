@@ -1195,52 +1195,88 @@ $(New-CuteEyes $p)
 function New-RibbonMascot($p) {
     @"
       <Canvas x:Name="RibbonRoot" Width="58" Height="60">
+        <!-- The animals get visual mass from the laptop and paws they sit at.
+             With those hidden the sash alone filled only about 60% of the
+             canvas and read as small next to them, so the whole mark is scaled
+             up to match. Applied here rather than baked into the coordinates so
+             the traced geometry stays readable against the icon it came from. -->
+        <Canvas.RenderTransform>
+          <ScaleTransform ScaleX="1.18" ScaleY="1.18" CenterX="29" CenterY="33"/>
+        </Canvas.RenderTransform>
         <Canvas.Resources>
-          <LinearGradientBrush x:Key="RibbonBrush" StartPoint="0,0" EndPoint="1,1">
+          <!-- Three stops, not two: the mark runs magenta at the left edge,
+               through a pale warm centre where the sash faces you, into purple
+               where it turns away. A two-stop ramp lost the bright middle and
+               the band stopped reading as a lit surface.
+               The axis is 34 degrees, measured off the real icon by taking the
+               centroid of its warm pixels and the centroid of its cool ones,
+               rather than picked by eye. -->
+          <LinearGradientBrush x:Key="RibbonBrush" StartPoint="0.08,0.22" EndPoint="0.92,0.78">
             <GradientStop x:Name="RibbonA" Color="$($p.warm)" Offset="0"/>
+            <GradientStop x:Name="RibbonM" Color="$($p.spark)" Offset="0.42"/>
             <GradientStop x:Name="RibbonB" Color="$($p.cool)" Offset="1"/>
           </LinearGradientBrush>
+          <!-- the cut end, running the other way so the back of the band reads
+               as a face turned away from the light -->
+          <LinearGradientBrush x:Key="RibbonBack" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop x:Name="RibbonC" Color="$($p.cool)" Offset="0"/>
+            <GradientStop x:Name="RibbonD" Color="$($p.warm)" Offset="1"/>
+          </LinearGradientBrush>
         </Canvas.Resources>
-        <!-- Only the band turns. The orb sits outside the rotating group on
-             purpose: carried along it swings out to the side and the whole
-             mascot reads as off balance, where a still orb with the band
-             turning around it reads as one thing orbiting another. -->
-        <Canvas x:Name="RibbonGroup" Width="58" Height="60">
-          <Canvas.RenderTransform>
-            <TransformGroup>
-              <ScaleTransform x:Name="SpinS" ScaleX="1" ScaleY="1" CenterX="29" CenterY="36"/>
-              <RotateTransform x:Name="SpinR" Angle="0" CenterX="29" CenterY="36"/>
-            </TransformGroup>
-          </Canvas.RenderTransform>
-          <!-- A descending helix drawn as four half-turns, alternating back and
-               front. Each starts where the last ended, a little lower and a
-               little narrower, which is what makes it read as a band winding
-               away rather than a flat ring. The back halves are thinner as well
-               as dimmer: a constant-width stroke reads as rope, and a real
-               ribbon narrows as it turns edge-on. -->
-          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="6" Opacity="0.40"
-                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                Data="M12,30 A 16,7 0 0 1 44,32"/>
-          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="8.5"
-                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                Data="M44,32 A 16,7 0 0 1 14,38"/>
-          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="5.5" Opacity="0.40"
-                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                Data="M14,38 A 12,5 0 0 1 40,40"/>
-          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="7.5"
-                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                Data="M40,40 A 12,5 0 0 1 21,45"/>
-        </Canvas>
-        <!-- the orb the band turns around -->
-        <Ellipse Canvas.Left="22.5" Canvas.Top="7" Width="14" Height="14">
+        <!-- The sphere sits behind the band and outside the turning group:
+             carried along it swings out to the side and the mark reads as off
+             balance, where a still sphere with the band turning past it reads
+             as one thing moving in front of another. -->
+        <Ellipse Canvas.Left="21" Canvas.Top="13" Width="16" Height="16">
           <Ellipse.Fill>
-            <RadialGradientBrush GradientOrigin="0.35,0.3" Center="0.5,0.5" RadiusX="0.65" RadiusY="0.65">
+            <RadialGradientBrush GradientOrigin="0.34,0.28" Center="0.5,0.5" RadiusX="0.72" RadiusY="0.72">
               <GradientStop x:Name="OrbA" Color="$($p.spark)" Offset="0"/>
               <GradientStop x:Name="OrbB" Color="$($p.cool)" Offset="1"/>
             </RadialGradientBrush>
           </Ellipse.Fill>
         </Ellipse>
-        <Ellipse Canvas.Left="25.5" Canvas.Top="9.5" Width="4.5" Height="3.5" Fill="#66FFFFFF"/>
+        <Canvas x:Name="RibbonGroup" Width="58" Height="60">
+          <Canvas.RenderTransform>
+            <TransformGroup>
+              <ScaleTransform x:Name="SpinS" ScaleX="1" ScaleY="1" CenterX="29" CenterY="33"/>
+              <RotateTransform x:Name="SpinR" Angle="0" CenterX="29" CenterY="33"/>
+            </TransformGroup>
+          </Canvas.RenderTransform>
+          <!-- The Scout mark is a broad sash crossing the middle on the
+               diagonal with a twist in it, and a sphere in the upper nook.
+
+               Filled polygons with straight edges and a pinch at the twist,
+               rather than a stroked centreline. A stroke has one width and
+               round joins, so every version built that way read as a bent tube:
+               what makes a ribbon look flat is straight edges and the pinch
+               where it turns edge-on. Five earlier attempts are on the record:
+               concentric loops read as a donut, a helix as a spring, two filled
+               S outlines as crescents, and a single fat stroke as a tube.
+
+               Coordinates come from tracing the real icon row by row and
+               scoring candidates by silhouette overlap. This one sits at about
+               three quarters, which is the point where chasing the number
+               started making it look worse rather than better: the last of the
+               difference is the internal fold, and a 58 px mascot cannot show
+               that anyway. -->
+          <!-- near half: facing you, so wide and bright -->
+          <Path Fill="{StaticResource RibbonBrush}"
+                Data="M 11,17 C 19,18 26,22 31,27 L 30,38 C 24,32 17,29 11,31 Z"/>
+          <!-- far half, past the twist: turned away, so narrower and darker -->
+          <Path Fill="{StaticResource RibbonBack}"
+                Data="M 31,27 L 30,38 C 35,41 38,45 37,50 L 44,43
+                      C 44,35 39,29 31,27 Z"/>
+          <!-- the tail, dropping off the fold -->
+          <Path Fill="{StaticResource RibbonBrush}"
+                Data="M 37,50 C 37,45 35,41 30,38 L 27,46
+                      C 30,48 31,51 30,54 Z"/>
+          <!-- the cut end at the left, showing the back of the sash: it is what
+               tells you this is a strip and not a solid shape -->
+          <Path Fill="{StaticResource RibbonBack}"
+                Data="M 11,17 C 8,19 8,29 11,31 C 13,29 13,19 11,17 Z"/>
+        </Canvas>
+        <!-- specular highlight, on top of everything -->
+        <Ellipse Canvas.Left="25" Canvas.Top="15.5" Width="4.5" Height="3.5" Fill="#66FFFFFF"/>
       </Canvas>
 "@
 }
@@ -1342,7 +1378,10 @@ function Set-Mascot([string]$id) {
     $script:SpinR    = $head.FindName('SpinR')
     $script:SpinS    = $head.FindName('SpinS')
     $script:RibbonA  = $head.FindName('RibbonA')
+    $script:RibbonM  = $head.FindName('RibbonM')
     $script:RibbonB  = $head.FindName('RibbonB')
+    $script:RibbonC  = $head.FindName('RibbonC')
+    $script:RibbonD  = $head.FindName('RibbonD')
     $script:OrbA     = $head.FindName('OrbA')
     $script:OrbB     = $head.FindName('OrbB')
 
@@ -1474,23 +1513,23 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
                 Tri @(12,7, 16,0.5, 20,7)
             }
             'ribbon' {
-                # A closed ring with the orb above it, rather than the mascot's
-                # open helix. Two attempts at drawing the back half in the darker
-                # edge colour both read as a generic person silhouette -- against
-                # a dark taskbar the back arc disappeared and what was left was a
-                # head over a pair of shoulders. A full ring cannot be mistaken
-                # for a face, which is the whole job at 16 px.
-                $band = New-Object System.Drawing.Pen $fill, 8.0
-                $rim  = New-Object System.Drawing.Pen $edge, 2.0
-                try {
-                    $g.DrawEllipse($rim,  2.5, 14.5, 27.0, 15.0)
-                    $g.DrawEllipse($band, 4.5, 16.5, 23.0, 11.0)
-                    # a short dark cut across the top, so the band still hints at
-                    # passing behind itself rather than lying flat
-                    $g.DrawArc($rim, 4.5, 16.5, 23.0, 11.0, 200, 140)
-                } finally { $band.Dispose(); $rim.Dispose() }
-                $g.FillEllipse($brush, 9.5, 0.5, 13.0, 13.0)
-                $g.DrawEllipse($pen,   9.5, 0.5, 13.0, 13.0)
+                # The sash alone, filling the frame on the diagonal, with the
+                # twist as a change of colour rather than a change of shape.
+                # The sphere is dropped: at 16 px a circle above a body reads as
+                # a head above shoulders no matter what the body is, and two
+                # attempts at keeping it both came out looking like a generic
+                # person icon. Tray glyphs are simplifications anyway -- the
+                # tuna is fins, the penguin is a beak.
+                $g.FillPolygon($brush, [System.Drawing.PointF[]]@(
+                    (New-Object System.Drawing.PointF 1.0, 6.0),
+                    (New-Object System.Drawing.PointF 18.0, 15.0),
+                    (New-Object System.Drawing.PointF 17.0, 28.0),
+                    (New-Object System.Drawing.PointF 1.0, 19.0)))
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
+                    (New-Object System.Drawing.PointF 18.0, 15.0),
+                    (New-Object System.Drawing.PointF 17.0, 28.0),
+                    (New-Object System.Drawing.PointF 30.0, 32.0),
+                    (New-Object System.Drawing.PointF 31.0, 19.0)))
             }
             default {
                 # quokka: soft round ears
@@ -2013,7 +2052,8 @@ $script:Rng = New-Object System.Random
 
 # Handles on the ribbon mascot, null for every animal. Set-Mascot rebinds them.
 $script:SpinR = $null; $script:SpinS = $null
-$script:RibbonA = $null; $script:RibbonB = $null
+$script:RibbonA = $null; $script:RibbonM = $null; $script:RibbonB = $null
+$script:RibbonC = $null; $script:RibbonD = $null
 $script:OrbA = $null; $script:OrbB = $null
 $script:Hue = 0.06
 $script:SpinPhase = 0.0
@@ -2133,11 +2173,12 @@ $anim.Add_Tick({
         # far side comes round. Driving a RotateTransform instead made it tumble
         # end over end like a steering wheel, which is a different object.
         #
-        # The floor stops it collapsing to an invisible line when it is edge-on:
-        # true in perspective, but a ribbon has thickness, and at 12.5 fps a
-        # frame that vanishes reads as a dropped one.
+        # The floor stops it collapsing to an invisible sliver when it is
+        # edge-on: true in perspective, but a ribbon has thickness, and a live
+        # screenshot caught it at 0.28 looking like a stray purple squiggle
+        # rather than a mascot.
         $c = [Math]::Cos($script:SpinPhase)
-        $mag = [Math]::Max(0.28, [Math]::Abs($c))
+        $mag = [Math]::Max(0.42, [Math]::Abs($c))
         $script:SpinS.ScaleX = if ($c -lt 0) { -$mag } else { $mag }
         # Just enough tilt to keep it from looking like a machine part.
         $script:SpinR.Angle = [Math]::Sin($script:SpinPhase * 0.5) * 6.0
@@ -2152,8 +2193,16 @@ $anim.Add_Tick({
              elseif ($script:Pending) { 0.11 + [Math]::Sin($script:Hue * 6.283) * 0.035 }   # amber
              else                     { 0.52 + [Math]::Sin($script:Hue * 6.283) * 0.035 }   # cyan
 
+        # Every stop moves together, front face and back alike. Leaving the
+        # middle stop and the back-face pair fixed while the outer two drifted
+        # made the sash look like it was lit by two different lamps.
         $script:RibbonA.Color = Hue-Color $h            0.62 1.00
+        $script:RibbonM.Color = Hue-Color ($h + 0.06)   0.34 1.00
         $script:RibbonB.Color = Hue-Color ($h + 0.17)   0.78 0.92
+        # the back of the sash: same hues, run the other way and dimmer, because
+        # it is the face turned away from the light
+        $script:RibbonC.Color = Hue-Color ($h + 0.17)   0.80 0.72
+        $script:RibbonD.Color = Hue-Color $h            0.66 0.82
         $script:OrbA.Color    = Hue-Color ($h - 0.04)   0.28 1.00
         $script:OrbB.Color    = Hue-Color ($h + 0.17)   0.72 0.95
     }

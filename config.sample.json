@@ -36,7 +36,7 @@
   "_animationEnabled": "Whether the mascot animates at all. Also toggleable at runtime from the tray menu or the settings window, which write the change back to this file.",
 
   "mascot": "quokka",
-  "_mascot": "Which mascot the toast shows. One of: quokka, cat-white, cat-siamese, cat-calico, cat-black, cat-russian, tuna, shiba, fox, bunny, penguin. Also selectable from the settings window, which writes the change back to this file.",
+  "_mascot": "Which mascot the toast shows. One of: quokka, cat-white, cat-siamese, cat-calico, cat-black, cat-russian, tuna, shiba, fox, bunny, penguin, ribbon. Also selectable from the settings window, which writes the change back to this file. 'ribbon' is the odd one out: a turning band of light with no face and no laptop.",
 
   "opacity": 1.0,
   "_opacity": "How opaque the toast is, from 0.35 (barely there) to 1.0 (solid). Clamped into that range on load, so a hand-edited 0 cannot leave an invisible window that still swallows clicks. Also adjustable from the settings window, which writes the change back to this file.",

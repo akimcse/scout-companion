@@ -45,7 +45,8 @@ place.
 - **Live progress toast** — streams the agent's current activity as readable steps
   (e.g. "Reading config.json", "Running: git commit ...") with a ✓/▸ status list, plus
   the agent's latest narration.
-- **A mascot to keep you company** — pick from eleven, including five cats. It types while
+- **A mascot to keep you company** — pick from twelve, including five cats and one
+  that is not an animal at all. It types while
   the agent is busy, tilts its head and opens its eyes wide when it needs something from
   you, breathes gently when idle, and blinks throughout, so you can tell at a glance
   whether work is happening (see [Mascots](#mascots)).
@@ -87,7 +88,7 @@ place.
 
 ## Mascots
 
-Eleven to choose from, switchable from the settings window without restarting:
+Twelve to choose from, switchable from the settings window without restarting:
 
 <img src="docs/mascots.png" width="720">
 
@@ -96,9 +97,16 @@ cost so little to keep around — they share one drawing and differ only in fur,
 and eye colour. Adding a new colourway is a few lines; adding a new animal is one
 function.
 
+**Ribbon** is the exception: no face, no laptop, no paws. It is a band of light that
+turns about its own vertical axis and drifts through the colour wheel, taking about
+eight seconds to come round. When something is waiting on you the drift stops wandering
+and settles into a narrow shimmer around that state's colour, so it reinforces the toast
+rather than competing with it. Mascots carry an optional `Desk` flag for this — off means
+"does not sit at a laptop", and the laptop and paws are hidden.
+
 The tray icon follows your choice too, reduced to whatever survives at 16 px — ear shape
-for the mammals, fins for the tuna, beak for the penguin — while still carrying the state
-colour.
+for the mammals, fins for the tuna, beak for the penguin, a ring under an orb for the
+ribbon — while still carrying the state colour.
 
 
 ## Requirements
@@ -156,7 +164,7 @@ Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast
 |---------|--------------|
 | **Start automatically with Scout** | Adds or removes the `Watch-Scout.ps1` shortcut in your Startup folder. Per-user, no registry writes, no admin rights. The checkbox reads the real state of the folder, so editing it outside the app still shows up correctly. |
 | **Animate the mascot** | Off leaves the mascot in a resting pose and stops its timer entirely. Shares one setting with **Pause animation** in the tray menu. |
-| **Mascot** | Switches between the eleven mascots live, no restart needed. |
+| **Mascot** | Switches between the twelve mascots live, no restart needed. |
 | **Opacity** | Fades the whole toast, from solid down to 35%. Useful if you want it present but not loud. Applies as you drag; the value is saved once you settle. The 35% floor is deliberate — a fully transparent window would still swallow clicks. |
 | **This process** | Live working set, CPU and uptime for the companion itself, so "how much is this costing me?" does not require hunting through Task Manager for the right `powershell.exe`. |
 
