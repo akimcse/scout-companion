@@ -361,6 +361,9 @@ $State = [pscustomobject]@{
     LastEventUtc    = [datetime]::MinValue
     PendingPerms    = [ordered]@{}
     PendingAsks     = [ordered]@{}                # questions waiting on the user
+    # The session the step list and narration belong to, so the toast can name
+    # it. Merged from whichever session moved last, alongside its steps.
+    Primary         = $null
     AgentHwnd       = [IntPtr]::Zero
 }
 
@@ -815,6 +818,8 @@ function Merge-SessionState {
         $State.Saying       = $primary.Saying
         $State.Steps        = $primary.Steps
         $State.LastEventUtc = $primary.LastEventUtc
+        # Shaped like a pending prompt so the same naming rule covers both.
+        $State.Primary      = @{ session = $primary.Label; title = (Get-SessionSubject $primary) }
     }
 }
 
@@ -1342,6 +1347,11 @@ function Focus-AgentSession {
             <Ellipse x:Name="Dot" Width="9" Height="9" Fill="#FF4ADE80" VerticalAlignment="Center" Margin="0,0,7,0" DockPanel.Dock="Left"/>
             <TextBlock x:Name="HeaderText" Text="Scout is working" Foreground="#FFE6EAF2" FontSize="13.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
           </DockPanel>
+          <!-- Which conversation the steps and narration below belong to. Its
+               own line, aligned under the header text rather than beside it: a
+               chat title is a sentence more often than a word. -->
+          <TextBlock x:Name="HeaderFrom" Margin="16,2,0,0" Text="" Foreground="#FF9AA6BE" FontSize="10.5"
+                     Opacity="0.85" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
           <TextBlock x:Name="SayingText" Margin="0,4,0,0" Text="" Foreground="#FF9AA6BE" FontSize="11"
                      FontStyle="Italic" TextWrapping="Wrap" MaxHeight="44" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
@@ -1393,6 +1403,7 @@ $Window = [Windows.Markup.XamlReader]::Load($reader)
 
 $HeaderText   = $Window.FindName('HeaderText')
 $SayingText   = $Window.FindName('SayingText')
+$HeaderFrom   = $Window.FindName('HeaderFrom')
 $Dot          = $Window.FindName('Dot')
 $StepsPanel   = $Window.FindName('StepsPanel')
 $StepsText    = $Window.FindName('StepsText')
@@ -2812,16 +2823,17 @@ $anim.Add_Tick({
 # ---------------------------------------------------------------------------
 # Main loop: poll events + decide visibility + render.
 # ---------------------------------------------------------------------------
-# Puts the name of the asking conversation under the prompt's heading, or hides
-# the line when there is nothing worth saying.
-function Set-PermFrom($item) {
+# Puts the name of a conversation on a line of its own, or hides the line when
+# there is nothing worth saying. Used for both the prompt card and the header,
+# so a session is named the same way whichever part of the toast is showing it.
+function Set-FromLine($block, $item) {
     $from = (Where-From $item) -replace '^\s*-\s*',''
     if ($from) {
-        $PermFrom.Text = $from.Trim()
-        $PermFrom.Visibility = 'Visible'
+        $block.Text = $from.Trim()
+        $block.Visibility = 'Visible'
     } else {
-        $PermFrom.Text = ''
-        $PermFrom.Visibility = 'Collapsed'
+        $block.Text = ''
+        $block.Visibility = 'Collapsed'
     }
 }
 
@@ -2933,7 +2945,10 @@ $timer.Add_Tick({
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
         $HeaderText.Text = (T 'Approval needed') + $extra
         $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested')
-        Set-PermFrom $first
+        Set-FromLine $PermFrom $first
+        # The card already names the asking conversation, and it need not be the
+        # one the header was following a moment ago.
+        $HeaderFrom.Visibility = 'Collapsed'
         $PermText.Text = $first.text
         $AllowBtn.Visibility  = 'Visible'
         $DenyBtn.Visibility   = 'Visible'
@@ -2948,7 +2963,8 @@ $timer.Add_Tick({
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
         $HeaderText.Text = (T 'Waiting on you') + $extra
         $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question')
-        Set-PermFrom $first
+        Set-FromLine $PermFrom $first
+        $HeaderFrom.Visibility = 'Collapsed'
         $body = $first.text
         if ($first.choices -and $first.choices.Count) {
             $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
@@ -2968,6 +2984,11 @@ $timer.Add_Tick({
         if (-not $agentRunning) { $HeaderText.Text = T 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
         elseif ($script:Busy)   { $HeaderText.Text = T 'Working hard...';    $Dot.Fill = '#FF4ADE80' }
         else                    { $HeaderText.Text = T 'Idle';               $Dot.Fill = '#FF8A93A6' }
+
+        # Name the conversation whose steps and narration are on screen. Without
+        # this the toast reports work in progress and never says whose, which is
+        # the ordinary state it spends nearly all of its time in.
+        Set-FromLine $HeaderFrom $State.Primary
 
         if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
         else { $SayingText.Visibility = 'Collapsed' }

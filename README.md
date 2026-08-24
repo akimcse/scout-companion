@@ -284,12 +284,21 @@ has typed for a while.
 
 ### Naming the conversation on the toast
 
-A prompt carries a second line under its heading saying which conversation raised it.
-That is Scout's own chat title once the search above has found it, and until then the
-latest thing that session was asked to do — the *latest*, not the first, because a
+A prompt carries a second line under its heading saying which conversation raised it,
+and in the ordinary working state the header carries the same line for whichever
+conversation the step list and narration belong to. The toast spends nearly all of its
+life in that ordinary state, so naming only the prompts would have left the label
+practically invisible.
+
+The name is Scout's own chat title once the search above has found it, and until then
+the latest thing that session was asked to do — the *latest*, not the first, because a
 resumed session opens with "carry on" and naming it that would be worse than useless.
 A bare project folder is only shown when more than one session is being followed; on
 its own it says almost nothing, and it reads the same for every session on the project.
+
+While a prompt is up the header drops its own name and only the card is labelled: the
+conversation asking for permission need not be the one whose steps were scrolling past
+a moment earlier, and two different names on one toast would be worse than one.
 
 One card shows one prompt, and the header counts everything else that is queued —
 `Approval needed (+2)` — across both kinds. Counting only the shown prompt's own kind
