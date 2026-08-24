@@ -920,53 +920,72 @@ function Get-AgentWindows {
     try { return @([ScoutNative]::TopLevelWindows($pids)) } catch { return @() }
 }
 
-function Count-AgentWindows {
-    # How many agent windows are on screen. Matters because a pending approval
-    # cannot be traced back to the window that raised it: the session lock names
-    # a backend process, not the UI one.
-    $n = @(Get-AgentWindows).Count
-    if ($n -gt 0) { return $n }
-    # The enumeration can come back empty if the process list could not be read;
-    # claiming zero windows would quietly re-enable one-click approvals, so fall
-    # back to "one" and let the caller behave as it always did.
-    return 1
-}
-
-function Invoke-AgentButton([string[]]$labels) {
-    # Refuse to guess when several agent windows are open. Clicking Allow in the
-    # wrong window would approve something the user never saw, which is a far
-    # worse failure than making them click it themselves.
-    if ((Count-AgentWindows) -gt 1) { return $false }
-
-    $win = Get-AgentWindow
-    if (-not $win) { return $false }
-    Wake-AgentA11y $win.Hwnd
-    Start-Sleep -Milliseconds 350
-    try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($win.Hwnd) } catch { return $false }
-    if (-not $root) { return $false }
+function Find-AgentButton([IntPtr]$hwnd, [string[]]$labels) {
+    # The button with one of these captions in this window, but only if it is
+    # actually on screen. Being on screen is the whole signal: Scout keeps its
+    # approval buttons in the automation tree whether or not a prompt is up, so
+    # mere presence would name every window equally.
+    $root = $null
+    try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd) } catch { return $null }
+    if (-not $root) { return $null }
 
     $btnCond = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Button)
-    $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond)
+    $buttons = $null
+    try { $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond) } catch { return $null }
+    if (-not $buttons) { return $null }
 
+    # Exact caption first, so a plain "Allow" is taken over "Allow everywhere"
+    # when Scout offers both.
     foreach ($label in $labels) {
         foreach ($b in $buttons) {
             $n = $b.Current.Name
-            if ($n -and ($n.Trim().ToLower() -eq $label.ToLower()) -and -not $b.Current.IsOffscreen) {
-                try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch { }
-            }
+            if ($n -and ($n.Trim().ToLower() -eq $label.ToLower()) -and -not $b.Current.IsOffscreen) { return $b }
         }
     }
     foreach ($label in $labels) {
         foreach ($b in $buttons) {
             $n = $b.Current.Name
-            if ($n -and ($n -ilike "*$label*") -and -not $b.Current.IsOffscreen) {
-                try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch { }
-            }
+            if ($n -and ($n -ilike "*$label*") -and -not $b.Current.IsOffscreen) { return $b }
         }
     }
-    return $false
+    return $null
+}
+
+function Invoke-AgentButton([string[]]$labels) {
+    # Which window raised a pending approval cannot be read from the session
+    # state - the lock names a backend process, not a UI one - but it can be
+    # seen. The window showing the prompt is the window with the button on
+    # screen, so look in all of them and act only when exactly one qualifies.
+    #
+    # Counting windows and refusing above one, as this did before, meant that
+    # simply having a second Scout window open turned Allow and Deny into
+    # nothing at all - and three windows is an ordinary way to work. The safety
+    # property is unchanged: two windows both showing a prompt is genuinely
+    # ambiguous, and that still refuses rather than guessing.
+    $wins = @(Get-AgentWindows)
+    if ($wins.Count -eq 0) {
+        $w = Get-AgentWindow
+        if (-not $w) { return $false }
+        $wins = @($w.Hwnd)
+    }
+
+    # Wake them all before reading any, so one sleep covers the set.
+    foreach ($h in $wins) { Wake-AgentA11y $h }
+    Start-Sleep -Milliseconds 350
+
+    $hits = @()
+    foreach ($h in $wins) {
+        $b = Find-AgentButton $h $labels
+        if ($b) { $hits += $b }
+    }
+    if ($hits.Count -ne 1) { return $false }
+
+    try {
+        $hits[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+        return $true
+    } catch { return $false }
 }
 
 function Focus-Agent {

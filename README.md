@@ -223,11 +223,13 @@ Scout Companion:
    - `external_tool.requested` for an ask-the-user tool → pending question
 3. Detects the **agent window** from the running process list and checks whether it's
    minimized or in the foreground to decide when to show the toast.
-4. For approvals, it wakes the agent window's accessibility tree and invokes the
-   matching **Allow/Deny** button through Windows UI Automation. If more than one agent
-   window is open it refuses to click and focuses instead — a pending approval cannot be
-   traced back to the window that raised it, and approving the wrong thing is worse than
-   making you click it yourself.
+4. For approvals, it wakes each agent window's accessibility tree and invokes the
+   matching **Allow/Deny** button through Windows UI Automation. Which window raised the
+   approval cannot be read from the session state — the lock names a backend process, not
+   a UI one — but it can be seen: the window showing the prompt is the one with the button
+   on screen. It clicks only when exactly one window qualifies, and focuses instead when
+   none or several do, because approving something nobody read is worse than making you
+   click it yourself.
 5. For **Open**, it also tries to put Scout on the chat the prompt came from.
 
 ### Finding the chat a prompt came from
@@ -275,6 +277,15 @@ including the lagging-timestamp case:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File Test-SessionMatch.ps1
+```
+
+`Test-ButtonSearch.ps1` covers the other half — the search that decides where **Allow**
+and **Deny** get clicked — against real windows, since Scout will not raise an approval
+on demand. It opens a few throwaway windows while it runs, so it needs a desktop and an
+STA host:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File Test-ButtonSearch.ps1
 ```
 
 Approvals and questions are merged across every followed session; the step list and
@@ -364,10 +375,12 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
   **Allow for session**, **Allow everywhere**, and **Deny**; the toast's **Allow** maps to
   the safest one-time **Allow**. As a fallback the companion focuses the agent window so
   you can click manually.
-- **Allow/Deny stopped clicking when I opened a second agent window** — deliberate. A
-  pending approval cannot be traced back to the window that raised it, so with more than
-  one window open the companion focuses instead of guessing. Close the extra window to get
-  one-click approvals back.
+- **Allow/Deny stopped clicking when I opened a second agent window** — fixed. It used to
+  count windows and give up above one, which turned the buttons into nothing at all as
+  soon as you worked in two Scout windows. It now looks for the prompt itself and clicks
+  in the window that is showing it. It still declines if two windows are showing a prompt
+  at once, since the approval could belong to either; answer one in Scout and the toast
+  can take the other.
 - **Start-with-Scout won't turn on** — the checkbox disables itself if `Watch-Scout.ps1`
   is missing from the same folder as the script, and reverts if the Startup folder cannot
   be written.
