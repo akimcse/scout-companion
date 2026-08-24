@@ -757,20 +757,25 @@ function Focus-Agent {
             </TransformGroup>
           </Canvas.RenderTransform>
           <!-- head is inserted here at index 0 -->
-          <!-- laptop: screen lid (seen from behind) -->
-          <Border Canvas.Left="17" Canvas.Top="40" Width="24" Height="13" CornerRadius="2" Background="#FF3A4257"/>
-          <Border Canvas.Left="19" Canvas.Top="42" Width="20" Height="9"  CornerRadius="1" Background="#FF5C6B86"/>
-          <Ellipse Canvas.Left="27" Canvas.Top="45" Width="4" Height="4" Fill="#FF9DE7FF"/>
-          <!-- laptop: keyboard base -->
-          <Polygon Points="11,52 47,52 53,60 5,60" Fill="#FFC9D0DC"/>
-          <Polygon Points="14,53 44,53 48,58 10,58" Fill="#FFA9B3C4"/>
-          <!-- paws on the keyboard (animated typing); recoloured per mascot -->
-          <Ellipse x:Name="LeftPaw" Canvas.Left="14" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
-            <Ellipse.RenderTransform><TranslateTransform x:Name="LeftPawT"/></Ellipse.RenderTransform>
-          </Ellipse>
-          <Ellipse x:Name="RightPaw" Canvas.Left="32" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
-            <Ellipse.RenderTransform><TranslateTransform x:Name="RightPawT"/></Ellipse.RenderTransform>
-          </Ellipse>
+          <!-- The desk furniture, grouped so a mascot that does not type can hide
+               it in one move. Positions are unchanged: a nested Canvas at 0,0
+               keeps every Canvas.Left/Top in the same coordinate space. -->
+          <Canvas x:Name="Desk" Width="58" Height="60">
+            <!-- laptop: screen lid (seen from behind) -->
+            <Border Canvas.Left="17" Canvas.Top="40" Width="24" Height="13" CornerRadius="2" Background="#FF3A4257"/>
+            <Border Canvas.Left="19" Canvas.Top="42" Width="20" Height="9"  CornerRadius="1" Background="#FF5C6B86"/>
+            <Ellipse Canvas.Left="27" Canvas.Top="45" Width="4" Height="4" Fill="#FF9DE7FF"/>
+            <!-- laptop: keyboard base -->
+            <Polygon Points="11,52 47,52 53,60 5,60" Fill="#FFC9D0DC"/>
+            <Polygon Points="14,53 44,53 48,58 10,58" Fill="#FFA9B3C4"/>
+            <!-- paws on the keyboard (animated typing); recoloured per mascot -->
+            <Ellipse x:Name="LeftPaw" Canvas.Left="14" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
+              <Ellipse.RenderTransform><TranslateTransform x:Name="LeftPawT"/></Ellipse.RenderTransform>
+            </Ellipse>
+            <Ellipse x:Name="RightPaw" Canvas.Left="32" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
+              <Ellipse.RenderTransform><TranslateTransform x:Name="RightPawT"/></Ellipse.RenderTransform>
+            </Ellipse>
+          </Canvas>
         </Canvas>
 
         <Button x:Name="CloseBtn" Content="&#x2715;" DockPanel.Dock="Right" Width="22" Height="22"
@@ -847,6 +852,7 @@ $RightPawT    = $Window.FindName('RightPawT')
 $RootBorder   = $Window.FindName('RootBorder')
 $GlowBorder   = $Window.FindName('GlowBorder')
 $MascotHost   = $Window.FindName('MascotHost')
+$Desk         = $Window.FindName('Desk')
 $LeftPaw      = $Window.FindName('LeftPaw')
 $RightPaw     = $Window.FindName('RightPaw')
 $RootGlow     = $Window.FindName('RootGlow')
@@ -1175,6 +1181,70 @@ $(New-CuteEyes $p)
 "@
 }
 
+# Not an animal, and the only mascot that does not sit at the laptop: a ribbon
+# of light that turns on the spot and drifts through its colours. Built from
+# stroked arcs rather than a filled outline -- the top of one loop plus the
+# bottom of the next is what reads as a helix, and a stroke keeps the band an
+# even thickness at 58 px where a filled outline goes muddy.
+#
+# Everything the animation touches is named here: SpinS foreshortens it, SpinR
+# adds the tilt, and the gradient stops are re-coloured in place. Measured
+# against rotating the gradient axis and swapping pre-built frozen brushes; all
+# three landed inside the run-to-run noise, so this one was picked for being the
+# clearest to read.
+function New-RibbonMascot($p) {
+    @"
+      <Canvas x:Name="RibbonRoot" Width="58" Height="60">
+        <Canvas.Resources>
+          <LinearGradientBrush x:Key="RibbonBrush" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop x:Name="RibbonA" Color="$($p.warm)" Offset="0"/>
+            <GradientStop x:Name="RibbonB" Color="$($p.cool)" Offset="1"/>
+          </LinearGradientBrush>
+        </Canvas.Resources>
+        <!-- Only the band turns. The orb sits outside the rotating group on
+             purpose: carried along it swings out to the side and the whole
+             mascot reads as off balance, where a still orb with the band
+             turning around it reads as one thing orbiting another. -->
+        <Canvas x:Name="RibbonGroup" Width="58" Height="60">
+          <Canvas.RenderTransform>
+            <TransformGroup>
+              <ScaleTransform x:Name="SpinS" ScaleX="1" ScaleY="1" CenterX="29" CenterY="36"/>
+              <RotateTransform x:Name="SpinR" Angle="0" CenterX="29" CenterY="36"/>
+            </TransformGroup>
+          </Canvas.RenderTransform>
+          <!-- A descending helix drawn as four half-turns, alternating back and
+               front. Each starts where the last ended, a little lower and a
+               little narrower, which is what makes it read as a band winding
+               away rather than a flat ring. The back halves are thinner as well
+               as dimmer: a constant-width stroke reads as rope, and a real
+               ribbon narrows as it turns edge-on. -->
+          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="6" Opacity="0.40"
+                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                Data="M12,30 A 16,7 0 0 1 44,32"/>
+          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="8.5"
+                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                Data="M44,32 A 16,7 0 0 1 14,38"/>
+          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="5.5" Opacity="0.40"
+                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                Data="M14,38 A 12,5 0 0 1 40,40"/>
+          <Path Stroke="{StaticResource RibbonBrush}" StrokeThickness="7.5"
+                StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                Data="M40,40 A 12,5 0 0 1 21,45"/>
+        </Canvas>
+        <!-- the orb the band turns around -->
+        <Ellipse Canvas.Left="22.5" Canvas.Top="7" Width="14" Height="14">
+          <Ellipse.Fill>
+            <RadialGradientBrush GradientOrigin="0.35,0.3" Center="0.5,0.5" RadiusX="0.65" RadiusY="0.65">
+              <GradientStop x:Name="OrbA" Color="$($p.spark)" Offset="0"/>
+              <GradientStop x:Name="OrbB" Color="$($p.cool)" Offset="1"/>
+            </RadialGradientBrush>
+          </Ellipse.Fill>
+        </Ellipse>
+        <Ellipse Canvas.Left="25.5" Canvas.Top="9.5" Width="4.5" Height="3.5" Fill="#66FFFFFF"/>
+      </Canvas>
+"@
+}
+
 $MascotBuilders = @{
     quokka  = ${function:New-QuokkaHead}
     cat     = ${function:New-CatHead}
@@ -1183,6 +1253,7 @@ $MascotBuilders = @{
     bunny   = ${function:New-BunnyHead}
     penguin = ${function:New-PenguinHead}
     tuna    = ${function:New-TunaHead}
+    ribbon  = ${function:New-RibbonMascot}
 }
 
 # Ordered so the picker reads sensibly: the original mascot, then the cats with
@@ -1233,6 +1304,11 @@ $Mascots = [ordered]@{
     'penguin' = @{ Label = 'Penguin'; Species = 'penguin'; Palette = @{
         fur='#FF343945'; shade='#FF1A1D24'; ear='#FF464C5A'; earInner='#FF464C5A'
         muzzle='#FFFAF8F5'; nose='#FFF5AE44'; eye='#FF5E6B80'; blush='#FF8FA2C0'; paw='#FFF5AE44' } }
+
+    # The odd one out, and deliberately so: no face, no laptop, no paws. Desk is
+    # what tells Set-Mascot to hide the desk furniture the animals share.
+    'ribbon' = @{ Label = 'Ribbon'; Species = 'ribbon'; Desk = $false; Palette = @{
+        warm='#FFFF9E63'; cool='#FFB44BE0'; spark='#FFFFD9A8'; paw='#FFB44BE0' } }
 }
 
 $script:MascotHead = $null
@@ -1261,6 +1337,20 @@ function Set-Mascot([string]$id) {
     # The eye group is rebuilt with the head, so the animation's handle on it
     # has to be refreshed on every swap.
     $script:BlinkS = $head.FindName('BlinkS')
+    # Same for the ribbon's own parts. These come back null for every animal,
+    # which is exactly how the tick decides which body plan it is animating.
+    $script:SpinR    = $head.FindName('SpinR')
+    $script:SpinS    = $head.FindName('SpinS')
+    $script:RibbonA  = $head.FindName('RibbonA')
+    $script:RibbonB  = $head.FindName('RibbonB')
+    $script:OrbA     = $head.FindName('OrbA')
+    $script:OrbB     = $head.FindName('OrbB')
+
+    # A mascot that does not type has no use for the laptop or the paws. Default
+    # is $true so every existing mascot keeps its desk without being edited.
+    $wantsDesk = $true
+    if ($def.Contains('Desk')) { $wantsDesk = [bool]$def.Desk }
+    $Desk.Visibility = if ($wantsDesk) { 'Visible' } else { 'Collapsed' }
 
     $pawBrush = B $def.Palette.paw
     $LeftPaw.Fill  = $pawBrush
@@ -1326,7 +1416,12 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
     $pale  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(235, 250, 250, 248))
 
     function Tri([single[]]$pts) {
-        $poly = @(
+        # Typed explicitly: an untyped @(...) is an Object[], and PowerShell 7
+        # will not bind that to DrawPolygon's PointF[] overload the way 5.1
+        # does. The launcher uses powershell.exe so this never fired in normal
+        # use, but running the script under pwsh broke every species that draws
+        # a polygon -- cat, fox, tuna and penguin all lost their tray icon.
+        [System.Drawing.PointF[]]$poly = @(
             (New-Object System.Drawing.PointF $pts[0], $pts[1]),
             (New-Object System.Drawing.PointF $pts[2], $pts[3]),
             (New-Object System.Drawing.PointF $pts[4], $pts[5]))
@@ -1336,6 +1431,9 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
 
     # head rect, then the eyes are placed relative to it
     $hx = 3.0; $hy = 8.0; $hw = 26.0; $hh = 22.0
+    # The ribbon has no head and no eyes, so it opts out of the shared body plan
+    # below rather than trying to squeeze into it.
+    $faceless = ($species -eq 'ribbon')
     try {
         switch ($species) {
             'cat' {
@@ -1352,11 +1450,11 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
                 $hy = 10; $hh = 20
                 Tri @(4,16, 7,1, 16,11)
                 Tri @(28,16, 25,1, 16,11)
-                $g.FillPolygon($dark, @(
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
                     (New-Object System.Drawing.PointF 6.2, 7.0),
                     (New-Object System.Drawing.PointF 7.0, 1.0),
                     (New-Object System.Drawing.PointF 11.0, 4.6)))
-                $g.FillPolygon($dark, @(
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
                     (New-Object System.Drawing.PointF 25.8, 7.0),
                     (New-Object System.Drawing.PointF 25.0, 1.0),
                     (New-Object System.Drawing.PointF 21.0, 4.6)))
@@ -1375,6 +1473,25 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
                 Tri @(31.5,9, 24,17.5, 31.5,26)
                 Tri @(12,7, 16,0.5, 20,7)
             }
+            'ribbon' {
+                # A closed ring with the orb above it, rather than the mascot's
+                # open helix. Two attempts at drawing the back half in the darker
+                # edge colour both read as a generic person silhouette -- against
+                # a dark taskbar the back arc disappeared and what was left was a
+                # head over a pair of shoulders. A full ring cannot be mistaken
+                # for a face, which is the whole job at 16 px.
+                $band = New-Object System.Drawing.Pen $fill, 8.0
+                $rim  = New-Object System.Drawing.Pen $edge, 2.0
+                try {
+                    $g.DrawEllipse($rim,  2.5, 14.5, 27.0, 15.0)
+                    $g.DrawEllipse($band, 4.5, 16.5, 23.0, 11.0)
+                    # a short dark cut across the top, so the band still hints at
+                    # passing behind itself rather than lying flat
+                    $g.DrawArc($rim, 4.5, 16.5, 23.0, 11.0, 200, 140)
+                } finally { $band.Dispose(); $rim.Dispose() }
+                $g.FillEllipse($brush, 9.5, 0.5, 13.0, 13.0)
+                $g.DrawEllipse($pen,   9.5, 0.5, 13.0, 13.0)
+            }
             default {
                 # quokka: soft round ears
                 $g.FillEllipse($brush, 3.5, 1.5, 10, 11); $g.DrawEllipse($pen, 3.5, 1.5, 10, 11)
@@ -1382,23 +1499,25 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
             }
         }
 
-        $g.FillEllipse($brush, $hx, $hy, $hw, $hh)
-        $g.DrawEllipse($pen,   $hx, $hy, $hw, $hh)
+        if (-not $faceless) {
+            $g.FillEllipse($brush, $hx, $hy, $hw, $hh)
+            $g.DrawEllipse($pen,   $hx, $hy, $hw, $hh)
 
-        if ($species -eq 'penguin') {
-            $g.FillEllipse($pale, ($hx + 4), ($hy + 4), ($hw - 8), ($hh - 5))
-        }
+            if ($species -eq 'penguin') {
+                $g.FillEllipse($pale, ($hx + 4), ($hy + 4), ($hw - 8), ($hh - 5))
+            }
 
-        # Eyes, in the edge colour so they read on any taskbar background.
-        $ey = $hy + $hh * 0.32
-        $g.FillEllipse($dark, ($hx + $hw * 0.20), $ey, 5.4, 6.4)
-        $g.FillEllipse($dark, ($hx + $hw * 0.60), $ey, 5.4, 6.4)
+            # Eyes, in the edge colour so they read on any taskbar background.
+            $ey = $hy + $hh * 0.32
+            $g.FillEllipse($dark, ($hx + $hw * 0.20), $ey, 5.4, 6.4)
+            $g.FillEllipse($dark, ($hx + $hw * 0.60), $ey, 5.4, 6.4)
 
-        if ($species -eq 'penguin') {
-            $g.FillPolygon($dark, @(
-                (New-Object System.Drawing.PointF 13.0, 21.0),
-                (New-Object System.Drawing.PointF 19.0, 21.0),
-                (New-Object System.Drawing.PointF 16.0, 26.0)))
+            if ($species -eq 'penguin') {
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
+                    (New-Object System.Drawing.PointF 13.0, 21.0),
+                    (New-Object System.Drawing.PointF 19.0, 21.0),
+                    (New-Object System.Drawing.PointF 16.0, 26.0)))
+            }
         }
     } finally {
         $brush.Dispose(); $pen.Dispose(); $dark.Dispose(); $pale.Dispose(); $g.Dispose()
@@ -1892,6 +2011,33 @@ $script:EyeBase = 1.0           # openness the eyes return to for this state
 # plain .NET generator instead.
 $script:Rng = New-Object System.Random
 
+# Handles on the ribbon mascot, null for every animal. Set-Mascot rebinds them.
+$script:SpinR = $null; $script:SpinS = $null
+$script:RibbonA = $null; $script:RibbonB = $null
+$script:OrbA = $null; $script:OrbB = $null
+$script:Hue = 0.06
+$script:SpinPhase = 0.0
+
+# HSV to Color, written out longhand because this runs four times a frame and
+# System.Drawing's converter would mean a managed<->GDI hop for each one.
+function Hue-Color([double]$h, [double]$s, [double]$v) {
+    $h = $h - [Math]::Floor($h)          # wrap into 0..1
+    $i = [int][Math]::Floor($h * 6) % 6
+    $f = $h * 6 - [Math]::Floor($h * 6)
+    $p = $v * (1 - $s)
+    $q = $v * (1 - $f * $s)
+    $t = $v * (1 - (1 - $f) * $s)
+    switch ($i) {
+        0 { $r=$v; $g=$t; $b=$p }
+        1 { $r=$q; $g=$v; $b=$p }
+        2 { $r=$p; $g=$v; $b=$t }
+        3 { $r=$p; $g=$q; $b=$v }
+        4 { $r=$t; $g=$p; $b=$v }
+        default { $r=$v; $g=$p; $b=$q }
+    }
+    return [System.Windows.Media.Color]::FromRgb([byte]($r*255), [byte]($g*255), [byte]($b*255))
+}
+
 # Squash-and-open, held one frame at the bottom so the blink is visible at
 # 12 fps without looking like a dropped frame.
 $BlinkFrames = @(0.55, 0.10, 0.10, 0.60)
@@ -1903,6 +2049,10 @@ function Reset-Mascot {
     $BodyR.Angle = 0
     $LeftPawT.Y = 0; $RightPawT.Y = 0
     if ($script:BlinkS) { $script:BlinkS.ScaleY = 1.0 }
+    # The ribbon parks facing forward rather than mid-turn, which would read as
+    # a frozen frame rather than a resting pose.
+    if ($script:SpinR) { $script:SpinR.Angle = 0 }
+    if ($script:SpinS) { $script:SpinS.ScaleX = 1.0; $script:SpinS.ScaleY = 1.0 }
     $script:BlinkStep = -1
 }
 
@@ -1952,6 +2102,60 @@ $anim.Add_Tick({
         $RightPawT.Y = 0
         # relaxed, a touch sleepy
         $script:EyeBase = 0.86
+    }
+
+    # --- ribbon ---------------------------------------------------------------
+    # Only the ribbon mascot binds these, so the animals skip the whole block.
+    if ($script:SpinR) {
+        # The desk transforms pivot on the laptop base at y=52, which swings a
+        # mascot that has no laptop. Neutralise them and let the ribbon's own
+        # transforms carry the motion.
+        $BodyR.Angle = 0; $BodyT.X = 0
+        $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+
+        # Rates: spin is radians per frame, hue is turns of the colour wheel per
+        # frame. Multiply either by PhaseScale * fps to read it in real time --
+        # busy turns once every 3.5 seconds and comes round the wheel in 8, idle
+        # takes 14 and 30. Note the band reads wide-narrow-wide twice per
+        # revolution, since you see the front, the edge, the back, the edge.
+        # The first pass ran the hue 25x faster than this and strobed through the
+        # whole wheel in a second and a quarter, which was unpleasant to sit
+        # next to.
+        if ($script:Pending -or $script:Asking) { $spin = 0.052; $hueRate = 0.0100; $pin = $true }
+        elseif ($script:Busy)                   { $spin = 0.090; $hueRate = 0.0060; $pin = $false }
+        else                                    { $spin = 0.022; $hueRate = 0.0018; $pin = $false }
+
+        $script:SpinPhase += $spin * $script:PhaseScale
+
+        # A band turning about its own vertical axis does not rotate on screen --
+        # it foreshortens. Projected into 2D that is exactly ScaleX = cos(theta),
+        # which passes through zero and goes negative, mirroring the band as its
+        # far side comes round. Driving a RotateTransform instead made it tumble
+        # end over end like a steering wheel, which is a different object.
+        #
+        # The floor stops it collapsing to an invisible line when it is edge-on:
+        # true in perspective, but a ribbon has thickness, and at 12.5 fps a
+        # frame that vanishes reads as a dropped one.
+        $c = [Math]::Cos($script:SpinPhase)
+        $mag = [Math]::Max(0.28, [Math]::Abs($c))
+        $script:SpinS.ScaleX = if ($c -lt 0) { -$mag } else { $mag }
+        # Just enough tilt to keep it from looking like a machine part.
+        $script:SpinR.Angle = [Math]::Sin($script:SpinPhase * 0.5) * 6.0
+
+        # The toast already says what state it is in through the glow colour, so
+        # a free-running rainbow would argue with it. Left alone the hue drifts
+        # wherever it likes; the moment something is waiting on you it is pinned
+        # to a narrow shimmer around that state's own colour and reinforces the
+        # signal instead of competing with it.
+        $script:Hue += $hueRate * $script:PhaseScale
+        $h = if (-not $pin) { $script:Hue }
+             elseif ($script:Pending) { 0.11 + [Math]::Sin($script:Hue * 6.283) * 0.035 }   # amber
+             else                     { 0.52 + [Math]::Sin($script:Hue * 6.283) * 0.035 }   # cyan
+
+        $script:RibbonA.Color = Hue-Color $h            0.62 1.00
+        $script:RibbonB.Color = Hue-Color ($h + 0.17)   0.78 0.92
+        $script:OrbA.Color    = Hue-Color ($h - 0.04)   0.28 1.00
+        $script:OrbB.Color    = Hue-Color ($h + 0.17)   0.72 0.95
     }
 
     # --- blink ---------------------------------------------------------------
