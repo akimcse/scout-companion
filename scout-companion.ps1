@@ -187,6 +187,8 @@ function New-SessionRecord([string]$dir, [string]$events) {
         Dir          = $dir
         Events       = $events
         Label        = $null
+        BaseLabel    = $null
+        Topic        = $null
         Offset       = [long]0
         Saying       = $null
         Steps        = New-Object System.Collections.ArrayList
@@ -411,6 +413,70 @@ function Get-SessionLabel([string]$dir, [string]$events) {
     return (Split-Path $dir -Leaf).Substring(0, 8)
 }
 
+function Get-SessionTopic([string]$events) {
+    # First thing the user actually asked for, used to tell apart two sessions
+    # in the same folder - which is the normal case when you open a second
+    # window on the same project.
+    #
+    # Only called when a collision exists, because it scans until it finds a
+    # user message rather than reading a fixed head, and that message can sit
+    # some way in. Bounded so a session that never got one cannot walk a
+    # multi-megabyte file.
+    try {
+        $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            for ($i = 0; $i -lt 400; $i++) {
+                $line = $sr.ReadLine()
+                if ($null -eq $line) { break }
+                if ($line -notmatch '"user\.message"') { continue }
+                $txt = ($line | ConvertFrom-Json).data.content
+                if (-not $txt) { continue }
+                # Collapse newlines so a pasted block does not become a wall of
+                # text in the panel title.
+                $txt = ($txt -replace '\s+', ' ').Trim()
+                if ($txt) { return (Truncate $txt 28) }
+            }
+        } finally { $fs.Dispose() }
+    } catch { }
+    return $null
+}
+
+function Resolve-SessionLabels {
+    # Two windows on the same project produce the same cwd, and a label that
+    # cannot tell them apart is worse than no label - it names a session
+    # confidently and points at the wrong one. Where that happens, append what
+    # each session was asked to do.
+    $byLabel = @{}
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if (-not $byLabel.ContainsKey($rec.BaseLabel)) { $byLabel[$rec.BaseLabel] = New-Object System.Collections.ArrayList }
+        [void]$byLabel[$rec.BaseLabel].Add($rec)
+    }
+    foreach ($label in $byLabel.Keys) {
+        $group = $byLabel[$label]
+        if ($group.Count -eq 1) { $group[0].Label = $label; continue }
+        foreach ($rec in $group) {
+            if (-not $rec.Topic) { $rec.Topic = Get-SessionTopic $rec.Events }
+            # A session with no user message yet has nothing to name it by, so
+            # fall back to the GUID head rather than leaving it wearing the bare
+            # cwd - which would read as "the payments-api session" while two
+            # others are also payments-api.
+            $rec.Label = if ($rec.Topic) { "$label - $($rec.Topic)" }
+                         else { "$label - $((Split-Path $rec.Dir -Leaf).Substring(0,6))" }
+        }
+        # Two sessions can still land on the same text if their first messages
+        # start alike and truncate to the same prefix.
+        $seen = @{}
+        foreach ($rec in $group) {
+            if ($seen.ContainsKey($rec.Label)) {
+                $rec.Label = "$($rec.BaseLabel) - $((Split-Path $rec.Dir -Leaf).Substring(0,6))"
+            }
+            $seen[$rec.Label] = $true
+        }
+    }
+}
+
 function Sync-Sessions {
     # Refresh which sessions are being followed. A session with something
     # pending is kept regardless of age: an approval does not expire just
@@ -423,7 +489,8 @@ function Sync-Sessions {
     foreach ($s in $active) {
         if ($Sessions.Contains($s.Dir)) { continue }
         $rec = New-SessionRecord $s.Dir $s.Events
-        $rec.Label = Get-SessionLabel $s.Dir $s.Events
+        $rec.BaseLabel = Get-SessionLabel $s.Dir $s.Events
+        $rec.Label     = $rec.BaseLabel
         # Start at the end: replaying a whole history would re-raise approvals
         # that were answered long ago.
         $rec.Offset = (New-Object System.IO.FileInfo $s.Events).Length
@@ -437,6 +504,8 @@ function Sync-Sessions {
         if ($rec.PendingPerms.Count -gt 0 -or $rec.PendingAsks.Count -gt 0) { continue }
         $Sessions.Remove($dir)
     }
+
+    Resolve-SessionLabels
 }
 
 function Read-SessionEvents($rec) {
