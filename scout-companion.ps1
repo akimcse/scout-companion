@@ -61,6 +61,38 @@ if (-not ('ScoutNative' -as [type])) {
 
         [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(System.IntPtr hwnd, int attr, ref int value, int size);
+
+        // Electron keeps several top-level windows inside one process, and
+        // Process.MainWindowHandle only ever names one of them. Counting
+        // processes therefore says "one window" while two are on screen, which
+        // is exactly the case the Allow/Deny guard exists to catch.
+        public delegate bool EnumProc(System.IntPtr hWnd, System.IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumProc cb, System.IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(System.IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern int GetWindowTextLength(System.IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint pid);
+
+        public static System.Collections.Generic.List<System.IntPtr> TopLevelWindows(
+                System.Collections.Generic.HashSet<uint> pids) {
+            var found = new System.Collections.Generic.List<System.IntPtr>();
+            EnumWindows(delegate (System.IntPtr h, System.IntPtr l) {
+                if (!IsWindowVisible(h)) return true;
+                if (GetWindowTextLength(h) == 0) return true;
+                uint owner;
+                GetWindowThreadProcessId(h, out owner);
+                if (pids.Contains(owner)) found.Add(h);
+                return true;
+            }, System.IntPtr.Zero);
+            return found;
+        }
 '@
 }
 
@@ -302,6 +334,8 @@ function New-SessionRecord([string]$dir, [string]$events) {
         Label        = $null
         BaseLabel    = $null
         Topic        = $null
+        Subject      = $null      # the latest thing asked for, used as a title
+        ChatTitle    = $null      # Scout's own name for this chat, once learnt
         Offset       = [long]0
         Saying       = $null
         Steps        = New-Object System.Collections.ArrayList
@@ -408,6 +442,18 @@ function Get-AgentWindow {
     # Fast path: the handle found last time is almost always still valid, so a
     # cheap IsWindow check replaces a full process enumeration on most ticks.
     if ($script:WinCache -and [ScoutNative]::IsWindow($script:WinCache.Hwnd)) {
+        # One process, several windows. If the window in front belongs to the
+        # same process, that is the one the user is looking at, and holding on
+        # to a stale sibling would make the toast think the agent is in the
+        # background while it is filling the screen.
+        $fg = [ScoutNative]::GetForegroundWindow()
+        if ($fg -ne [IntPtr]::Zero -and $fg -ne $script:WinCache.Hwnd) {
+            $owner = [uint32]0
+            [void][ScoutNative]::GetWindowThreadProcessId($fg, [ref]$owner)
+            if ($owner -eq [uint32]$script:WinCache.Pid) {
+                $script:WinCache = @{ Hwnd = $fg; Pid = [int]$owner }
+            }
+        }
         return $script:WinCache
     }
     $script:WinCache = $null
@@ -560,6 +606,55 @@ function Get-SessionTopic([string]$events) {
     return $null
 }
 
+# The latest thing the user asked this session for. That is what the
+# conversation is about right now, and it is what makes a prompt on the toast
+# recognisable - far more so than the folder the session runs in, which reads
+# the same for every session on the same project.
+#
+# Taken from the tail rather than the head on purpose: a resumed session opens
+# with "carry on", and naming it that would be worse than useless.
+function Get-LastUserMessage([string]$events) {
+    try {
+        $fi = New-Object System.IO.FileInfo $events
+        if (-not $fi.Exists) { return $null }
+        $len = $fi.Length
+        if ($len -le 0) { return $null }
+        # A busy session buries the last thing the user said under megabytes of
+        # tool output, so the tail is widened a few times before giving up -
+        # rather than reading the whole file on a session that never had a
+        # message in it at all. Read line by line: splitting sixteen megabytes
+        # in one go would cost more memory than the rest of the app uses.
+        foreach ($take in @(262144, 2097152, 16777216)) {
+            $want = [Math]::Min($len, [long]$take)
+            $best = $null
+            $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+            try {
+                $fs.Seek($len - $want, 'Begin') | Out-Null
+                $sr = New-Object System.IO.StreamReader($fs)
+                while ($null -ne ($line = $sr.ReadLine())) {
+                    if ($line -notmatch '"type":"user\.message"') { continue }
+                    $o = $null
+                    try { $o = $line | ConvertFrom-Json } catch { continue }
+                    if ($o.data.content) { $best = $o.data.content }
+                }
+            } finally { $fs.Dispose() }
+            if ($best) { return (Truncate $best 40) }
+            if ($want -ge $len) { break }
+        }
+    } catch { }
+    return $null
+}
+
+# What the toast calls a session. Scout's own chat title if that has been learnt
+# - it only can be once Open has driven the sidebar - otherwise the latest
+# request. Returns nothing when neither exists, so the caller falls back to the
+# older folder-name rule rather than presenting a folder as a title.
+function Get-SessionSubject($rec) {
+    if ($rec.ChatTitle) { return $rec.ChatTitle }
+    if ($rec.Subject)   { return $rec.Subject }
+    return $null
+}
+
 function Resolve-SessionLabels {
     # Two windows on the same project produce the same cwd, and a label that
     # cannot tell them apart is worse than no label - it names a session
@@ -568,6 +663,9 @@ function Resolve-SessionLabels {
     $byLabel = @{}
     foreach ($dir in $Sessions.Keys) {
         $rec = $Sessions[$dir]
+        # Scout's own title for the chat needs no disambiguating: it is the name
+        # the user reads in the sidebar, and two sessions cannot share a chat.
+        if ($rec.ChatTitle) { $rec.Label = $rec.ChatTitle; continue }
         if (-not $byLabel.ContainsKey($rec.BaseLabel)) { $byLabel[$rec.BaseLabel] = New-Object System.Collections.ArrayList }
         [void]$byLabel[$rec.BaseLabel].Add($rec)
     }
@@ -609,6 +707,10 @@ function Sync-Sessions {
         $rec = New-SessionRecord $s.Dir $s.Events
         $rec.BaseLabel = Get-SessionLabel $s.Dir $s.Events
         $rec.Label     = $rec.BaseLabel
+        # Seeded once from the file, then kept current by Handle-Event as the
+        # user types. Without the seed a session already underway would have no
+        # name until its next message.
+        $rec.Subject   = Get-LastUserMessage $s.Events
         # Start at the end: replaying a whole history would re-raise approvals
         # that were answered long ago.
         $rec.Offset = (New-Object System.IO.FileInfo $s.Events).Length
@@ -663,11 +765,16 @@ function Read-NewEvents {
     }
 }
 
-# Names the session a prompt came from, but only when more than one is being
-# followed - in the ordinary single-session case the label is noise.
+# Names the conversation a prompt came from. Always, now that it can say
+# something worth reading: Scout's own chat title once Open has taught it one,
+# and until then the latest thing that session was asked to do. Only a bare
+# folder name stays behind the "more than one session" rule it always had,
+# because on its own it says almost nothing.
 function Where-From($item) {
+    if (-not $item) { return '' }
+    if ($item.title) { return "  -  $($item.title)" }
     if ($Sessions.Count -le 1) { return '' }
-    if (-not $item -or -not $item.session) { return '' }
+    if (-not $item.session) { return '' }
     return "  -  $($item.session)"
 }
 
@@ -686,10 +793,10 @@ function Merge-SessionState {
         $rec = $Sessions[$dir]
         if ($rec.TurnActive) { $turn = $true }
         foreach ($k in $rec.PendingPerms.Keys) {
-            $v = $rec.PendingPerms[$k]; $v.session = $rec.Label; $perms[$k] = $v
+            $v = $rec.PendingPerms[$k]; $v.session = $rec.Label; $v.title = (Get-SessionSubject $rec); $perms[$k] = $v
         }
         foreach ($k in $rec.PendingAsks.Keys) {
-            $v = $rec.PendingAsks[$k]; $v.session = $rec.Label; $asks[$k] = $v
+            $v = $rec.PendingAsks[$k]; $v.session = $rec.Label; $v.title = (Get-SessionSubject $rec); $asks[$k] = $v
         }
     }
 
@@ -710,6 +817,12 @@ function Handle-Event($sess, $evt) {
     switch ($evt.type) {
         'assistant.turn_start' { $sess.TurnActive = $true }
         'assistant.turn_end'   { $sess.TurnActive = $false }
+        'user.message' {
+            # Keeps the session's name current as the conversation moves on,
+            # without re-reading the file.
+            $txt = $evt.data.content
+            if ($txt) { $sess.Subject = Truncate $txt 40 }
+        }
         'assistant.message' {
             $txt = $evt.data.content; if (-not $txt) { $txt = $evt.data.text }
             if ($txt) { $sess.Saying = Truncate $txt 200 }
@@ -774,23 +887,38 @@ function Wake-AgentA11y([IntPtr]$hwnd) {
     [void][ScoutNative]::SendMessage($hwnd, 0x003D, [IntPtr]::Zero, [IntPtr](-25))
 }
 
+function Get-AgentPids {
+    $pids = New-Object 'System.Collections.Generic.HashSet[uint32]'
+    $all = $null
+    try { $all = Get-Process -ErrorAction SilentlyContinue } catch { return $pids }
+    foreach ($name in $Config.processNames) {
+        foreach ($p in @($all | Where-Object { $_.ProcessName -like "*$name*" })) {
+            if ($Config.browserProcs -contains $p.ProcessName) { continue }
+            [void]$pids.Add([uint32]$p.Id)
+        }
+    }
+    return $pids
+}
+
+function Get-AgentWindows {
+    # Every visible top-level agent window, not one per process. Electron keeps
+    # several windows inside a single process, so asking the process for its
+    # "main" window finds one of them and quietly ignores the rest.
+    $pids = Get-AgentPids
+    if ($pids.Count -eq 0) { return @() }
+    try { return @([ScoutNative]::TopLevelWindows($pids)) } catch { return @() }
+}
+
 function Count-AgentWindows {
     # How many agent windows are on screen. Matters because a pending approval
     # cannot be traced back to the window that raised it: the session lock names
     # a backend process, not the UI one.
-    $n = 0
-    $procs = $null
-    try { $procs = Get-Process -ErrorAction SilentlyContinue } catch { return 1 }
-    $seen = @{}
-    foreach ($name in $Config.processNames) {
-        foreach ($p in @($procs | Where-Object { $_.ProcessName -like "*$name*" })) {
-            if ($p.MainWindowHandle -eq [IntPtr]::Zero) { continue }
-            if ($seen.ContainsKey($p.Id)) { continue }
-            $seen[$p.Id] = $true
-            $n++
-        }
-    }
-    return $n
+    $n = @(Get-AgentWindows).Count
+    if ($n -gt 0) { return $n }
+    # The enumeration can come back empty if the process list could not be read;
+    # claiming zero windows would quietly re-enable one-click approvals, so fall
+    # back to "one" and let the caller behave as it always did.
+    return 1
 }
 
 function Invoke-AgentButton([string[]]$labels) {
@@ -1072,8 +1200,8 @@ function Open-AgentSession($rec) {
         }
         if (-not $box) { return $false }
 
-        try { $box.SetFocus() } catch { }
-        Start-Sleep -Milliseconds 120
+        # No SetFocus. The field takes a value without the caret, and taking the
+        # caret would pull it out of whatever the user was typing in.
         try { $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($query) }
         catch { return $false }
         $typed = $true
@@ -1096,6 +1224,9 @@ function Open-AgentSession($rec) {
         $pick = Select-ChatRow $rows ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
         if (-not $pick) { return $false }
 
+        # Now that the chat has been identified, remember what Scout calls it so
+        # the toast can name it from here on without looking again.
+        if ($pick.Title) { $rec.ChatTitle = $pick.Title; try { Resolve-SessionLabels } catch { } }
         $navigated = Invoke-UiaElement $pick.El
         if ($navigated) { Start-Sleep -Milliseconds 500 }
         return $navigated
@@ -1120,13 +1251,6 @@ function Open-AgentSession($rec) {
             if ($openedSidebar) {
                 [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Hide sidebar' $UiaType::Button))
             }
-            # Searching had to take the caret to do its work. Hand it back to
-            # the message box, which is where someone who just pressed Answer
-            # was heading anyway.
-            if ($typed) {
-                $msg = Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Message' $UiaType::Edit
-                if ($msg) { try { $msg.SetFocus() } catch { } }
-            }
         } catch { }
     }
 }
@@ -1141,7 +1265,6 @@ function Focus-AgentSession {
     if (-not $rec) { return }
     try { [void](Open-AgentSession $rec) } catch { }
 }
-
 # ---------------------------------------------------------------------------
 # WPF overlay UI (with animated quokka mascot).
 # ---------------------------------------------------------------------------
@@ -1228,7 +1351,13 @@ function Focus-AgentSession {
       <Border x:Name="PermPanel" Margin="0,12,0,0" Padding="10" CornerRadius="9"
               Background="#FF2A2030" BorderBrush="#FFB4843C" BorderThickness="1" Visibility="Collapsed">
         <StackPanel>
-          <TextBlock x:Name="PermTitle" Text="&#x26A0; Permission requested" Foreground="#FF6A4A00" FontWeight="Bold" FontSize="13"/>
+          <TextBlock x:Name="PermTitle" Text="&#x26A0; Permission requested" Foreground="#FF6A4A00" FontWeight="Bold" FontSize="13"
+                     TextTrimming="CharacterEllipsis"/>
+          <!-- Which conversation is asking. Its own line, because a chat title
+               is a sentence more often than a word and would push the header
+               off the toast if it were appended to it. -->
+          <TextBlock x:Name="PermFrom" Margin="0,2,0,0" Text="" Foreground="#FFD6CFC2" FontSize="10.5"
+                     Opacity="0.85" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
           <TextBlock x:Name="PermText" Margin="0,5,0,0" Foreground="#FFD6CFC2" FontSize="11.5"
                      TextWrapping="Wrap" MaxHeight="90" TextTrimming="CharacterEllipsis"/>
           <!-- MinWidth, not Width. Fixed widths were fine in English and clipped
@@ -1263,6 +1392,7 @@ $StepsPanel   = $Window.FindName('StepsPanel')
 $StepsText    = $Window.FindName('StepsText')
 $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
+$PermFrom     = $Window.FindName('PermFrom')
 $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
 $AnswerBtn    = $Window.FindName('AnswerBtn')
@@ -1309,6 +1439,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAlert
         $PermPanel.BorderBrush  = $Theme.PermBdAlert
         $PermText.Foreground    = $Theme.PermTxtAlert
+        $PermFrom.Foreground    = $Theme.PermTxtAlert
         $PermTitle.Foreground   = $Theme.AlertHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(255, 176, 0)
         $RootGlow.BlurRadius    = 20
@@ -1322,6 +1453,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAsk
         $PermPanel.BorderBrush  = $Theme.PermBdAsk
         $PermText.Foreground    = $Theme.PermTxtAsk
+        $PermFrom.Foreground    = $Theme.PermTxtAsk
         $PermTitle.Foreground   = $Theme.AskHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 150, 210)
         $RootGlow.BlurRadius    = 20
@@ -1335,6 +1467,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermFrom.Foreground    = $Theme.PermTxtNormal
         $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(56, 170, 100)
         $RootGlow.BlurRadius    = 22
@@ -1348,6 +1481,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermFrom.Foreground    = $Theme.PermTxtNormal
         $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 0, 0)
         $RootGlow.BlurRadius    = 20
@@ -2661,6 +2795,29 @@ $anim.Add_Tick({
 # ---------------------------------------------------------------------------
 # Main loop: poll events + decide visibility + render.
 # ---------------------------------------------------------------------------
+# Puts the name of the asking conversation under the prompt's heading, or hides
+# the line when there is nothing worth saying.
+function Set-PermFrom($item) {
+    $from = (Where-From $item) -replace '^\s*-\s*',''
+    if ($from) {
+        $PermFrom.Text = $from.Trim()
+        $PermFrom.Visibility = 'Visible'
+    } else {
+        $PermFrom.Text = ''
+        $PermFrom.Visibility = 'Collapsed'
+    }
+}
+
+# The "(+2)" after the header. One card can only show one prompt, so the count
+# has to speak for everything else still waiting - approvals and questions
+# together. Counting only the shown prompt's own kind was worse than no count
+# at all: an approval in front of two questions read as a lone approval, and
+# the questions left no trace on screen to say they were there.
+function Get-QueueSuffix([int]$total) {
+    if ($total -gt 1) { return " (+$($total - 1))" }
+    return ''
+}
+
 function Render-Steps {
     if ($State.Steps.Count -eq 0) {
         if ($null -ne $script:StepSignature) { $script:StepSignature = $null; $StepsPanel.Visibility = 'Collapsed' }
@@ -2752,11 +2909,14 @@ $timer.Add_Tick({
     }
 
     # content
+    # Both branches share one count, so whichever prompt is in front, the
+    # header still admits how much is queued behind it.
+    $extra = Get-QueueSuffix ($State.PendingPerms.Count + $State.PendingAsks.Count)
     if ($hasPending) {
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
-        $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
         $HeaderText.Text = (T 'Approval needed') + $extra
-        $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested') + (Where-From $first)
+        $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested')
+        Set-PermFrom $first
         $PermText.Text = $first.text
         $AllowBtn.Visibility  = 'Visible'
         $DenyBtn.Visibility   = 'Visible'
@@ -2769,9 +2929,9 @@ $timer.Add_Tick({
     }
     elseif ($hasAsk) {
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
-        $extra = if ($State.PendingAsks.Count -gt 1) { " (+$($State.PendingAsks.Count - 1))" } else { '' }
         $HeaderText.Text = (T 'Waiting on you') + $extra
-        $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question') + (Where-From $first)
+        $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question')
+        Set-PermFrom $first
         $body = $first.text
         if ($first.choices -and $first.choices.Count) {
             $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")

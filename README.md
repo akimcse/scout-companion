@@ -253,7 +253,11 @@ would:
    above to absorb the lag, and the freshest row inside it wins. Where two rows tie, the
    search's own ordering breaks it.
 5. Clear the search and re-collapse anything that was opened, so the sidebar ends up
-   exactly as it was found, and hand the caret back to the message box.
+   exactly as it was found.
+
+The caret is never taken. The search field accepts a value without being focused, and
+focusing it would pull the cursor out of whatever you were typing at the time — the
+companion works in the background, so it has no business moving your cursor.
 
 The session's own clock is read from its last **message**, not its last event — a session
 ten minutes into a run of tool calls hasn't "just" done anything as far as Scout's chat
@@ -277,6 +281,20 @@ Approvals and questions are merged across every followed session; the step list 
 narration come from whichever moved most recently. A session with something pending is
 kept even after it goes quiet, because an approval does not expire just because nobody
 has typed for a while.
+
+### Naming the conversation on the toast
+
+A prompt carries a second line under its heading saying which conversation raised it.
+That is Scout's own chat title once the search above has found it, and until then the
+latest thing that session was asked to do — the *latest*, not the first, because a
+resumed session opens with "carry on" and naming it that would be worse than useless.
+A bare project folder is only shown when more than one session is being followed; on
+its own it says almost nothing, and it reads the same for every session on the project.
+
+One card shows one prompt, and the header counts everything else that is queued —
+`Approval needed (+2)` — across both kinds. Counting only the shown prompt's own kind
+was worse than not counting at all: an approval standing in front of two questions read
+as a lone approval, and the questions left no trace on screen to say they were waiting.
 
 The session set and the agent window are both cached — the poll tick normally costs one
 file stat per followed session and one `IsWindow` call, rather than a walk over every

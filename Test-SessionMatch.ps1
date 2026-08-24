@@ -18,7 +18,8 @@ if (-not (Test-Path $src)) { Write-Host "scout-companion.ps1 not found next to t
 # tests can never drift from the code they claim to cover.
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$null)
 $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
-foreach ($n in @('Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow')) {
+foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow',
+                 'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -118,6 +119,63 @@ Check 'hour-scale rounding absorbed' (Rows @(
     'Pinned: Expense 3h ago More actions',
     '아웃룩 일정 아이콘 일괄 변경 7h ago More actions',
     'Pinned: AI Governance v1.5 6d ago More actions')) 420 '아웃룩 일정 아이콘 일괄 변경'
+
+function Same([string]$name, $got, $expect) {
+    $g = if ($null -eq $got) { '<null>' } else { [string]$got }
+    $e = if ($null -eq $expect) { '<null>' } else { [string]$expect }
+    if ($g -eq $e) { $script:Pass++; Write-Host ("  ok   {0,-42} -> {1}" -f $name, $g) }
+    else { $script:Fail++; Write-Host ("  FAIL {0,-42} -> {1}   expected {2}" -f $name, $g, $e) }
+}
+
+Write-Host "`nGet-LastUserMessage"
+# A session that opens with "carry on" and only says what it wants later is the
+# case the old first-message topic got wrong, so it is the case worth pinning.
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("companion-events-{0}.jsonl" -f ([guid]::NewGuid().ToString('N')))
+$lines = @(
+    '{"type":"session.start","data":{"context":{"cwd":"C:\\work\\payments-api"}}}',
+    '{"type":"user.message","data":{"content":"carry on"}}',
+    '{"type":"assistant.message","data":{"content":"ok"}}',
+    '{"type":"tool.execution_start","data":{"toolName":"powershell"}}',
+    '{"type":"user.message","data":{"content":"fix the retry loop in the payment worker"}}',
+    '{"type":"assistant.message","data":{"content":"looking"}}'
+)
+Set-Content -Path $tmp -Value $lines -Encoding UTF8
+try {
+    Same 'takes the latest message, not the first' (Get-LastUserMessage $tmp) 'fix the retry loop in the payment worker'
+
+    Set-Content -Path $tmp -Value @(
+        '{"type":"session.start","data":{}}',
+        '{"type":"assistant.message","data":{"content":"working"}}'
+    ) -Encoding UTF8
+    Same 'no user message at all -> nothing' (Get-LastUserMessage $tmp) $null
+    Same 'missing file -> nothing' (Get-LastUserMessage (Join-Path $tmp 'nope')) $null
+} finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+
+Write-Host "`nGet-SessionSubject / Where-From"
+$withTitle   = [pscustomobject]@{ ChatTitle = 'Scout Companion'; Subject = 'fix the retry loop'; BaseLabel = 'payments-api' }
+$withSubject = [pscustomobject]@{ ChatTitle = $null;             Subject = 'fix the retry loop'; BaseLabel = 'payments-api' }
+$bare        = [pscustomobject]@{ ChatTitle = $null;             Subject = $null;                BaseLabel = 'payments-api' }
+Same "Scout's own title wins"      (Get-SessionSubject $withTitle)   'Scout Companion'
+Same 'latest request when no title' (Get-SessionSubject $withSubject) 'fix the retry loop'
+Same 'folder name is not a title'   (Get-SessionSubject $bare)        $null
+
+# Where-From reads $Sessions to decide whether a bare folder name is worth
+# showing, so the count has to be staged.
+$Sessions = [ordered]@{ a = 1 }
+Same 'title shows with one session' (Where-From @{ session='payments-api'; title='Scout Companion' }) '  -  Scout Companion'
+Same 'folder stays quiet with one'  (Where-From @{ session='payments-api'; title=$null })             ''
+$Sessions = [ordered]@{ a = 1; b = 2 }
+Same 'folder shows with two'        (Where-From @{ session='payments-api'; title=$null })             '  -  payments-api'
+Same 'nothing at all is safe'       (Where-From $null)                                                ''
+
+Write-Host "`nGet-QueueSuffix"
+# The count is over everything queued, not per kind. One approval standing in
+# front of two questions is the case the old per-kind count got wrong: it read
+# as a lone approval and the questions left no trace on screen.
+Same 'nothing waiting'          (Get-QueueSuffix 0) ''
+Same 'the one being shown'      (Get-QueueSuffix 1) ''
+Same 'one approval, two asks'   (Get-QueueSuffix 3) ' (+2)'
+Same 'two of the same kind'     (Get-QueueSuffix 2) ' (+1)'
 
 Write-Host ("`n{0} passed, {1} failed" -f $script:Pass, $script:Fail)
 if ($script:Fail -gt 0) { exit 1 }
