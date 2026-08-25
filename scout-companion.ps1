@@ -126,6 +126,16 @@ $Config = [ordered]@{
     # session history, so the resolved session is cached and only re-resolved
     # this often. Between rescans the companion just stats the file it is tailing.
     sessionRescanMs     = 5000
+    # How often to look for Scout's own chat titles in a sidebar that is
+    # already open. Only ever a read - nothing is clicked, typed or focused -
+    # and it is skipped entirely once every session has a name. Set to 0 to
+    # never look.
+    chatTitleScanMs     = 15000
+    # Reading a sidebar means walking an accessibility tree with hundreds of
+    # nodes in it, and most of the time there is nothing there to learn, so the
+    # interval doubles on every fruitless look up to this ceiling. It drops
+    # back to chatTitleScanMs as soon as a conversation turns up without a name.
+    chatTitleScanMaxMs  = 300000
     # Mascot frame interval. 80 ms (12.5 fps) is smooth enough for a bob and a
     # typing paw, and costs roughly half of the old 50 ms (20 fps).
     animIntervalMs      = 80
@@ -372,6 +382,48 @@ $script:WinCache          = $null                  # last known agent window
 $script:LastTitleScanUtc  = [datetime]::MinValue   # throttle for the full process scan
 $script:SessionScanUtc    = [datetime]::MinValue   # throttle for the full session scan
 $script:StepSignature     = $null                  # last rendered step list
+$script:ChatScanUtc       = [datetime]::MinValue   # throttle for the sidebar read
+$script:ChatScanEvery     = 0                      # current backoff interval, ms
+$script:ChatScanSig       = $null                  # which sessions were still unnamed
+
+# ---------------------------------------------------------------------------
+# Learned chat titles.
+#
+# Scout's own name for a chat costs a sidebar read to work out, and without
+# somewhere to keep it that work is thrown away almost immediately: the title
+# lives on the session record, and the record is dropped as soon as the session
+# goes quiet - and again on every restart. A title learned once should stay
+# learned, so it is written next to the config, keyed by session folder.
+# ---------------------------------------------------------------------------
+$TitleStorePath = Join-Path $ScriptDir 'titles.json'
+$script:TitleStore = @{}
+
+function Import-TitleStore {
+    if (-not (Test-Path $TitleStorePath)) { return }
+    try {
+        $o = Get-Content $TitleStorePath -Raw | ConvertFrom-Json
+        foreach ($p in $o.PSObject.Properties) {
+            # Sessions are deleted eventually, and their titles would otherwise
+            # accumulate forever in a file nobody ever prunes.
+            if ($p.Value -and (Test-Path $p.Name)) { $script:TitleStore[$p.Name] = [string]$p.Value }
+        }
+    } catch { }
+}
+
+function Save-TitleStore {
+    try {
+        $o = [ordered]@{}
+        foreach ($k in ($script:TitleStore.Keys | Sort-Object)) { $o[$k] = $script:TitleStore[$k] }
+        ($o | ConvertTo-Json -Depth 3) | Set-Content -Path $TitleStorePath -Encoding UTF8
+    } catch { }
+}
+
+function Set-LearnedTitle([string]$dir, [string]$title) {
+    if (-not $dir -or -not $title) { return }
+    if ($script:TitleStore[$dir] -eq $title) { return }
+    $script:TitleStore[$dir] = $title
+    Save-TitleStore
+}
 
 # ---------------------------------------------------------------------------
 # Helpers.
@@ -720,6 +772,11 @@ function Sync-Sessions {
         # user types. Without the seed a session already underway would have no
         # name until its next message.
         $rec.Subject   = Get-LastUserMessage $s.Events
+        # A title learned on an earlier run, or before this session last went
+        # quiet. Cheaper and steadier than working it out again, and it means
+        # the name on the toast survives a restart.
+        $t = $script:TitleStore[$s.Dir]
+        if ($t) { $rec.ChatTitle = $t }
         # Start at the end: replaying a whole history would re-raise approvals
         # that were answered long ago.
         $rec.Offset = (New-Object System.IO.FileInfo $s.Events).Length
@@ -772,12 +829,39 @@ function Read-NewEvents {
     foreach ($dir in @($Sessions.Keys)) {
         try { Read-SessionEvents $Sessions[$dir] } catch { }
     }
+
+    # Separate throttle: a sidebar read is much more expensive than a file stat,
+    # and unlike the session scan it is usually pointless - it can only learn
+    # anything while a sidebar is open in front of it, with its search field
+    # open too. Measured at half again the companion's whole CPU cost when run
+    # flat out, so a fruitless look backs off and an unnamed conversation
+    # turning up brings it straight back.
+    $base = [double]$Config.chatTitleScanMs
+    if ($base -gt 0) {
+        $unnamed = @($Sessions.Keys | Where-Object { -not $Sessions[$_].ChatTitle } | Sort-Object)
+        $sig = ($unnamed -join '|')
+        if ($sig -ne $script:ChatScanSig) {
+            $script:ChatScanSig   = $sig
+            $script:ChatScanEvery = $base
+        }
+        if ($script:ChatScanEvery -le 0) { $script:ChatScanEvery = $base }
+        if ($sig -and ([datetime]::UtcNow - $script:ChatScanUtc).TotalMilliseconds -ge $script:ChatScanEvery) {
+            $script:ChatScanUtc = [datetime]::UtcNow
+            $got = $false
+            try { $got = Update-SessionTitles } catch { }
+            if ($got) { $script:ChatScanEvery = $base }
+            else {
+                $cap = [double]$Config.chatTitleScanMaxMs
+                $script:ChatScanEvery = [Math]::Min($script:ChatScanEvery * 2, $cap)
+            }
+        }
+    }
 }
 
 # Names the conversation a prompt came from. Always, now that it can say
-# something worth reading: Scout's own chat title once Open has taught it one,
-# and until then the latest thing that session was asked to do. Only a bare
-# folder name stays behind the "more than one session" rule it always had,
+# something worth reading: Scout's own chat title once it has been read off the
+# sidebar, and until then the latest thing that session was asked to do. Only a
+# bare folder name stays behind the "more than one session" rule it always had,
 # because on its own it says almost nothing.
 function Where-From($item) {
     if (-not $item) { return '' }
@@ -1170,6 +1254,96 @@ function Select-ChatRow($rows, [double]$age) {
     return (@($cands | Sort-Object Age, Rank))[0].Row
 }
 
+# Rows from any sidebar that is already open, read and nothing more: no
+# clicking, no typing, no focus taken. This is the user's window, and a
+# companion that rearranges it to read a label has overstepped.
+#
+# The catch, and it is the whole reason this is best-effort: rows only carry a
+# timestamp while the search field is open, and the timestamp is the only thing
+# that ties a row to a session. A sidebar opened without it hands over titles
+# that match nothing, so nothing is learned - and nothing is guessed.
+function Read-VisibleChatRows {
+    $out = @()
+    foreach ($h in @(Get-AgentWindows)) {
+        # Chromium builds its accessibility tree on demand, so without this the
+        # window looks empty. It is a message, not a change to anything on screen.
+        Wake-AgentA11y $h
+        $root = $null
+        try { $root = $UiaEl::FromHandle($h) } catch { continue }
+        if (-not $root) { continue }
+        # An open sidebar is the one offering to hide itself.
+        if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) { continue }
+        $rows = @(Get-ChatRows $root)
+        if ($rows.Count) { $out += ,$rows }
+    }
+    return $out
+}
+
+# Which of a set of proposed namings are safe to apply. A title claimed by two
+# sessions is dropped rather than given to either: the whole value of a real
+# chat title is that it identifies the conversation, and one hung on the wrong
+# session is worse than none at all.
+#
+# Takes and returns plain data so the rule can be tested without a sidebar.
+function Select-TitleAssignments($proposals) {
+    $byTitle = @{}
+    foreach ($p in @($proposals)) {
+        if (-not $p -or -not $p.Dir -or -not $p.Title) { continue }
+        if ($byTitle.ContainsKey($p.Title)) { $byTitle[$p.Title] = $null; continue }
+        $byTitle[$p.Title] = $p.Dir
+    }
+    $out = @{}
+    foreach ($t in @($byTitle.Keys)) {
+        $dir = $byTitle[$t]
+        if ($dir) { $out[$dir] = $t }
+    }
+    return $out
+}
+
+# Puts Scout's own name to the sessions being followed, using whatever an
+# already-open sidebar happens to be showing. Runs only when some session is
+# still unnamed, and does nothing at all when no sidebar is open - which is the
+# ordinary case, and costs one tree probe per window.
+#
+# Returns whether anything was learned, so the caller can back off when there
+# is evidently nothing here to find.
+function Update-SessionTitles {
+    $want = @()
+    foreach ($dir in $Sessions.Keys) {
+        if (-not $Sessions[$dir].ChatTitle) { $want += $dir }
+    }
+    if ($want.Count -eq 0) { return $false }
+
+    $lists = @(Read-VisibleChatRows)
+    if ($lists.Count -eq 0) { return $false }
+
+    $learned = $false
+    foreach ($rows in $lists) {
+        $timed = @($rows | Where-Object { $_.When })
+        if ($timed.Count -eq 0) { continue }
+
+        $proposals = @()
+        foreach ($dir in $want) {
+            $rec = $Sessions[$dir]
+            if (-not $rec -or $rec.ChatTitle) { continue }
+            $stamp = Get-LastMessageUtc $rec.Events
+            if (-not $stamp) { continue }
+            $pick = Select-ChatRow $timed ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+            if (-not $pick -or -not $pick.Title) { continue }
+            $proposals += [pscustomobject]@{ Dir = $dir; Title = $pick.Title }
+        }
+
+        $safe = Select-TitleAssignments $proposals
+        foreach ($dir in @($safe.Keys)) {
+            $Sessions[$dir].ChatTitle = $safe[$dir]
+            Set-LearnedTitle $dir $safe[$dir]
+            $learned = $true
+        }
+    }
+    if ($learned) { try { Resolve-SessionLabels } catch { } }
+    return $learned
+}
+
 function Get-RaisingSession {
     foreach ($bag in @($State.PendingPerms, $State.PendingAsks)) {
         foreach ($k in $bag.Keys) {
@@ -1256,7 +1430,11 @@ function Open-AgentSession($rec) {
 
         # Now that the chat has been identified, remember what Scout calls it so
         # the toast can name it from here on without looking again.
-        if ($pick.Title) { $rec.ChatTitle = $pick.Title; try { Resolve-SessionLabels } catch { } }
+        if ($pick.Title) {
+            $rec.ChatTitle = $pick.Title
+            Set-LearnedTitle $rec.Dir $pick.Title
+            try { Resolve-SessionLabels } catch { }
+        }
         $navigated = Invoke-UiaElement $pick.El
         if ($navigated) { Start-Sleep -Milliseconds 500 }
         return $navigated
@@ -3059,6 +3237,7 @@ $timer.Add_Tick({
 
 # Prime to the current end of every active session, so a fresh start does not
 # replay approvals that were answered long ago.
+Import-TitleStore
 Sync-Sessions
 $script:SessionScanUtc = [datetime]::UtcNow
 Merge-SessionState

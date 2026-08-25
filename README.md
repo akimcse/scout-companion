@@ -288,6 +288,14 @@ STA host:
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File Test-ButtonSearch.ps1
 ```
 
+`Test-TitleLearning.ps1` covers how a session comes to carry Scout's own name for its
+chat — the match, the refusal to name anyone when two sessions want the same row, and
+the store that keeps a learned title from evaporating:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Test-TitleLearning.ps1
+```
+
 Approvals and questions are merged across every followed session; the step list and
 narration come from whichever moved most recently. A session with something pending is
 kept even after it goes quiet, because an approval does not expire just because nobody
@@ -301,11 +309,33 @@ conversation the step list and narration belong to. The toast spends nearly all 
 life in that ordinary state, so naming only the prompts would have left the label
 practically invisible.
 
-The name is Scout's own chat title once the search above has found it, and until then
-the latest thing that session was asked to do — the *latest*, not the first, because a
+The name is Scout's own chat title once that has been worked out, and until then the
+latest thing that session was asked to do — the *latest*, not the first, because a
 resumed session opens with "carry on" and naming it that would be worse than useless.
 A bare project folder is only shown when more than one session is being followed; on
 its own it says almost nothing, and it reads the same for every session on the project.
+
+**Where the real title comes from.** Two places, both using the timestamp match above.
+Pressing **Open** learns it as a side effect of finding the chat. Otherwise the
+companion reads whatever sidebar happens to be open already — no clicking, no typing,
+no focus taken, because this is your window and rearranging it to read a label would be
+overstepping. A learned title is written to `titles.json` next to the script, so it
+survives the session going quiet and survives a restart; entries for sessions that no
+longer exist are dropped when it loads.
+
+Be aware the passive read is genuinely best-effort, and usually finds nothing. Sidebar
+rows only carry a timestamp while the **search field** is open, and the timestamp is the
+only thing tying a row to a session — there is no selection marker to read, and the
+title appears nowhere else in the window. With the sidebar open and the search closed
+the companion gets a list of titles it cannot match to anything, so it learns nothing
+rather than guessing. Reading a sidebar means walking an accessibility tree of several
+hundred nodes, which measured at half again the companion's entire CPU cost when run on
+a fixed timer, so a fruitless look backs off — doubling up to `chatTitleScanMaxMs` — and
+drops back to `chatTitleScanMs` the moment an unnamed conversation appears.
+
+Where two sessions match the same row, neither is named. The point of a real chat title
+is that it identifies the conversation, so one hung on the wrong session is worse than
+none at all.
 
 While a prompt is up the header drops its own name and only the card is labelled: the
 conversation asking for permission need not be the one whose steps were scrolling past
@@ -339,6 +369,8 @@ and edit. Common overrides:
 | `pollIntervalMs` | `700` | Event/focus polling interval |
 | `maxSessions` | `6` | How many concurrently active sessions to follow |
 | `sessionRescanMs` | `5000` | How often to re-resolve which session is active. Between rescans the companion just tails the file it already found |
+| `chatTitleScanMs` | `15000` | How often to read an already-open sidebar for Scout's chat titles. `0` never looks |
+| `chatTitleScanMaxMs` | `300000` | Ceiling the above backs off to while it keeps finding nothing |
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
 | `mascot` | `quokka` | Which mascot to show. Also in the settings window |

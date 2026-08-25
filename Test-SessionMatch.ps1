@@ -20,7 +20,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$nul
 $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
 foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow',
                  'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix',
-                 'Get-ShouldShow')) {
+                 'Get-ShouldShow', 'Select-TitleAssignments')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -201,6 +201,34 @@ Same 'greeting shows even when idle'      (Get-ShouldShow @idleGreet) $true
 # Background + working is the case the toast was written for.
 $bg = $busyFg.Clone(); $bg.IsForeground = $false
 Same 'busy in background -> shown'        (Get-ShouldShow @bg) $true
+
+Write-Host "`nSelect-TitleAssignments"
+# A real chat title is only worth showing because it identifies the
+# conversation, so one hung on the wrong session is worse than none.
+function Pair($d, $t) { [pscustomobject]@{ Dir = $d; Title = $t } }
+$one = Select-TitleAssignments @( (Pair 'C:\s\a' 'AI Governance v1.5') )
+Same 'a single match is applied'          $one['C:\s\a'] 'AI Governance v1.5'
+
+$two = Select-TitleAssignments @( (Pair 'C:\s\a' 'AI Governance v1.5'), (Pair 'C:\s\b' 'Scout Companion') )
+Same 'two sessions, two titles (a)'       $two['C:\s\a'] 'AI Governance v1.5'
+Same 'two sessions, two titles (b)'       $two['C:\s\b'] 'Scout Companion'
+
+# Both sessions landed on the same row: genuinely ambiguous, so neither is named.
+$clash = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation') )
+Same 'a contested title names nobody (a)' $clash['C:\s\a'] $null
+Same 'a contested title names nobody (b)' $clash['C:\s\b'] $null
+Same 'and nothing else sneaks through'    $clash.Count 0
+
+# A third claimant must not un-contest a title the first two already spoiled.
+$three = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation'), (Pair 'C:\s\c' 'RoB Automation') )
+Same 'still nobody with three claimants'  $three.Count 0
+
+$mixed = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation'), (Pair 'C:\s\c' 'Team 1on1') )
+Same 'a clean match survives a clash'     $mixed['C:\s\c'] 'Team 1on1'
+Same 'and only that one'                  $mixed.Count 1
+
+Same 'nothing proposed -> nothing'        (Select-TitleAssignments @()).Count 0
+Same 'junk proposals are dropped'         (Select-TitleAssignments @( (Pair 'C:\s\a' $null), (Pair $null 'x'), $null )).Count 0
 
 Write-Host ("`n{0} passed, {1} failed" -f $script:Pass, $script:Fail)
 if ($script:Fail -gt 0) { exit 1 }
