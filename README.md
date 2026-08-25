@@ -154,6 +154,24 @@ where English puts it.
 
 That's it. The toast stays hidden until the agent is working in the background.
 
+### Put it in the Start Menu
+
+```
+powershell -ExecutionPolicy Bypass -File .\Add-ToStartMenu.ps1
+```
+
+Adds two entries, both with a mascot icon so they don't look like generic PowerShell
+scripts:
+
+| | |
+|---|---|
+| **Scout Companion** | runs it now |
+| **Scout Companion (auto)** | runs the watcher, so it starts with Scout and closes with it |
+
+Search the Start Menu for "scout" and right-click to pin. Per-user only — no registry
+writes, no admin rights, and the icon is drawn at runtime rather than shipped, so the
+repo stays free of binary assets. `-Remove` takes the shortcuts away again.
+
 ### Start and stop with Scout (recommended)
 
 Instead of running it for your whole Windows session, you can tie the companion to
