@@ -14,6 +14,9 @@
   "denyLabels": ["Deny", "Reject", "Decline", "Block", "Cancel", "No"],
   "_labels": "Button captions the companion clicks for Allow / Deny inside the agent window. Scout currently shows: Allow, Allow for session, Allow everywhere, Deny. Order matters: the first match wins, so the one-time 'Allow' is preferred.",
 
+  "askToolNames": ["m_ask_user", "ask_user"],
+  "_askToolNames": "Tool names that mean 'the agent is waiting for you to answer something'. These park the turn like an approval does, so the toast surfaces them in its own colour instead of listing them as a step. Add your build's equivalent if it differs.",
+
   "activeWindowSeconds": 150,
   "_activeWindowSeconds": "Treat the session as 'working' if its event log changed within this many seconds.",
 
