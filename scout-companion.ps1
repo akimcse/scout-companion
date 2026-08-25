@@ -29,7 +29,12 @@
 # Semantic versioning, read from the user's side of the app: MAJOR when
 # something they rely on changes shape, MINOR for a new capability, PATCH for a
 # fix that only ever makes an existing one behave.
-$CompanionVersion = '1.0.0'
+#
+# Deliberately below 1.0. Under semver that says the shape of this thing is
+# still settling, which is the honest position: it is finding and fixing its
+# own significant faults faster than it is gaining features. 1.0 is a claim
+# about stability, and it has not earned one yet.
+$CompanionVersion = '0.1.0'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
