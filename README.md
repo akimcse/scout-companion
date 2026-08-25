@@ -354,7 +354,10 @@ are dropped when it loads.
 box as they watch would be exactly the overreach this file has had to walk back before,
 so if you are looking at Scout it does not touch it — it waits until you are somewhere
 else, which in practice is a few seconds later. Whatever was open is put back, including
-a query you had left in the box.
+a query you had left in the box. A **minimised** Scout counts as not in front, and is
+read the same way: minimising clears `IsWindowVisible` but keeps the whole accessibility
+tree — 173 buttons and 58 chat rows on the one measured — and minimised is exactly when
+the companion is what you are watching.
 
 Typing is unavoidable, and that took measuring to establish. A sidebar sitting open
 lists its chats with **no timestamps at all** — 22 rows, not one carrying a time — and
@@ -363,9 +366,29 @@ to read, and the title appears nowhere else in the window. Put a query in the se
 and every row that comes back carries one. So a read-only glance learns nothing, which
 is why it types.
 
-Where two sessions match the same row, neither is named. The point of a real chat title
-is that it identifies the conversation, so one hung on the wrong session is worse than
-none at all.
+Be aware this is inference, not lookup, and the evidence for it is thin. Measured: five
+very different queries returned the **same nine chats in nearly the same order**, so the
+search barely narrows anything — the timestamp is doing all the work. And the lag is
+large, around nine minutes for a chat that has just been written to. So several chats are
+usually plausible for any one session.
+
+What makes it work is that the lag runs at much the same size across chats, leaving their
+*order* intact. Sessions and rows are therefore paired rather than picked independently:
+both sides are sorted by how recently they moved, and the session that moved most recently
+takes the freshest row it could plausibly be, the next takes the freshest of what is left,
+and so on. Picking independently made every session reach for the same freshest row.
+
+Where two sessions are less than a minute apart, neither is named — rows carry whole
+minutes only, so their order against those rows is not established, and this pairing is
+nothing but that order.
+
+A title belongs to exactly one session, checked against both the sessions being followed
+and the store. A title two sessions both claim is taken back off whoever already holds it
+as well, because nothing says which claimant was right and leaving the incumbent named on
+"first come, first served" keeps a name that has just been shown to be unreliable. This
+is not hypothetical: two automations and a chat session in one folder all ended up
+answering to "Scout Companion", each having been scanned while it was the only one
+without a name. A store written before that rule is repaired when it loads.
 
 A look that finds nothing backs off, doubling up to `chatTitleScanMaxMs`, and drops back
 to `chatTitleScanMs` as soon as an unnamed conversation appears. Being unable to look

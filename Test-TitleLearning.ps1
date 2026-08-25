@@ -13,9 +13,9 @@ if (-not (Test-Path $src)) { Write-Host "scout-companion.ps1 not found next to t
 # Lifted out of the app, not copied, so the test cannot drift from the code.
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$null)
 $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
-foreach ($n in @('Truncate','ConvertTo-AgeMinutes','Select-ChatRow','Select-TitleAssignments',
-                 'Get-LastMessageUtc','Import-TitleStore','Save-TitleStore',
-                 'Set-LearnedTitle','Update-SessionTitles')) {
+foreach ($n in @('Truncate','ConvertTo-AgeMinutes','Select-ChatRow','Select-SessionRowPairs',
+                 'Select-TitleAssignments','Get-LastMessageUtc','Import-TitleStore','Save-TitleStore',
+                 'Set-LearnedTitle','Remove-LearnedTitle','Update-SessionTitles')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -32,6 +32,14 @@ function Select-SearchWindow { return [IntPtr]1 }
 function Get-SessionQuery($rec) { return $rec.Query }
 function Invoke-ChatSearch([IntPtr]$hwnd, [string[]]$queries) {
     $script:Searches += ,@($queries)
+    # One result list per query, as the real thing returns. Where the test
+    # supplies a single list, every query sees it - which is what a sidebar
+    # holding the same chats does when the queries differ but the rows do not.
+    if (@($script:Answers).Count -eq 1 -and $queries.Count -gt 1) {
+        $out = @()
+        foreach ($q in $queries) { $out += ,@($script:Answers[0]) }
+        return $out
+    }
     return $script:Answers
 }
 
@@ -147,6 +155,51 @@ try {
     Same 'one visit, both queries'              $script:Searches.Count 1
     Same '  query 1'                            $script:Searches[0][0] 'expense'
     Same '  query 2'                            $script:Searches[0][1] 'governance'
+    # --- the failure this rule exists for --------------------------------
+    # Sessions named one at a time, each the only one without a name when it
+    # was scanned, all ending up as the same conversation. Two automations and
+    # a chat session in one folder really did all answer to "Scout Companion".
+    Write-Host "`na title another session already answers to"
+    # Isolated from the sections above: this one is about what happens between
+    # two sessions, and a leftover holder from earlier would decide it first.
+    $script:TitleStore = @{}
+    Save-TitleStore
+    $g = NewSession 'sess-g' 1 'companion work'
+    $h = NewSession 'sess-h' 1 'link collector'
+    $Sessions = [ordered]@{}
+    $Sessions[$g.Dir] = $g
+    $script:Answers = @(, @( (Row 'Scout Companion' 'Just now') ))
+    [void](Update-SessionTitles)
+    Same 'the first session is named'           $g.ChatTitle 'Scout Companion'
+
+    # Now the second one turns up and matches the same row.
+    $Sessions[$h.Dir] = $h
+    $script:Answers = @(, @( (Row 'Scout Companion' 'Just now') ))
+    [void](Update-SessionTitles)
+    Same 'the newcomer is refused'              $h.ChatTitle $null
+    Same 'and the holder loses it too'          $g.ChatTitle $null
+    Same 'the store lets it go as well'         $script:TitleStore[$g.Dir] $null
+
+    # And it stays that way rather than oscillating between them.
+    $script:Answers = @(, @( (Row 'Scout Companion' 'Just now') ))
+    [void](Update-SessionTitles)
+    Same 'still nameless next pass (g)'         $g.ChatTitle $null
+    Same 'still nameless next pass (h)'         $h.ChatTitle $null
+
+    # --- a store written before the rule is repaired on load --------------
+    Write-Host "`na store holding one title against several sessions"
+    $script:TitleStore = @{}
+    $script:TitleStore[$g.Dir] = 'Scout Companion'
+    $script:TitleStore[$h.Dir] = 'Scout Companion'
+    $script:TitleStore[$a.Dir] = 'Expense'
+    Save-TitleStore
+    $script:TitleStore = @{}
+    Import-TitleStore
+    Same 'the shared title is dropped (g)'      $script:TitleStore[$g.Dir] $null
+    Same 'the shared title is dropped (h)'      $script:TitleStore[$h.Dir] $null
+    Same 'an unshared one survives'             $script:TitleStore[$a.Dir] 'Expense'
+    $onDisk2 = Get-Content $TitleStorePath -Raw | ConvertFrom-Json
+    Same 'and the repair is written back'       ($onDisk2.PSObject.Properties.Name -join ',') $a.Dir
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
