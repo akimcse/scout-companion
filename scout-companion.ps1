@@ -80,8 +80,16 @@ $Config = [ordered]@{
     # Order matters: first match is clicked, so the safest one-time "Allow" wins.
     allowLabels   = @('Allow', 'Allow for session', 'Allow everywhere', 'Always allow', 'Allow once', 'Approve', 'Accept', 'Continue', 'Yes')
     denyLabels    = @('Deny', 'Reject', 'Decline', 'Block', 'Cancel', 'No')
+    # External tools that mean "the agent is waiting for you to answer something".
+    # These block the turn exactly like an approval does, but the companion cannot
+    # answer them for you - it can only tell you they are waiting.
+    askToolNames  = @('m_ask_user', 'ask_user')
     activeWindowSeconds = 150
     pollIntervalMs      = 700
+    # How many concurrently active sessions to follow. Each one costs a file
+    # stat per tick, so this is a guard against pathological session counts
+    # rather than a limit anyone should hit.
+    maxSessions         = 6
     # A full rescan of every session folder is expensive on machines with a long
     # session history, so the resolved session is cached and only re-resolved
     # this often. Between rescans the companion just stats the file it is tailing.
@@ -91,6 +99,9 @@ $Config = [ordered]@{
     animIntervalMs      = 80
     # Mascot animation can be switched off entirely from the tray or settings.
     animationEnabled    = $true
+    # Toast opacity, 0.35 to 1.0. Floored deliberately: a toast faded to nothing
+    # is one you cannot find again to turn back up.
+    opacity             = 1.0
     # Which mascot the toast shows. See $Mascots for the available ids.
     mascot              = 'quokka'
     maxSteps            = 4
@@ -165,16 +176,41 @@ $SessionRoot = Join-Path $Config.home 'session-state'
 
 # ---------------------------------------------------------------------------
 # Shared mutable state.
+#
+# $Sessions holds one record per session being followed. $State is the view the
+# UI renders: steps and narration from whichever session moved most recently,
+# and approvals and questions merged from all of them, because the whole point
+# of following several is that a prompt in a window you are not looking at
+# still reaches you.
 # ---------------------------------------------------------------------------
+$Sessions = [ordered]@{}
+
+function New-SessionRecord([string]$dir, [string]$events) {
+    [pscustomobject]@{
+        Dir          = $dir
+        Events       = $events
+        Label        = $null
+        BaseLabel    = $null
+        Topic        = $null
+        Offset       = [long]0
+        Saying       = $null
+        Steps        = New-Object System.Collections.ArrayList
+        TurnActive   = $false
+        LastEventUtc = [datetime]::UtcNow
+        PendingPerms = [ordered]@{}
+        PendingAsks  = [ordered]@{}
+    }
+}
+
 $State = [pscustomobject]@{
     SessionDir      = $null
     EventsPath      = $null
-    Offset          = [long]0
     Saying          = $null                       # latest assistant narrative
     Steps           = New-Object System.Collections.ArrayList   # recent tool steps
     TurnActive      = $false
     LastEventUtc    = [datetime]::MinValue
     PendingPerms    = [ordered]@{}
+    PendingAsks     = [ordered]@{}                # questions waiting on the user
     AgentHwnd       = [IntPtr]::Zero
 }
 
@@ -239,16 +275,16 @@ function Describe-Tool([string]$name, $a) {
     }
 }
 
-function Add-Step([string]$id, [string]$reqId, [string]$text) {
+function Add-Step($sess, [string]$id, [string]$reqId, [string]$text) {
     if (-not $text) { return }
     $rec = [pscustomobject]@{ Id = $id; ReqId = $reqId; Text = $text; Done = $false }
-    [void]$State.Steps.Add($rec)
-    while ($State.Steps.Count -gt [int]$Config.maxSteps) { $State.Steps.RemoveAt(0) }
+    [void]$sess.Steps.Add($rec)
+    while ($sess.Steps.Count -gt [int]$Config.maxSteps) { $sess.Steps.RemoveAt(0) }
 }
 
-function Complete-Step([string]$id, [string]$reqId) {
-    for ($i = $State.Steps.Count - 1; $i -ge 0; $i--) {
-        $s = $State.Steps[$i]
+function Complete-Step($sess, [string]$id, [string]$reqId) {
+    for ($i = $sess.Steps.Count - 1; $i -ge 0; $i--) {
+        $s = $sess.Steps[$i]
         if (($id -and $s.Id -eq $id) -or ($reqId -and $s.ReqId -eq $reqId)) { $s.Done = $true; break }
     }
 }
@@ -325,36 +361,21 @@ function Test-AgentProcess {
     return $false
 }
 
-function Test-LiveLock {
-    # A session lock is only meaningful if the PID embedded in its name
-    # (inuse.<pid>.lock) belongs to a process that is still running. Stale lock
-    # files from crashed/closed sessions are ignored so we never latch onto an
-    # ancient session and report it as "active".
+function Find-ActiveSessions {
+    # Sessions that have actually been written to recently, newest first.
     #
-    # $seen memoises PID liveness for the duration of one scan: most machines
-    # accumulate dozens of stale locks and many repeat the same dead PID.
-    param([string]$dir, [hashtable]$seen)
-    foreach ($lock in [System.IO.Directory]::EnumerateFiles($dir, 'inuse.*.lock')) {
-        if ([System.IO.Path]::GetFileName($lock) -match 'inuse\.(\d+)') {
-            $procId = [int]$Matches[1]
-            if ($seen -and $seen.ContainsKey($procId)) {
-                if ($seen[$procId]) { return $true } else { continue }
-            }
-            $alive = $false
-            try { $p = [System.Diagnostics.Process]::GetProcessById($procId); $p.Dispose(); $alive = $true } catch { }
-            if ($seen) { $seen[$procId] = $alive }
-            if ($alive) { return $true }
-        }
-    }
-    return $false
-}
+    # Deliberately not keyed on the lock files. One backend process holds
+    # inuse.<pid>.lock on every session it still has open, so on this machine
+    # ten folders looked "live" while only two had seen an event in the last
+    # hour. A live lock means a process still has the session open, not that
+    # anyone is using it.
+    #
+    # It is not kept as a tiebreak either: mtime has 100 ns resolution, so two
+    # sessions never tie in practice and the lock check would be dead weight on
+    # every scan.
+    if (-not [System.IO.Directory]::Exists($SessionRoot)) { return @() }
 
-function Find-ActiveSession {
-    if (-not [System.IO.Directory]::Exists($SessionRoot)) { return $null }
-
-    # Collect candidates with raw .NET calls - Get-ChildItem/Get-Item allocate a
-    # PSObject wrapper per entry, which dominates the cost once a machine has
-    # accumulated a few hundred session folders.
+    $cutoff = [datetime]::UtcNow.AddSeconds(-[double]$Config.activeWindowSeconds)
     $candidates = New-Object System.Collections.ArrayList
     foreach ($dir in [System.IO.Directory]::EnumerateDirectories($SessionRoot)) {
         $ev = [System.IO.Path]::Combine($dir, 'events.jsonl')
@@ -362,95 +383,255 @@ function Find-ActiveSession {
         if (-not $fi.Exists) { continue }
         [void]$candidates.Add([pscustomobject]@{ Dir = $dir; Events = $ev; Mtime = $fi.LastWriteTimeUtc })
     }
-    if ($candidates.Count -eq 0) { return $null }
+    if ($candidates.Count -eq 0) { return @() }
 
-    # Prefer a session with a live lock, then the most recently written events
-    # file. Walking newest-first and returning the first live lock gives the same
-    # answer as ranking every folder, but normally only tests a single lock.
-    $sorted = $candidates | Sort-Object -Property Mtime -Descending
-    $seen = @{}
-    foreach ($c in $sorted) {
-        if (Test-LiveLock $c.Dir $seen) { return $c }
+    $sorted = @($candidates | Sort-Object -Property Mtime -Descending)
+    $fresh  = @($sorted | Where-Object { $_.Mtime -ge $cutoff })
+    # Nothing recent: fall back to the single newest so the companion still has
+    # something to show rather than going blank.
+    if ($fresh.Count -eq 0) { $fresh = @($sorted[0]) }
+    if ($fresh.Count -gt [int]$Config.maxSessions) {
+        $fresh = @($fresh | Select-Object -First ([int]$Config.maxSessions))
     }
-    # Nothing holds a live lock - fall back to plain recency so we still track
-    # the newest session.
-    return $sorted[0]
+    return $fresh
 }
 
-function Read-NewEvents {
-    # Between full rescans, keep tailing the file we already latched onto. This
-    # turns the common tick into a single file stat instead of a walk over every
-    # session folder on the machine.
-    $sess = $null
-    $needScan = $true
-    if ($State.EventsPath) {
-        $cur = New-Object System.IO.FileInfo $State.EventsPath
-        if ($cur.Exists -and ([datetime]::UtcNow - $script:SessionScanUtc).TotalMilliseconds -lt [double]$Config.sessionRescanMs) {
-            $needScan = $false
-            $sess = [pscustomobject]@{ Dir = $State.SessionDir; Events = $State.EventsPath }
-            $len = $cur.Length
-        }
-    }
-
-    if ($needScan) {
-        $script:SessionScanUtc = [datetime]::UtcNow
-        $sess = Find-ActiveSession
-        if (-not $sess) { return }
-
-        if ($State.EventsPath -ne $sess.Events) {
-            $State.SessionDir = $sess.Dir
-            $State.EventsPath = $sess.Events
-            $State.Offset     = (New-Object System.IO.FileInfo $sess.Events).Length
-            $State.PendingPerms = [ordered]@{}
-            $State.Steps.Clear()
-            $State.Saying = $null
-            $State.TurnActive = $false
-            return
-        }
-        $len = (New-Object System.IO.FileInfo $sess.Events).Length
-    }
-
-    if ($len -lt $State.Offset) { $State.Offset = 0 }
-    if ($len -eq $State.Offset) { return }
-
-    $fs = [System.IO.File]::Open($sess.Events, 'Open', 'Read', 'ReadWrite')
+function Get-SessionLabel([string]$dir, [string]$events) {
+    # session.start is the first line of the file and carries the working
+    # directory, which is the only human-readable handle on a session - the
+    # folder name is a GUID. Read the head only; these files reach tens of MB.
     try {
-        $fs.Seek($State.Offset, 'Begin') | Out-Null
+        $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            for ($i = 0; $i -lt 5; $i++) {
+                $line = $sr.ReadLine()
+                if ($null -eq $line) { break }
+                if ($line -notmatch '"session\.start"') { continue }
+                $cwd = ($line | ConvertFrom-Json).data.context.cwd
+                if ($cwd) { return (Split-Path $cwd -Leaf) }
+            }
+        } finally { $fs.Dispose() }
+    } catch { }
+    return (Split-Path $dir -Leaf).Substring(0, 8)
+}
+
+function Get-SessionTopic([string]$events) {
+    # First thing the user actually asked for, used to tell apart two sessions
+    # in the same folder - which is the normal case when you open a second
+    # window on the same project.
+    #
+    # Only called when a collision exists, because it scans until it finds a
+    # user message rather than reading a fixed head, and that message can sit
+    # some way in. Bounded so a session that never got one cannot walk a
+    # multi-megabyte file.
+    try {
+        $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            for ($i = 0; $i -lt 400; $i++) {
+                $line = $sr.ReadLine()
+                if ($null -eq $line) { break }
+                if ($line -notmatch '"user\.message"') { continue }
+                $txt = ($line | ConvertFrom-Json).data.content
+                if (-not $txt) { continue }
+                # Collapse newlines so a pasted block does not become a wall of
+                # text in the panel title.
+                $txt = ($txt -replace '\s+', ' ').Trim()
+                if ($txt) { return (Truncate $txt 28) }
+            }
+        } finally { $fs.Dispose() }
+    } catch { }
+    return $null
+}
+
+function Resolve-SessionLabels {
+    # Two windows on the same project produce the same cwd, and a label that
+    # cannot tell them apart is worse than no label - it names a session
+    # confidently and points at the wrong one. Where that happens, append what
+    # each session was asked to do.
+    $byLabel = @{}
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if (-not $byLabel.ContainsKey($rec.BaseLabel)) { $byLabel[$rec.BaseLabel] = New-Object System.Collections.ArrayList }
+        [void]$byLabel[$rec.BaseLabel].Add($rec)
+    }
+    foreach ($label in $byLabel.Keys) {
+        $group = $byLabel[$label]
+        if ($group.Count -eq 1) { $group[0].Label = $label; continue }
+        foreach ($rec in $group) {
+            if (-not $rec.Topic) { $rec.Topic = Get-SessionTopic $rec.Events }
+            # A session with no user message yet has nothing to name it by, so
+            # fall back to the GUID head rather than leaving it wearing the bare
+            # cwd - which would read as "the payments-api session" while two
+            # others are also payments-api.
+            $rec.Label = if ($rec.Topic) { "$label - $($rec.Topic)" }
+                         else { "$label - $((Split-Path $rec.Dir -Leaf).Substring(0,6))" }
+        }
+        # Two sessions can still land on the same text if their first messages
+        # start alike and truncate to the same prefix.
+        $seen = @{}
+        foreach ($rec in $group) {
+            if ($seen.ContainsKey($rec.Label)) {
+                $rec.Label = "$($rec.BaseLabel) - $((Split-Path $rec.Dir -Leaf).Substring(0,6))"
+            }
+            $seen[$rec.Label] = $true
+        }
+    }
+}
+
+function Sync-Sessions {
+    # Refresh which sessions are being followed. A session with something
+    # pending is kept regardless of age: an approval does not expire just
+    # because nobody has typed for a while, and dropping it would take the
+    # prompt off the toast.
+    $active = Find-ActiveSessions
+    $keep = @{}
+    foreach ($s in $active) { $keep[$s.Dir] = $true }
+
+    foreach ($s in $active) {
+        if ($Sessions.Contains($s.Dir)) { continue }
+        $rec = New-SessionRecord $s.Dir $s.Events
+        $rec.BaseLabel = Get-SessionLabel $s.Dir $s.Events
+        $rec.Label     = $rec.BaseLabel
+        # Start at the end: replaying a whole history would re-raise approvals
+        # that were answered long ago.
+        $rec.Offset = (New-Object System.IO.FileInfo $s.Events).Length
+        $rec.LastEventUtc = $s.Mtime
+        $Sessions[$s.Dir] = $rec
+    }
+
+    foreach ($dir in @($Sessions.Keys)) {
+        if ($keep.ContainsKey($dir)) { continue }
+        $rec = $Sessions[$dir]
+        if ($rec.PendingPerms.Count -gt 0 -or $rec.PendingAsks.Count -gt 0) { continue }
+        $Sessions.Remove($dir)
+    }
+
+    Resolve-SessionLabels
+}
+
+function Read-SessionEvents($rec) {
+    $fi = New-Object System.IO.FileInfo $rec.Events
+    if (-not $fi.Exists) { return }
+    $len = $fi.Length
+    if ($len -lt $rec.Offset) { $rec.Offset = 0 }
+    if ($len -eq $rec.Offset) { return }
+
+    $fs = [System.IO.File]::Open($rec.Events, 'Open', 'Read', 'ReadWrite')
+    try {
+        $fs.Seek($rec.Offset, 'Begin') | Out-Null
         $sr = New-Object System.IO.StreamReader($fs)
         $chunk = $sr.ReadToEnd()
-        $State.Offset = $fs.Position
+        $rec.Offset = $fs.Position
     } finally { $fs.Dispose() }
 
     foreach ($line in ($chunk -split "`n")) {
         $line = $line.Trim()
         if (-not $line) { continue }
         try { $evt = $line | ConvertFrom-Json } catch { continue }
-        Handle-Event $evt
+        Handle-Event $rec $evt
     }
 }
 
-function Handle-Event($evt) {
-    $State.LastEventUtc = [datetime]::UtcNow
+function Read-NewEvents {
+    # Between full rescans, just tail the sessions already being followed. That
+    # turns the common tick into one file stat per session instead of a walk
+    # over every session folder on the machine.
+    if (([datetime]::UtcNow - $script:SessionScanUtc).TotalMilliseconds -ge [double]$Config.sessionRescanMs -or
+        $Sessions.Count -eq 0) {
+        $script:SessionScanUtc = [datetime]::UtcNow
+        Sync-Sessions
+    }
+    foreach ($dir in @($Sessions.Keys)) {
+        try { Read-SessionEvents $Sessions[$dir] } catch { }
+    }
+}
+
+# Names the session a prompt came from, but only when more than one is being
+# followed - in the ordinary single-session case the label is noise.
+function Where-From($item) {
+    if ($Sessions.Count -le 1) { return '' }
+    if (-not $item -or -not $item.session) { return '' }
+    return "  -  $($item.session)"
+}
+
+function Merge-SessionState {
+    # Collapse the per-session records into the single view the toast renders.
+    $primary = $null
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if (-not $primary -or $rec.LastEventUtc -gt $primary.LastEventUtc) { $primary = $rec }
+    }
+
+    $perms = [ordered]@{}
+    $asks  = [ordered]@{}
+    $turn  = $false
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if ($rec.TurnActive) { $turn = $true }
+        foreach ($k in $rec.PendingPerms.Keys) {
+            $v = $rec.PendingPerms[$k]; $v.session = $rec.Label; $perms[$k] = $v
+        }
+        foreach ($k in $rec.PendingAsks.Keys) {
+            $v = $rec.PendingAsks[$k]; $v.session = $rec.Label; $asks[$k] = $v
+        }
+    }
+
+    $State.PendingPerms = $perms
+    $State.PendingAsks  = $asks
+    $State.TurnActive   = $turn
+    if ($primary) {
+        $State.SessionDir   = $primary.Dir
+        $State.EventsPath   = $primary.Events
+        $State.Saying       = $primary.Saying
+        $State.Steps        = $primary.Steps
+        $State.LastEventUtc = $primary.LastEventUtc
+    }
+}
+
+function Handle-Event($sess, $evt) {
+    $sess.LastEventUtc = [datetime]::UtcNow
     switch ($evt.type) {
-        'assistant.turn_start' { $State.TurnActive = $true }
-        'assistant.turn_end'   { $State.TurnActive = $false }
+        'assistant.turn_start' { $sess.TurnActive = $true }
+        'assistant.turn_end'   { $sess.TurnActive = $false }
         'assistant.message' {
             $txt = $evt.data.content; if (-not $txt) { $txt = $evt.data.text }
-            if ($txt) { $State.Saying = Truncate $txt 200 }
+            if ($txt) { $sess.Saying = Truncate $txt 200 }
         }
         'tool.execution_start' {
             $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
-            Add-Step $evt.data.toolCallId $null $desc
+            Add-Step $sess $evt.data.toolCallId $null $desc
         }
         'tool.execution_complete' {
-            Complete-Step $evt.data.toolCallId $null
+            Complete-Step $sess $evt.data.toolCallId $null
         }
         'external_tool.requested' {
-            $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
-            Add-Step $evt.data.toolCallId $evt.data.requestId $desc
+            # An "ask the user" tool is not progress, it is a stop: the turn is
+            # parked until someone answers. Surface it like an approval rather
+            # than burying it in the step list.
+            if ($Config.askToolNames -contains $evt.data.toolName) {
+                $q = $evt.data.arguments.question
+                if (-not $q) { $q = $evt.data.arguments.prompt }
+                if (-not $q) { $q = 'The agent is waiting for your answer.' }
+                $choices = @()
+                foreach ($a in @($evt.data.arguments.answers)) {
+                    if ($a -and $a.title) { $choices += $a.title }
+                }
+                $sess.PendingAsks[$evt.data.requestId] = @{
+                    text    = (Truncate $q 280)
+                    choices = $choices
+                    session = $sess.Label
+                }
+            } else {
+                $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
+                Add-Step $sess $evt.data.toolCallId $evt.data.requestId $desc
+            }
         }
         'external_tool.completed' {
-            Complete-Step $null $evt.data.requestId
+            $id = $evt.data.requestId
+            if ($sess.PendingAsks.Contains($id)) { $sess.PendingAsks.Remove($id) }
+            else { Complete-Step $sess $null $id }
         }
         'permission.requested' {
             $req = $evt.data.permissionRequest
@@ -464,11 +645,11 @@ function Handle-Event($evt) {
             }
             if (-not $text) { $text = '(approval requested)' }
             $kind = if ($req) { $req.kind } else { 'permission' }
-            $State.PendingPerms[$id] = @{ text = (Truncate $text 280); kind = $kind }
+            $sess.PendingPerms[$id] = @{ text = (Truncate $text 280); kind = $kind; session = $sess.Label }
         }
         'permission.completed' {
             $id = $evt.data.requestId
-            if ($State.PendingPerms.Contains($id)) { $State.PendingPerms.Remove($id) }
+            if ($sess.PendingPerms.Contains($id)) { $sess.PendingPerms.Remove($id) }
         }
     }
 }
@@ -478,7 +659,31 @@ function Wake-AgentA11y([IntPtr]$hwnd) {
     [void][ScoutNative]::SendMessage($hwnd, 0x003D, [IntPtr]::Zero, [IntPtr](-25))
 }
 
+function Count-AgentWindows {
+    # How many agent windows are on screen. Matters because a pending approval
+    # cannot be traced back to the window that raised it: the session lock names
+    # a backend process, not the UI one.
+    $n = 0
+    $procs = $null
+    try { $procs = Get-Process -ErrorAction SilentlyContinue } catch { return 1 }
+    $seen = @{}
+    foreach ($name in $Config.processNames) {
+        foreach ($p in @($procs | Where-Object { $_.ProcessName -like "*$name*" })) {
+            if ($p.MainWindowHandle -eq [IntPtr]::Zero) { continue }
+            if ($seen.ContainsKey($p.Id)) { continue }
+            $seen[$p.Id] = $true
+            $n++
+        }
+    }
+    return $n
+}
+
 function Invoke-AgentButton([string[]]$labels) {
+    # Refuse to guess when several agent windows are open. Clicking Allow in the
+    # wrong window would approve something the user never saw, which is a far
+    # worse failure than making them click it themselves.
+    if ((Count-AgentWindows) -gt 1) { return $false }
+
     $win = Get-AgentWindow
     if (-not $win) { return $false }
     Wake-AgentA11y $win.Hwnd
@@ -547,6 +752,7 @@ function Focus-Agent {
           <Canvas.RenderTransform>
             <TransformGroup>
               <ScaleTransform x:Name="BodyS" ScaleX="1" ScaleY="1"/>
+              <RotateTransform x:Name="BodyR" Angle="0" CenterX="29" CenterY="52"/>
               <TranslateTransform x:Name="BodyT"/>
             </TransformGroup>
           </Canvas.RenderTransform>
@@ -605,6 +811,9 @@ function Focus-Agent {
                     Background="#FF3A2730" Foreground="#FFF0B4B4" BorderThickness="0" Cursor="Hand"/>
             <Button x:Name="AllowBtn" Content="Allow" Width="90" Height="28"
                     Background="#FF2E7D46" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold" Cursor="Hand"/>
+            <Button x:Name="AnswerBtn" Content="Answer in Scout" Width="140" Height="28"
+                    Background="#FF0E7FB8" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold"
+                    Cursor="Hand" Visibility="Collapsed"/>
           </StackPanel>
         </StackPanel>
       </Border>
@@ -626,11 +835,13 @@ $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
 $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
+$AnswerBtn    = $Window.FindName('AnswerBtn')
 $OpenBtn      = $Window.FindName('OpenBtn')
 $CloseBtn     = $Window.FindName('CloseBtn')
 $SettingsBtn  = $Window.FindName('SettingsBtn')
 $BodyT        = $Window.FindName('BodyT')
 $BodyS        = $Window.FindName('BodyS')
+$BodyR        = $Window.FindName('BodyR')
 $LeftPawT     = $Window.FindName('LeftPawT')
 $RightPawT    = $Window.FindName('RightPawT')
 $RootBorder   = $Window.FindName('RootBorder')
@@ -647,12 +858,17 @@ $Theme = @{
     NormalBg      = B '#FF1B1F2A'; NormalBorder  = B '#FF3A4358'; NormalHeader  = B '#FFE6EAF2'
     WorkingBg     = B '#FF18261D'; WorkingBorder = B '#FF3C6B4C'; WorkingHeader = B '#FFE6F2EA'
     AlertBg       = B '#FFFFD23D'; AlertBorder   = B '#FFFF7A00'; AlertHeader   = B '#FF3A2600'
+    # Questions get their own colour rather than sharing the approval yellow:
+    # an approval can be answered from the toast, a question cannot, so telling
+    # them apart from across the room decides whether you have to walk over.
+    AskBg         = B '#FF5CC8F5'; AskBorder     = B '#FF0E7FB8'; AskHeader     = B '#FF06263A'
     PermBgNormal  = B '#FF2A2030'; PermBdNormal  = B '#FFB4843C'; PermTxtNormal = B '#FFD6CFC2'
     PermBgAlert   = B '#FFFFFFFF'; PermBdAlert   = B '#FFFF7A00'; PermTxtAlert  = B '#FF3A2E10'
+    PermBgAsk     = B '#FFFFFFFF'; PermBdAsk     = B '#FF0E7FB8'; PermTxtAsk    = B '#FF10303F'
 }
 $script:ThemeState = $null
 
-# state: 'alert' (approval), 'working' (busy), 'idle' (default/dim)
+# state: 'alert' (approval), 'ask' (question), 'working' (busy), 'idle' (default/dim)
 function Set-Theme([string]$state) {
     if ($state -eq 'alert') {
         $RootBorder.Background  = $Theme.AlertBg
@@ -662,7 +878,21 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAlert
         $PermPanel.BorderBrush  = $Theme.PermBdAlert
         $PermText.Foreground    = $Theme.PermTxtAlert
+        $PermTitle.Foreground   = $Theme.AlertHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(255, 176, 0)
+        $RootGlow.BlurRadius    = 20
+        $RootGlow.Opacity       = 0.55
+    }
+    elseif ($state -eq 'ask') {
+        $RootBorder.Background  = $Theme.AskBg
+        $RootBorder.BorderBrush = $Theme.AskBorder
+        $RootBorder.BorderThickness = 2
+        $HeaderText.Foreground  = $Theme.AskHeader
+        $PermPanel.Background   = $Theme.PermBgAsk
+        $PermPanel.BorderBrush  = $Theme.PermBdAsk
+        $PermText.Foreground    = $Theme.PermTxtAsk
+        $PermTitle.Foreground   = $Theme.AskHeader
+        $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 150, 210)
         $RootGlow.BlurRadius    = 20
         $RootGlow.Opacity       = 0.55
     }
@@ -674,6 +904,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(56, 170, 100)
         $RootGlow.BlurRadius    = 22
         $RootGlow.Opacity       = 0.40
@@ -686,6 +917,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 0, 0)
         $RootGlow.BlurRadius    = 20
         $RootGlow.Opacity       = 0.55
@@ -705,8 +937,43 @@ $Window.Add_SizeChanged({ Place-BottomRight })
 $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
 $script:Hidden = $false
+# Set by the tray toggle only. The automatic rules decide when the toast is
+# worth showing; this is the user overriding them, so it outranks both the
+# rules and $Hidden and stays on until it is switched off again.
+$script:Pinned = $false
 $script:Pending = $false
+$script:Asking = $false
 $script:AgentGoneSince = $null
+
+# The whole visibility policy, in one place and with no side effects, so the
+# ordering of the rules is reviewable and testable rather than buried in the
+# poll loop. Order matters and is the point:
+#   1. anything waiting on the user is worth showing,
+#   2. otherwise show only while the agent is working out of sight,
+#   3. a dismissal suppresses both of those,
+#   4. an explicit pin overrides everything, including the dismissal.
+function Get-ShouldShow {
+    param(
+        [bool]$HasPending, [bool]$HasAsk, [bool]$IsActive,
+        [bool]$AgentRunning, [bool]$IsMinimized, [bool]$IsForeground,
+        [bool]$Hidden, [bool]$Pinned
+    )
+    $show = $false
+    if ($HasPending -or $HasAsk) { $show = $true }
+    elseif ($IsActive -and $AgentRunning -and ($IsMinimized -or -not $IsForeground)) { $show = $true }
+    if ($Hidden) { $show = $false }
+    if ($Pinned) { $show = $true }
+    return $show
+}
+
+# Applied to the whole toast. Clamped rather than trusted: a hand-edited config
+# with 0 in it would leave an invisible window that still takes clicks.
+function Set-ToastOpacity([double]$v) {    if ($v -lt 0.35) { $v = 0.35 }
+    if ($v -gt 1.0)  { $v = 1.0 }
+    $Window.Opacity = $v
+    return $v
+}
+$Config.opacity = Set-ToastOpacity ([double]$Config.opacity)
 Set-Theme 'idle'
 
 $AllowBtn.Add_Click({
@@ -720,7 +987,8 @@ $DenyBtn.Add_Click({
     } else { Focus-Agent }
 })
 $OpenBtn.Add_Click({ Focus-Agent })
-$CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
+$AnswerBtn.Add_Click({ Focus-Agent })
+$CloseBtn.Add_Click({ $script:Hidden = $true; $script:Pinned = $false; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
 
 # ---------------------------------------------------------------------------
@@ -742,17 +1010,26 @@ $SettingsBtn.Add_Click({ Show-SettingsWindow })
 function New-CuteEyes($p) {
     # Dark rim, coloured iris, dark pupil, one big highlight and one small: the
     # layering that reads as a glossy eye even at 14 px across.
+    #
+    # Wrapped in a named group so the animation can squash it for a blink and
+    # open it wider when the agent needs something. The pivot sits on the eye
+    # centre line so the lids meet in the middle rather than sliding down.
     @"
-      <Ellipse Canvas.Left="10.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
-      <Ellipse Canvas.Left="33.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
-      <Ellipse Canvas.Left="11.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
-      <Ellipse Canvas.Left="34.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
-      <Ellipse Canvas.Left="14.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
-      <Ellipse Canvas.Left="37.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
-      <Ellipse Canvas.Left="12.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="35.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="19.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
-      <Ellipse Canvas.Left="42.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+      <Canvas x:Name="EyeGroup" Width="58" Height="60">
+        <Canvas.RenderTransform>
+          <ScaleTransform x:Name="BlinkS" ScaleX="1" ScaleY="1" CenterX="29" CenterY="22.5"/>
+        </Canvas.RenderTransform>
+        <Ellipse Canvas.Left="10.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
+        <Ellipse Canvas.Left="33.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
+        <Ellipse Canvas.Left="11.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
+        <Ellipse Canvas.Left="34.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
+        <Ellipse Canvas.Left="14.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
+        <Ellipse Canvas.Left="37.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
+        <Ellipse Canvas.Left="12.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
+        <Ellipse Canvas.Left="35.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
+        <Ellipse Canvas.Left="19.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+        <Ellipse Canvas.Left="42.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+      </Canvas>
 "@
 }
 
@@ -967,7 +1244,9 @@ function Set-Mascot([string]$id) {
     if (-not $build) { return }
 
     $inner = & $build $def.Palette
-    $frag = "<Canvas xmlns=`"http://schemas.microsoft.com/winfx/2006/xaml/presentation`" Width=`"58`" Height=`"60`">$inner</Canvas>"
+    # The x namespace has to be declared here or the x:Name on the animated
+    # parts inside a head cannot be parsed.
+    $frag = "<Canvas xmlns=`"http://schemas.microsoft.com/winfx/2006/xaml/presentation`" xmlns:x=`"http://schemas.microsoft.com/winfx/2006/xaml`" Width=`"58`" Height=`"60`">$inner</Canvas>"
     try {
         $head = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$frag)))
     } catch {
@@ -979,6 +1258,9 @@ function Set-Mascot([string]$id) {
     $script:MascotHead = $head
     # Index 0 keeps the head behind the laptop and paws.
     $MascotHost.Children.Insert(0, $head)
+    # The eye group is rebuilt with the head, so the animation's handle on it
+    # has to be refreshed on every swap.
+    $script:BlinkS = $head.FindName('BlinkS')
 
     $pawBrush = B $def.Palette.paw
     $LeftPaw.Fill  = $pawBrush
@@ -1146,6 +1428,7 @@ function Rebuild-TrayIcons([string]$species) {
         idle    = New-TrayIcon '#5B6780' $species
         working = New-TrayIcon '#4ADE80' $species
         alert   = New-TrayIcon '#FFD23D' $species
+        ask     = New-TrayIcon '#5CC8F5' $species
     }
     $script:TrayIconSpecies = $species
     # Point the tray at the new set before freeing the old one.
@@ -1231,6 +1514,8 @@ function Set-AutoStart([bool]$on) {
 $script:SettingsWindow    = $null
 $script:SettingsAnimCheck = $null
 $script:SettingsSuppress  = $false
+$script:OpacitySaveTimer  = $null
+$script:OpacityPendingValue = 1.0
 $script:SelfProc          = [System.Diagnostics.Process]::GetCurrentProcess()
 
 # Applies the Startup checkbox, and snaps it back if the folder write failed so
@@ -1357,6 +1642,13 @@ function Apply-AutoStartFromUI {
       <TextBlock Text="Mascot" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
       <ComboBox x:Name="MascotPicker" Height="26" Cursor="Hand"/>
     </DockPanel>
+    <DockPanel Margin="0,12,0,0" LastChildFill="True">
+      <TextBlock Text="Opacity" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+      <TextBlock x:Name="OpacityValue" Text="100%" Width="46" Foreground="#FFE6EAF2" VerticalAlignment="Center"
+                 TextAlignment="Right" DockPanel.Dock="Right"/>
+      <Slider x:Name="OpacitySlider" Minimum="0.35" Maximum="1.0" Value="1.0"
+              TickFrequency="0.05" IsSnapToTickEnabled="True" VerticalAlignment="Center" Cursor="Hand"/>
+    </DockPanel>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
@@ -1405,6 +1697,8 @@ function Show-SettingsWindow {
     $script:SettingsCpuText   = $sw.FindName('CpuText')
     $script:SettingsUpText    = $sw.FindName('UpText')
     $script:SettingsMascot    = $sw.FindName('MascotPicker')
+    $script:SettingsOpacity   = $sw.FindName('OpacitySlider')
+    $script:SettingsOpacityText = $sw.FindName('OpacityValue')
     $closeBtn                 = $sw.FindName('CloseSettingsBtn')
 
     # Reflect reality, not a remembered flag. Set before the handlers are
@@ -1415,6 +1709,28 @@ function Show-SettingsWindow {
         $script:SettingsAutoHint.Text = "Watch-Scout.ps1 is missing from $ScriptDir, so this cannot be turned on."
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
+
+    # Opacity. Primed before the handler is attached so setting the initial
+    # value does not fire a save.
+    $script:SettingsOpacity.Value = [double]$Config.opacity
+    $script:SettingsOpacityText.Text = '{0:N0}%' -f ([double]$Config.opacity * 100)
+    $script:SettingsOpacity.Add_ValueChanged({
+        $v = Set-ToastOpacity ([double]$script:SettingsOpacity.Value)
+        $script:SettingsOpacityText.Text = '{0:N0}%' -f ($v * 100)
+        # Dragging a slider fires this continuously, so coalesce the writes and
+        # persist once the value has settled.
+        $script:OpacityPendingValue = $v
+        if (-not $script:OpacitySaveTimer) {
+            $script:OpacitySaveTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:OpacitySaveTimer.Interval = [TimeSpan]::FromMilliseconds(600)
+            $script:OpacitySaveTimer.Add_Tick({
+                $script:OpacitySaveTimer.Stop()
+                [void](Save-Setting @{ opacity = $script:OpacityPendingValue })
+            })
+        }
+        $script:OpacitySaveTimer.Stop()
+        $script:OpacitySaveTimer.Start()
+    })
 
     # Mascot picker. Tag carries the id so the label stays free to be prose.
     foreach ($key in $Mascots.Keys) {
@@ -1516,7 +1832,20 @@ $MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
 $MenuPause.CheckOnClick = $true
 $MenuPause.Checked = -not $script:AnimEnabled
 
-$MenuShow.Add_Click({ $script:Hidden = $false })
+$MenuShow.Add_Click({
+    # A pin, not a nudge. "Show" has to work even when nothing is happening --
+    # a click that silently did nothing because the automatic rules disagreed
+    # would look broken. "Hide" clears the pin and dismisses, exactly like the
+    # toast's own close button.
+    if ($script:Pinned) {
+        $script:Pinned = $false
+        $script:Hidden = $true
+        try { $Window.Hide() } catch { }
+    } else {
+        $script:Pinned = $true
+        $script:Hidden = $false
+    }
+})
 $MenuOpen.Add_Click({ Focus-Agent })
 $MenuPause.Add_Click({
     # CheckOnClick has already flipped Checked by the time this runs.
@@ -1540,8 +1869,14 @@ $Tray.ContextMenuStrip = $TrayMenu
 $Tray.Add_MouseDoubleClick({ Focus-Agent })
 
 # ---------------------------------------------------------------------------
-# Quokka animation: a dedicated timer drives the mascot frame-by-frame.
-# Working => bobbing body + alternating "typing" paws. Idle => slow breathing.
+# Mascot animation: a dedicated timer drives it frame-by-frame.
+#
+#   working  => bobbing body, alternating "typing" paws, focused eyes
+#   waiting  => head tilts, eyes open wide, glow pulses
+#   idle     => slow breathing, softer eyes
+#
+# Blinking runs on top of all three at randomised intervals, because a face
+# that never blinks reads as a picture rather than a character.
 #
 # The timer is started and stopped with the toast (see the poll loop below):
 # animating a window nobody can see costs real CPU for nothing.
@@ -1549,12 +1884,26 @@ $Tray.Add_MouseDoubleClick({ Focus-Agent })
 $script:Phase = 0.0
 $script:Busy  = $false
 $script:PrevBusy = $false
+$script:BlinkS = $null          # rebound by Set-Mascot on every mascot swap
+$script:BlinkIn = 24            # frames until the next blink
+$script:BlinkStep = -1          # index into the blink sequence, -1 when open
+$script:EyeBase = 1.0           # openness the eyes return to for this state
+# Get-Random is a cmdlet invocation; this runs inside a frame tick, so use the
+# plain .NET generator instead.
+$script:Rng = New-Object System.Random
+
+# Squash-and-open, held one frame at the bottom so the blink is visible at
+# 12 fps without looking like a dropped frame.
+$BlinkFrames = @(0.55, 0.10, 0.10, 0.60)
 
 function Reset-Mascot {
     # Neutral pose, used when the animation is paused or switched off.
     $BodyT.Y = 0; $BodyT.X = 0
     $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+    $BodyR.Angle = 0
     $LeftPawT.Y = 0; $RightPawT.Y = 0
+    if ($script:BlinkS) { $script:BlinkS.ScaleY = 1.0 }
+    $script:BlinkStep = -1
 }
 
 $anim = New-Object System.Windows.Threading.DispatcherTimer
@@ -1562,18 +1911,22 @@ $anim.Interval = [TimeSpan]::FromMilliseconds([int]$Config.animIntervalMs)
 # Phase steps are scaled so the mascot moves at the same speed regardless of the
 # configured frame rate.
 $script:PhaseScale = [double]$Config.animIntervalMs / 50.0
+# Frames per second, used to keep blink timing in real seconds rather than frames.
+$script:Fps = 1000.0 / [double]$Config.animIntervalMs
 $anim.Add_Tick({
-    if ($script:Pending) {
-        # gentle attention pulse on the yellow alert glow
+    if ($script:Pending -or $script:Asking) {
+        # gentle attention pulse on the glow, whichever colour it is wearing
         $script:Phase += 0.20 * $script:PhaseScale
         $puls = ([Math]::Sin($script:Phase * 3.0) + 1.0) / 2.0
         $RootGlow.BlurRadius = 16 + $puls * 18
         $RootGlow.Opacity    = 0.55 + $puls * 0.4
-        # the quokka peeks up, waiting
+        # peeks up and tilts, waiting on you - eyes wide open
         $BodyT.Y = [Math]::Sin($script:Phase) * 0.8
         $BodyT.X = 0
         $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+        $BodyR.Angle = if ($script:Asking) { [Math]::Sin($script:Phase * 0.6) * 5.0 } else { 0 }
         $LeftPawT.Y = 0; $RightPawT.Y = 0
+        $script:EyeBase = 1.18
     }
     elseif ($script:Busy) {
         $script:Phase += 0.32 * $script:PhaseScale
@@ -1581,8 +1934,12 @@ $anim.Add_Tick({
         $BodyT.X     = [Math]::Sin($script:Phase) * 0.6
         $BodyS.ScaleX = 1.0
         $BodyS.ScaleY = 1.0
+        # nods along with the typing, a beat slower than the paws
+        $BodyR.Angle = [Math]::Sin($script:Phase * 1.5) * 2.5
         $LeftPawT.Y  = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0)) * 2.4
         $RightPawT.Y = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0 + [Math]::PI)) * 2.4
+        # slightly narrowed: concentrating rather than staring
+        $script:EyeBase = 0.94
     } else {
         $script:Phase += 0.04 * $script:PhaseScale
         $breathe = 1.0 + [Math]::Sin($script:Phase) * 0.035
@@ -1590,8 +1947,28 @@ $anim.Add_Tick({
         $BodyS.ScaleY = $breathe
         $BodyT.Y = [Math]::Sin($script:Phase) * 0.6
         $BodyT.X = 0
+        $BodyR.Angle = [Math]::Sin($script:Phase * 0.5) * 1.2
         $LeftPawT.Y = 0
         $RightPawT.Y = 0
+        # relaxed, a touch sleepy
+        $script:EyeBase = 0.86
+    }
+
+    # --- blink ---------------------------------------------------------------
+    if ($script:BlinkS) {
+        if ($script:BlinkStep -ge 0) {
+            $script:BlinkS.ScaleY = $script:EyeBase * $BlinkFrames[$script:BlinkStep]
+            $script:BlinkStep++
+            if ($script:BlinkStep -ge $BlinkFrames.Count) { $script:BlinkStep = -1 }
+        } else {
+            $script:BlinkS.ScaleY = $script:EyeBase
+            $script:BlinkIn--
+            if ($script:BlinkIn -le 0) {
+                $script:BlinkStep = 0
+                # 2.5-6 s apart, so it never falls into a mechanical rhythm.
+                $script:BlinkIn = [int]($script:Fps * (2.5 + $script:Rng.NextDouble() * 3.5))
+            }
+        }
     }
 })
 
@@ -1626,6 +2003,7 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds([int]$Config.pollIntervalMs)
 $timer.Add_Tick({
     try { Read-NewEvents } catch { }
+    try { Merge-SessionState } catch { }
 
     $win = Get-AgentWindow
     $agentRunning = $null -ne $win
@@ -1647,27 +2025,36 @@ $timer.Add_Tick({
     }
 
     $hasPending = $State.PendingPerms.Count -gt 0
+    $hasAsk     = $State.PendingAsks.Count -gt 0
     $ageSec = ([datetime]::UtcNow - $State.LastEventUtc).TotalSeconds
     $running = ($State.Steps | Where-Object { -not $_.Done } | Measure-Object).Count -gt 0
-    $isActive = $hasPending -or $running -or ($State.TurnActive) -or ($State.EventsPath -and $ageSec -le [double]$Config.activeWindowSeconds)
+    $isActive = $hasPending -or $hasAsk -or $running -or ($State.TurnActive) -or ($Sessions.Count -gt 0 -and $ageSec -le [double]$Config.activeWindowSeconds)
 
-    $script:Busy = (-not $hasPending) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
+    # A question parks the turn just like an approval does, so neither counts as
+    # "busy" - the mascot should be waiting, not typing.
+    $script:Busy = (-not $hasPending) -and (-not $hasAsk) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
     $script:Pending = $hasPending
+    $script:Asking  = $hasAsk
 
     # The ✕ button only dismisses the CURRENT burst. Re-show automatically when a
-    # new approval arrives, or when a fresh working turn begins (idle -> busy edge),
-    # so closing it once doesn't mute the companion forever.
-    if ($script:Hidden -and $hasPending) { $script:Hidden = $false }
+    # new approval or question arrives, or when a fresh working turn begins
+    # (idle -> busy edge), so closing it once doesn't mute the companion forever.
+    if ($script:Hidden -and ($hasPending -or $hasAsk)) { $script:Hidden = $false }
     if ($script:Hidden -and $script:Busy -and -not $script:PrevBusy) { $script:Hidden = $false }
     $script:PrevBusy = $script:Busy
 
-    # pick the visual state: approval > working > idle, swap only on change
-    $desiredState = if ($hasPending) { 'alert' } elseif ($script:Busy -and $agentRunning) { 'working' } else { 'idle' }
+    # pick the visual state: approval > question > working > idle, swap only on
+    # change. Approval outranks a question because the toast can act on it.
+    $desiredState = if ($hasPending) { 'alert' }
+                    elseif ($hasAsk) { 'ask' }
+                    elseif ($script:Busy -and $agentRunning) { 'working' }
+                    else { 'idle' }
     if ($desiredState -ne $script:ThemeState) {
         Set-Theme $desiredState
         $script:ThemeState = $desiredState
         $detail = switch ($desiredState) {
             'alert'   { 'approval needed' }
+            'ask'     { 'waiting on your answer' }
             'working' { 'Scout is working' }
             default   { if ($agentRunning) { 'idle' } else { 'agent not detected' } }
         }
@@ -1679,13 +2066,37 @@ $timer.Add_Tick({
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
         $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
         $HeaderText.Text = "Approval needed$extra"
+        $PermTitle.Text  = [char]0x26A0 + ' Permission requested' + (Where-From $first)
         $PermText.Text = $first.text
+        $AllowBtn.Visibility  = 'Visible'
+        $DenyBtn.Visibility   = 'Visible'
+        $AnswerBtn.Visibility = 'Collapsed'
         $PermPanel.Visibility = 'Visible'
         $Dot.Fill = '#FFB45309'
         # keep the yellow alert focused: hide the step list and narration
         $SayingText.Visibility = 'Collapsed'
         $StepsPanel.Visibility = 'Collapsed'
-    } else {
+    }
+    elseif ($hasAsk) {
+        $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
+        $extra = if ($State.PendingAsks.Count -gt 1) { " (+$($State.PendingAsks.Count - 1))" } else { '' }
+        $HeaderText.Text = "Waiting on you$extra"
+        $PermTitle.Text  = [char]0x2753 + ' The agent asked you a question' + (Where-From $first)
+        $body = $first.text
+        if ($first.choices -and $first.choices.Count) {
+            $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
+        }
+        $PermText.Text = Truncate $body 320
+        # The companion cannot answer for you, so it offers the one useful action.
+        $AllowBtn.Visibility  = 'Collapsed'
+        $DenyBtn.Visibility   = 'Collapsed'
+        $AnswerBtn.Visibility = 'Visible'
+        $PermPanel.Visibility = 'Visible'
+        $Dot.Fill = '#FF0E7FB8'
+        $SayingText.Visibility = 'Collapsed'
+        $StepsPanel.Visibility = 'Collapsed'
+    }
+    else {
         $PermPanel.Visibility = 'Collapsed'
         if (-not $agentRunning) { $HeaderText.Text = 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
         elseif ($script:Busy)   { $HeaderText.Text = 'Working hard...';     $Dot.Fill = '#FF4ADE80' }
@@ -1698,15 +2109,14 @@ $timer.Add_Tick({
     }
 
     # visibility policy
-    $shouldShow = $false
-    if ($hasPending) { $shouldShow = $true }
-    elseif ($isActive -and $agentRunning -and ($isMinimized -or -not $isForeground)) { $shouldShow = $true }
-    if ($script:Hidden) { $shouldShow = $false }
+    $shouldShow = Get-ShouldShow -HasPending $hasPending -HasAsk $hasAsk `
+        -IsActive $isActive -AgentRunning $agentRunning -IsMinimized $isMinimized `
+        -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned
 
     if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
         try {
-            $dbg = "{0} show={1} pend={2} active={3} run={4} agent={5} fg={6} min={7} hidden={8} age={9} hwnd='{10}'" -f `
-                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, [int]$ageSec, ($win.Hwnd)
+            $dbg = "{0} show={1} pend={2} ask={3} sess={4} active={5} run={6} agent={7} fg={8} min={9} hidden={10} pin={11} age={12}" -f `
+                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, $script:Pinned, [int]$ageSec
             Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') -Value $dbg
         } catch { }
     }
@@ -1720,18 +2130,18 @@ $timer.Add_Tick({
         if ($anim.IsEnabled) { $anim.Stop() }
         if ($Window.IsVisible) { $Window.Hide() }
     }
+
+    # The tray item is a toggle, so its caption has to say what clicking it will
+    # do rather than name a state.
+    $wantCaption = if ($shouldShow) { 'Hide toast' } else { 'Show toast' }
+    if ($MenuShow.Text -ne $wantCaption) { $MenuShow.Text = $wantCaption }
 })
 
-# prime to current end of the active session
-$initial = Find-ActiveSession
-if ($initial) {
-    $fi = New-Object System.IO.FileInfo $initial.Events
-    $State.SessionDir = $initial.Dir
-    $State.EventsPath = $initial.Events
-    $State.Offset     = $fi.Length
-    $State.LastEventUtc = $fi.LastWriteTimeUtc
-}
+# Prime to the current end of every active session, so a fresh start does not
+# replay approvals that were answered long ago.
+Sync-Sessions
 $script:SessionScanUtc = [datetime]::UtcNow
+Merge-SessionState
 
 # Draw the configured mascot. This has to run after the mascot functions are
 # defined, so it deliberately lives here rather than next to Set-Theme.

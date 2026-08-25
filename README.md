@@ -21,9 +21,14 @@ no need to look at the text:
 | **Working** | 🟢 Calm dark **green** with a soft glow | The agent is actively running a task | <img src="docs/state-working.png" width="260"> |
 | **Idle** | ⚫ Dim **navy** (default) | The agent is connected but waiting / between turns | <img src="docs/state-idle.png" width="260"> |
 | **Approval needed** | 🟡 Bright pulsing **yellow** | The agent is asking for permission — Allow / Deny right here | <img src="docs/state-approval.png" width="260"> |
+| **Waiting on you** | 🔵 Bright pulsing **cyan** | The agent asked you a question and the turn is parked until you answer | <img src="docs/state-question.png" width="260"> |
 
 The tones are intentionally muted so green and idle sit harmoniously next to each other,
-while the approval yellow stays loud enough that you can't miss it.
+while the two "you are blocking me" colours stay loud enough that you can't miss them.
+
+Approval and question are deliberately different colours. An approval you can settle from
+the toast itself; a question you cannot — you have to go to the agent window and answer
+it. Telling them apart from across the room decides whether you need to get up.
 
 ---
 
@@ -40,17 +45,18 @@ place.
 - **Live progress toast** — streams the agent's current activity as readable steps
   (e.g. "Reading config.json", "Running: git commit ...") with a ✓/▸ status list, plus
   the agent's latest narration.
-- **A mascot to keep you company** — pick from eleven, including five cats. It bobs and
-  "types" while the agent is busy and gently breathes when idle, so you can tell at a
-  glance whether work is happening (see [Mascots](#mascots)).
+- **A mascot to keep you company** — pick from eleven, including five cats. It types while
+  the agent is busy, tilts its head and opens its eyes wide when it needs something from
+  you, breathes gently when idle, and blinks throughout, so you can tell at a glance
+  whether work is happening (see [Mascots](#mascots)).
 - **Tray icon** — the companion has no taskbar button and hides its toast most of the
   time, so the tray icon is how you know it is running. Colour carries the state and the
   silhouette carries your chosen mascot, so a glance answers both "is it running?" and
-  "is Scout busy?". Right-clicking gives Show toast, Open Scout, Pause animation, Settings
-  and Exit.
+  "is Scout busy?". Right-clicking gives Show/Hide toast, Open Scout, Pause animation,
+  Settings and Exit.
 - **Settings window** — reachable from the tray or the ⚙ on the toast. Turn on
-  start-with-Scout, switch the mascot, turn the animation off, and see exactly how much
-  memory and CPU the companion is using (see [Settings](#settings)).
+  start-with-Scout, switch the mascot, dim the toast, turn the animation off, and see
+  exactly how much memory and CPU the companion is using (see [Settings](#settings)).
 - **Color-coded status** — the whole toast shifts color with the agent's state: calm
   **green** while working, dim **navy** when idle, and bright pulsing **yellow** when an
   approval is needed (see [Status at a glance](#status-at-a-glance)).
@@ -58,6 +64,14 @@ place.
   Allow/Deny button inside the agent window for you (via UI Automation — no need to
   bring the window to the foreground). When approval is needed the whole toast turns a
   **bright pulsing yellow** so you can't miss it.
+- **Tells you when the agent is stuck on a question** — if the agent asks you something,
+  the turn is parked until you answer, exactly like an approval. The toast turns **cyan**,
+  shows the question and its options, and offers to bring the agent window forward. It
+  cannot answer for you, so it does not pretend to.
+- **Follows every session you have open** — if a second agent window asks for approval or
+  asks you a question, it reaches the toast too, tagged with which one it came from. The
+  step list and narration follow whichever session moved most recently, so with a single
+  session it looks exactly as it always did.
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
 - **Stays out of the way** — around 1.4% of one CPU core and a flat working set while
@@ -130,6 +144,10 @@ If you'd rather have it simply run from login onward, put a shortcut to
 To stop it: right-click the tray icon and choose **Exit**. Clicking the **✕** on the
 toast only hides it until the next approval.
 
+The tray menu's first item is a toggle: **Show toast** pins the toast on screen even when
+nothing is happening, and **Hide toast** puts it away again. The caption always names what
+the click will do, so it doubles as a readout of whether the toast is currently up.
+
 ## Settings
 
 Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast.
@@ -139,6 +157,7 @@ Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast
 | **Start automatically with Scout** | Adds or removes the `Watch-Scout.ps1` shortcut in your Startup folder. Per-user, no registry writes, no admin rights. The checkbox reads the real state of the folder, so editing it outside the app still shows up correctly. |
 | **Animate the mascot** | Off leaves the mascot in a resting pose and stops its timer entirely. Shares one setting with **Pause animation** in the tray menu. |
 | **Mascot** | Switches between the eleven mascots live, no restart needed. |
+| **Opacity** | Fades the whole toast, from solid down to 35%. Useful if you want it present but not loud. Applies as you drag; the value is saved once you settle. The 35% floor is deliberate — a fully transparent window would still swallow clicks. |
 | **This process** | Live working set, CPU and uptime for the companion itself, so "how much is this costing me?" does not require hunting through Task Manager for the right `powershell.exe`. |
 
 Changes are written straight into `config.json`, so they survive a restart. Anything you
@@ -154,18 +173,30 @@ The agent writes a per-session event stream to:
 
 Scout Companion:
 
-1. Finds the **active session** (the one currently locked / most recently written).
-2. **Tails `events.jsonl`** and interprets events:
+1. Finds the **active sessions** — the ones whose `events.jsonl` has been written to
+   recently. Not the ones holding a lock file: one backend process holds
+   `inuse.<pid>.lock` on every session it still has open, so a lock means "some process
+   still has this open", not "someone is using this".
+2. **Tails each of them** and interprets events:
    - `tool.execution_start` / `assistant.message` → current activity text
    - `permission.requested` / `permission.completed` → pending approvals
+   - `external_tool.requested` for an ask-the-user tool → pending question
 3. Detects the **agent window** from the running process list and checks whether it's
    minimized or in the foreground to decide when to show the toast.
 4. For approvals, it wakes the agent window's accessibility tree and invokes the
-   matching **Allow/Deny** button through Windows UI Automation.
+   matching **Allow/Deny** button through Windows UI Automation. If more than one agent
+   window is open it refuses to click and focuses instead — a pending approval cannot be
+   traced back to the window that raised it, and approving the wrong thing is worse than
+   making you click it yourself.
 
-The session and the agent window are both cached — the poll tick normally costs one file
-stat and one `IsWindow` call rather than a walk over every session folder and every
-process on the machine.
+Approvals and questions are merged across every followed session; the step list and
+narration come from whichever moved most recently. A session with something pending is
+kept even after it goes quiet, because an approval does not expire just because nobody
+has typed for a while.
+
+The session set and the agent window are both cached — the poll tick normally costs one
+file stat per followed session and one `IsWindow` call, rather than a walk over every
+session folder and every process on the machine.
 
 No network calls. No data leaves your machine. The companion only reads local files and
 interacts with the local agent window.
@@ -181,12 +212,15 @@ and edit. Common overrides:
 | `home` | auto-detected | Agent home folder |
 | `processNames` | `["Microsoft Scout","OpenClaw",...]` | Agent window process names |
 | `allowLabels` / `denyLabels` | `["Allow",...]` / `["Deny",...]` | Buttons to click for approvals |
+| `askToolNames` | `["m_ask_user","ask_user"]` | Tool names that mean "waiting for your answer" |
 | `activeWindowSeconds` | `150` | How long after the last event the session counts as "working" |
 | `pollIntervalMs` | `700` | Event/focus polling interval |
+| `maxSessions` | `6` | How many concurrently active sessions to follow |
 | `sessionRescanMs` | `5000` | How often to re-resolve which session is active. Between rescans the companion just tails the file it already found |
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
 | `mascot` | `quokka` | Which mascot to show. Also in the settings window |
+| `opacity` | `1.0` | Toast opacity, clamped to 0.35–1.0 on load. Also in the settings window |
 | `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
 | `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
 
@@ -210,6 +244,10 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
   **Allow for session**, **Allow everywhere**, and **Deny**; the toast's **Allow** maps to
   the safest one-time **Allow**. As a fallback the companion focuses the agent window so
   you can click manually.
+- **Allow/Deny stopped clicking when I opened a second agent window** — deliberate. A
+  pending approval cannot be traced back to the window that raised it, so with more than
+  one window open the companion focuses instead of guessing. Close the extra window to get
+  one-click approvals back.
 - **Start-with-Scout won't turn on** — the checkbox disables itself if `Watch-Scout.ps1`
   is missing from the same folder as the script, and reverts if the Startup folder cannot
   be written.
