@@ -505,6 +505,12 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
 the code's: **major** when something you rely on changes shape, **minor** for a new
 capability, **patch** for a fix that only makes an existing one behave.
 
+**It is deliberately below 1.0.** Under semver that means the shape of this thing is
+still settling, and while it is, a minor bump can carry a change you have to notice —
+a setting that moves, a behaviour that stops being what it was. That is the honest
+position: it is still finding and fixing its own significant faults faster than it is
+gaining features. 1.0 is a claim about stability, and this has not earned one yet.
+
 The running version is in **Settings → This process**, and every release is tagged, so a
 bug report can say what it was running.
 
