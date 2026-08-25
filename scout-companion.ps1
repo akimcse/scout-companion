@@ -84,7 +84,13 @@ if (-not ('ScoutNative' -as [type])) {
                 System.Collections.Generic.HashSet<uint> pids) {
             var found = new System.Collections.Generic.List<System.IntPtr>();
             EnumWindows(delegate (System.IntPtr h, System.IntPtr l) {
-                if (!IsWindowVisible(h)) return true;
+                // Minimised counts. Scout minimises to the tray, which clears
+                // IsWindowVisible, and that is precisely when the companion
+                // matters most - so skipping those windows would blind it to
+                // the app exactly when it is being relied on. A minimised
+                // window keeps its whole accessibility tree: measured at 173
+                // buttons and 58 chat rows on one.
+                if (!IsWindowVisible(h) && !IsIconic(h)) return true;
                 if (GetWindowTextLength(h) == 0) return true;
                 uint owner;
                 GetWindowThreadProcessId(h, out owner);
@@ -395,20 +401,42 @@ $script:ChatScanLooked    = $false                 # did the last scan get as fa
 # lives on the session record, and the record is dropped as soon as the session
 # goes quiet - and again on every restart. A title learned once should stay
 # learned, so it is written next to the config, keyed by session folder.
+#
+# A title belongs to exactly one session. Several sessions working in the same
+# folder at the same time all match the freshest sidebar row, so without that
+# rule they each claim the same chat and the label stops identifying anything -
+# which is the only reason it is on the toast. Observed for real: two
+# automations and a chat session, all three named "Scout Companion".
 # ---------------------------------------------------------------------------
 $TitleStorePath = Join-Path $ScriptDir 'titles.json'
 $script:TitleStore = @{}
 
 function Import-TitleStore {
     if (-not (Test-Path $TitleStorePath)) { return }
+    $raw = @{}
     try {
         $o = Get-Content $TitleStorePath -Raw | ConvertFrom-Json
         foreach ($p in $o.PSObject.Properties) {
             # Sessions are deleted eventually, and their titles would otherwise
             # accumulate forever in a file nobody ever prunes.
-            if ($p.Value -and (Test-Path $p.Name)) { $script:TitleStore[$p.Name] = [string]$p.Value }
+            if ($p.Value -and (Test-Path $p.Name)) { $raw[$p.Name] = [string]$p.Value }
         }
-    } catch { }
+    } catch { return }
+
+    # Repair on the way in. A store written before the one-title-one-session
+    # rule can hold the same name against several folders, and there is nothing
+    # in it to say which one was right - so none of them keep it.
+    $count = @{}
+    foreach ($k in $raw.Keys) {
+        $t = $raw[$k]
+        if ($count.ContainsKey($t)) { $count[$t]++ } else { $count[$t] = 1 }
+    }
+    $dropped = $false
+    foreach ($k in $raw.Keys) {
+        if ($count[$raw[$k]] -gt 1) { $dropped = $true; continue }
+        $script:TitleStore[$k] = $raw[$k]
+    }
+    if ($dropped) { Save-TitleStore }
 }
 
 function Save-TitleStore {
@@ -423,6 +451,13 @@ function Set-LearnedTitle([string]$dir, [string]$title) {
     if (-not $dir -or -not $title) { return }
     if ($script:TitleStore[$dir] -eq $title) { return }
     $script:TitleStore[$dir] = $title
+    Save-TitleStore
+}
+
+function Remove-LearnedTitle([string]$dir) {
+    if (-not $dir) { return }
+    if (-not $script:TitleStore.ContainsKey($dir)) { return }
+    $script:TitleStore.Remove($dir)
     Save-TitleStore
 }
 
@@ -534,6 +569,19 @@ function Get-AgentWindow {
                 }
             }
         } finally { foreach ($p in $ps) { $p.Dispose() } }
+    }
+
+    # 1b) Minimised to the tray. MainWindowHandle goes to zero when Scout is
+    #     minimised, so the step above finds nothing and the toast would say
+    #     "agent not detected" about an app that is running and working - while
+    #     minimised is exactly when the companion is what you are watching.
+    #     The enumeration knows about those windows, so ask it.
+    $mins = @(Get-AgentWindows)
+    if ($mins.Count -gt 0) {
+        $owner = [uint32]0
+        try { [void][ScoutNative]::GetWindowThreadProcessId($mins[0], [ref]$owner) } catch { }
+        $script:WinCache = @{ Hwnd = $mins[0]; Pid = [int]$owner }
+        return $script:WinCache
     }
 
     # 2) Fall back to window-title hints. This one does need a full enumeration,
@@ -725,8 +773,12 @@ function Resolve-SessionLabels {
     $byLabel = @{}
     foreach ($dir in $Sessions.Keys) {
         $rec = $Sessions[$dir]
-        # Scout's own title for the chat needs no disambiguating: it is the name
-        # the user reads in the sidebar, and two sessions cannot share a chat.
+        # Scout's own title for the chat is already the name the user reads in
+        # the sidebar, so it needs no disambiguating of its own - a title
+        # belongs to one session by construction, enforced where titles are
+        # assigned. The final sweep below is the belt to that braces, because
+        # Get-RaisingSession finds a session by matching this label and would
+        # hand back the wrong one if two ever collided.
         if ($rec.ChatTitle) { $rec.Label = $rec.ChatTitle; continue }
         if (-not $byLabel.ContainsKey($rec.BaseLabel)) { $byLabel[$rec.BaseLabel] = New-Object System.Collections.ArrayList }
         [void]$byLabel[$rec.BaseLabel].Add($rec)
@@ -743,15 +795,18 @@ function Resolve-SessionLabels {
             $rec.Label = if ($rec.Topic) { "$label - $($rec.Topic)" }
                          else { "$label - $((Split-Path $rec.Dir -Leaf).Substring(0,6))" }
         }
-        # Two sessions can still land on the same text if their first messages
-        # start alike and truncate to the same prefix.
-        $seen = @{}
-        foreach ($rec in $group) {
-            if ($seen.ContainsKey($rec.Label)) {
-                $rec.Label = "$($rec.BaseLabel) - $((Split-Path $rec.Dir -Leaf).Substring(0,6))"
-            }
-            $seen[$rec.Label] = $true
+    }
+    # One sweep over everything, titles included. Two sessions can land on the
+    # same text by truncating alike, and a duplicate label does not merely read
+    # badly - it makes Open land on whichever session was seen first.
+    $seen = @{}
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if (-not $rec.Label) { $rec.Label = $rec.BaseLabel }
+        if ($seen.ContainsKey($rec.Label)) {
+            $rec.Label = "$($rec.Label) - $((Split-Path $rec.Dir -Leaf).Substring(0,6))"
         }
+        $seen[$rec.Label] = $true
     }
 }
 
@@ -1329,13 +1384,26 @@ function Invoke-ChatSearch([IntPtr]$hwnd, [string[]]$queries) {
             try { $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($q) }
             catch { $results += ,@(); continue }
 
-            # Results arrive asynchronously, so poll rather than pay a fixed
-            # worst case on every query.
+            # Wait for the list to settle, not for the first row to appear.
+            # Reading as soon as anything is timestamped catches the list
+            # mid-render - measured returning a single row where a settled read
+            # returns nine - and a lone row wins its session by default. That
+            # is how a session came to be named after a chat it has nothing to
+            # do with.
             $rows = @()
-            for ($i = 0; $i -lt 12; $i++) {
+            $stable = 0
+            $lastCount = -1
+            for ($i = 0; $i -lt 20; $i++) {
                 Start-Sleep -Milliseconds 150
                 $rows = @(Get-ChatRows ($UiaEl::FromHandle($hwnd)))
-                if (@($rows | Where-Object { $_.When }).Count -gt 0) { break }
+                $n = @($rows | Where-Object { $_.When }).Count
+                if ($n -gt 0 -and $n -eq $lastCount) {
+                    $stable++
+                    if ($stable -ge 2) { break }
+                } else {
+                    $stable = 0
+                }
+                $lastCount = $n
             }
             $results += ,$rows
         }
@@ -1373,25 +1441,113 @@ function Select-SearchWindow {
     return $wins[0]
 }
 
-# Which of a set of proposed namings are safe to apply. A title claimed by two
-# sessions is dropped rather than given to either: the whole value of a real
-# chat title is that it identifies the conversation, and one hung on the wrong
-# session is worse than none at all.
+# Pairs sessions to chat rows, one row each.
+#
+# Every session picking independently makes them all reach for the freshest
+# row, and then the one-title-one-session rule refuses the lot - so several
+# sessions running at once produced no names at all. They are pairs to be
+# assigned, not a race to be won.
+#
+# Both sides are ordered by how recently they moved and matched in that order:
+# the session that moved most recently takes the freshest row it could
+# plausibly be, the next takes the freshest of what is left, and so on. Where a
+# session has no plausible row left it simply goes unnamed.
+#
+#   $sessions : objects with .Dir and .Age (minutes since its last message)
+#   $rows     : objects with .Title and .When
+# Returns objects with .Dir and .Title.
+function Select-SessionRowPairs($sessions, $rows) {
+    $cands = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt @($rows).Count; $i++) {
+        $m = ConvertTo-AgeMinutes $rows[$i].When
+        if ($null -eq $m) { continue }
+        if (-not $rows[$i].Title) { continue }
+        [void]$cands.Add([pscustomobject]@{ Title = $rows[$i].Title; Age = $m; Rank = $i })
+    }
+    if ($cands.Count -eq 0) { return @() }
+    # Freshest first, ties broken by the order the search put them in.
+    $pool = New-Object System.Collections.ArrayList
+    foreach ($c in @($cands | Sort-Object Age, Rank)) { [void]$pool.Add($c) }
+
+    $out = New-Object System.Collections.ArrayList
+    $ordered = @($sessions | Where-Object { $null -ne $_.Age -and [double]$_.Age -ge 0 } | Sort-Object Age)
+    for ($k = 0; $k -lt $ordered.Count; $k++) {
+        $s = $ordered[$k]
+        $age = [double]$s.Age
+        # Two sessions less than a minute apart cannot be ordered against rows
+        # that are only stamped to the minute, and this whole pairing rests on
+        # that order being real. Rather than let a coin toss hand out a name,
+        # neither is named. The lag is what makes the order usable at all: it
+        # runs at much the same size across chats, so it shifts every row by a
+        # similar amount and leaves their sequence intact.
+        $tooClose = $false
+        if ($k -gt 0 -and [Math]::Abs($age - [double]$ordered[$k-1].Age) -lt 1.0) { $tooClose = $true }
+        if ($k -lt $ordered.Count - 1 -and [Math]::Abs([double]$ordered[$k+1].Age - $age) -lt 1.0) { $tooClose = $true }
+        if ($tooClose) { continue }
+
+        # The same lopsided window as a lone pick: a little slack below for
+        # rounding, a lot above because Scout's timestamps lag and never lead.
+        $lo = [Math]::Max(0.0, $age * 0.5 - 2.0)
+        $hi = $age + [Math]::Max(20.0, $age * 0.5)
+        $take = $null
+        foreach ($c in $pool) {
+            if ($c.Age -lt $lo -or $c.Age -gt $hi) { continue }
+            $take = $c; break
+        }
+        if (-not $take) { continue }
+        [void]$pool.Remove($take)
+        [void]$out.Add([pscustomobject]@{ Dir = $s.Dir; Title = $take.Title })
+    }
+    return @($out)
+}
+
+# Which of a set of proposed namings are safe to apply, given what other
+# sessions already answer to.
+#
+# A title identifies exactly one conversation, so it can belong to exactly one
+# session. Two sessions wanting the same row is not a tie to be broken - the
+# whole value of a real chat title is that it picks out one conversation, and
+# one hung on the wrong session is worse than none at all.
+#
+# Contested titles are also taken back off whoever already holds them. That
+# looks harsh, and it is the point: nothing here says which claimant was right,
+# and leaving the incumbent named on "first come, first served" would keep a
+# name that has just been shown to be unreliable. Observed for real - two
+# automations and a chat session in one folder, all three answering to
+# "Scout Companion" because each was scanned while it was the only one without
+# a name.
 #
 # Takes and returns plain data so the rule can be tested without a sidebar.
-function Select-TitleAssignments($proposals) {
+#   $proposals : objects with .Dir and .Title
+#   $taken     : title -> dir, for titles already held
+# Returns .Assign (dir -> title) and .Revoke (dirs that must lose theirs).
+function Select-TitleAssignments($proposals, $taken) {
+    if (-not $taken) { $taken = @{} }
+
     $byTitle = @{}
     foreach ($p in @($proposals)) {
         if (-not $p -or -not $p.Dir -or -not $p.Title) { continue }
         if ($byTitle.ContainsKey($p.Title)) { $byTitle[$p.Title] = $null; continue }
         $byTitle[$p.Title] = $p.Dir
     }
-    $out = @{}
+
+    $assign = @{}
+    $revoke = New-Object System.Collections.ArrayList
     foreach ($t in @($byTitle.Keys)) {
-        $dir = $byTitle[$t]
-        if ($dir) { $out[$dir] = $t }
+        $dir    = $byTitle[$t]
+        $holder = $taken[$t]
+        # Contested inside this pass. Whoever holds it loses it too.
+        if (-not $dir) {
+            if ($holder) { [void]$revoke.Add($holder) }
+            continue
+        }
+        # Already correctly held by this very session.
+        if ($holder -eq $dir) { continue }
+        # Held by a different session: neither can keep it.
+        if ($holder) { [void]$revoke.Add($holder); continue }
+        $assign[$dir] = $t
     }
-    return $out
+    return [pscustomobject]@{ Assign = $assign; Revoke = @($revoke) }
 }
 
 # Puts Scout's own name to the sessions being followed, read off its own chat
@@ -1441,27 +1597,66 @@ function Update-SessionTitles {
     $script:ChatScanLooked = $true
     if ($lists.Count -eq 0) { return $false }
 
-    $proposals = @()
-    for ($i = 0; $i -lt $dirs.Count -and $i -lt $lists.Count; $i++) {
+    # The rows are much the same list whichever query fetched them - measured:
+    # five very different queries returned the same nine chats in nearly the
+    # same order, so the search barely narrows anything and the timestamp is
+    # doing all the work. Still, a query can surface a chat the others miss, so
+    # the lists are merged rather than one being picked: one entry per title,
+    # carrying the freshest time any query showed for it.
+    $merged = [ordered]@{}
+    foreach ($l in $lists) {
+        foreach ($r in @($l)) {
+            if (-not $r -or -not $r.Title -or -not $r.When) { continue }
+            $m = ConvertTo-AgeMinutes $r.When
+            if ($null -eq $m) { continue }
+            $prev = $merged[$r.Title]
+            if ($prev -and (ConvertTo-AgeMinutes $prev.When) -le $m) { continue }
+            $merged[$r.Title] = $r
+        }
+    }
+    $rows = @($merged.Values)
+    if ($rows.Count -eq 0) { return $false }
+
+    $wanting = @()
+    for ($i = 0; $i -lt $dirs.Count; $i++) {
         $rec = $Sessions[$dirs[$i]]
         if (-not $rec -or $rec.ChatTitle) { continue }
-        $rows = @($lists[$i] | Where-Object { $_.When })
-        if ($rows.Count -eq 0) { continue }
         # Measured from the last message, because that is the kind of thing the
         # sidebar's own "when" is measuring.
         $stamp = Get-LastMessageUtc $rec.Events
         if (-not $stamp) { $stamp = $rec.LastEventUtc }
         if (-not $stamp) { continue }
-        $pick = Select-ChatRow $rows ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
-        if (-not $pick -or -not $pick.Title) { continue }
-        $proposals += [pscustomobject]@{ Dir = $dirs[$i]; Title = $pick.Title }
+        $wanting += [pscustomobject]@{
+            Dir = $dirs[$i]
+            Age = [double]([datetime]::UtcNow - $stamp).TotalMinutes
+        }
     }
+    if ($wanting.Count -eq 0) { return $false }
+
+    $proposals = @(Select-SessionRowPairs $wanting $rows)
 
     $learned = $false
-    $safe = Select-TitleAssignments $proposals
-    foreach ($dir in @($safe.Keys)) {
-        $Sessions[$dir].ChatTitle = $safe[$dir]
-        Set-LearnedTitle $dir $safe[$dir]
+    # Everything already answering to a name, so a proposal cannot quietly take
+    # a title off another conversation. Both the sessions being followed and the
+    # store, since a session that has gone quiet still owns its name.
+    $taken = @{}
+    foreach ($d in $script:TitleStore.Keys) { $taken[$script:TitleStore[$d]] = $d }
+    foreach ($d in $Sessions.Keys) {
+        $t = $Sessions[$d].ChatTitle
+        if ($t) { $taken[$t] = $d }
+    }
+
+    $decision = Select-TitleAssignments $proposals $taken
+    foreach ($dir in @($decision.Assign.Keys)) {
+        $Sessions[$dir].ChatTitle = $decision.Assign[$dir]
+        Set-LearnedTitle $dir $decision.Assign[$dir]
+        $learned = $true
+    }
+    # A name two conversations both answer to identifies neither, so it goes
+    # back to being nameless rather than being left on whoever got there first.
+    foreach ($dir in @($decision.Revoke)) {
+        if ($Sessions.Contains($dir)) { $Sessions[$dir].ChatTitle = $null }
+        Remove-LearnedTitle $dir
         $learned = $true
     }
     if ($learned) { try { Resolve-SessionLabels } catch { } }

@@ -20,7 +20,7 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$nul
 $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
 foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow',
                  'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix',
-                 'Get-ShouldShow', 'Select-TitleAssignments')) {
+                 'Get-ShouldShow', 'Select-SessionRowPairs', 'Select-TitleAssignments')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -202,33 +202,91 @@ Same 'greeting shows even when idle'      (Get-ShouldShow @idleGreet) $true
 $bg = $busyFg.Clone(); $bg.IsForeground = $false
 Same 'busy in background -> shown'        (Get-ShouldShow @bg) $true
 
+Write-Host "`nSelect-SessionRowPairs"
+# Every session picking on its own reaches for the freshest row, and then the
+# one-title-one-session rule refuses the lot. They are pairs, not a race.
+function Sess($d, $age) { [pscustomobject]@{ Dir = $d; Age = [double]$age } }
+function Rw($t, $w)   { [pscustomobject]@{ Title = $t; When = $w } }
+
+$p1 = @(Select-SessionRowPairs @( (Sess 'C:\s\a' 0.1), (Sess 'C:\s\b' 5.0) ) @( (Rw 'Scout Companion' '9m ago'), (Rw 'MSX Oppty' '11m ago') ))
+Same 'the fresher session takes the fresher row' (($p1 | Where-Object { $_.Dir -eq 'C:\s\a' }).Title) 'Scout Companion'
+Same 'the older one takes what is left'          (($p1 | Where-Object { $_.Dir -eq 'C:\s\b' }).Title) 'MSX Oppty'
+
+# The lag is what makes the order usable: both rows read far older than either
+# session, and the pairing still comes out right because the lag shifts them
+# together rather than reshuffling them.
+$p2 = @(Select-SessionRowPairs @( (Sess 'C:\s\a' 0.1) ) @( (Rw 'Scout Companion' '9m ago') ))
+Same 'a lone session takes the lone row'         $p2[0].Title 'Scout Companion'
+
+# Rows only carry whole minutes, so sessions closer together than that cannot
+# be ordered against them - and this pairing is nothing but that order.
+$p3 = @(Select-SessionRowPairs @( (Sess 'C:\s\a' 1.0), (Sess 'C:\s\b' 1.4) ) @( (Rw 'Scout Companion' 'Just now'), (Rw 'MSX Oppty' '2m ago') ))
+Same 'sessions too close to order name nobody'   $p3.Count 0
+
+# One row, two orderable sessions: the fresher takes it, the other goes without
+# rather than being handed something already spoken for.
+$p4 = @(Select-SessionRowPairs @( (Sess 'C:\s\a' 0.5), (Sess 'C:\s\b' 40.0) ) @( (Rw 'Scout Companion' 'Just now') ))
+Same 'only one row to go round'                  $p4.Count 1
+Same 'and the fresher session gets it'           $p4[0].Dir 'C:\s\a'
+
+# A row outside the window is no more use than no row at all.
+$p5 = @(Select-SessionRowPairs @( (Sess 'C:\s\a' 0.5) ) @( (Rw 'AI Governance v1.5' '6d ago') ))
+Same 'an implausible row is not taken'           $p5.Count 0
+
+Same 'no rows -> no pairs'                       (@(Select-SessionRowPairs @( (Sess 'C:\s\a' 1) ) @())).Count 0
+Same 'undated rows are not candidates'           (@(Select-SessionRowPairs @( (Sess 'C:\s\a' 1) ) @( (Rw 'Scout Companion' $null) ))).Count 0
+
 Write-Host "`nSelect-TitleAssignments"
 # A real chat title is only worth showing because it identifies the
 # conversation, so one hung on the wrong session is worse than none.
 function Pair($d, $t) { [pscustomobject]@{ Dir = $d; Title = $t } }
-$one = Select-TitleAssignments @( (Pair 'C:\s\a' 'AI Governance v1.5') )
-Same 'a single match is applied'          $one['C:\s\a'] 'AI Governance v1.5'
+$one = Select-TitleAssignments @( (Pair 'C:\s\a' 'AI Governance v1.5') ) $null
+Same 'a single match is applied'          $one.Assign['C:\s\a'] 'AI Governance v1.5'
+Same 'and nothing is taken away'          $one.Revoke.Count 0
 
-$two = Select-TitleAssignments @( (Pair 'C:\s\a' 'AI Governance v1.5'), (Pair 'C:\s\b' 'Scout Companion') )
-Same 'two sessions, two titles (a)'       $two['C:\s\a'] 'AI Governance v1.5'
-Same 'two sessions, two titles (b)'       $two['C:\s\b'] 'Scout Companion'
+$two = Select-TitleAssignments @( (Pair 'C:\s\a' 'AI Governance v1.5'), (Pair 'C:\s\b' 'Scout Companion') ) $null
+Same 'two sessions, two titles (a)'       $two.Assign['C:\s\a'] 'AI Governance v1.5'
+Same 'two sessions, two titles (b)'       $two.Assign['C:\s\b'] 'Scout Companion'
 
 # Both sessions landed on the same row: genuinely ambiguous, so neither is named.
-$clash = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation') )
-Same 'a contested title names nobody (a)' $clash['C:\s\a'] $null
-Same 'a contested title names nobody (b)' $clash['C:\s\b'] $null
-Same 'and nothing else sneaks through'    $clash.Count 0
+$clash = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation') ) $null
+Same 'a contested title names nobody'     $clash.Assign.Count 0
 
 # A third claimant must not un-contest a title the first two already spoiled.
-$three = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation'), (Pair 'C:\s\c' 'RoB Automation') )
-Same 'still nobody with three claimants'  $three.Count 0
+$three = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation'), (Pair 'C:\s\c' 'RoB Automation') ) $null
+Same 'still nobody with three claimants'  $three.Assign.Count 0
 
-$mixed = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation'), (Pair 'C:\s\c' 'Team 1on1') )
-Same 'a clean match survives a clash'     $mixed['C:\s\c'] 'Team 1on1'
-Same 'and only that one'                  $mixed.Count 1
+$mixed = Select-TitleAssignments @( (Pair 'C:\s\a' 'RoB Automation'), (Pair 'C:\s\b' 'RoB Automation'), (Pair 'C:\s\c' 'Team 1on1') ) $null
+Same 'a clean match survives a clash'     $mixed.Assign['C:\s\c'] 'Team 1on1'
+Same 'and only that one'                  $mixed.Assign.Count 1
 
-Same 'nothing proposed -> nothing'        (Select-TitleAssignments @()).Count 0
-Same 'junk proposals are dropped'         (Select-TitleAssignments @( (Pair 'C:\s\a' $null), (Pair $null 'x'), $null )).Count 0
+Same 'nothing proposed -> nothing'        (Select-TitleAssignments @() $null).Assign.Count 0
+Same 'junk proposals are dropped'         (Select-TitleAssignments @( (Pair 'C:\s\a' $null), (Pair $null 'x'), $null ) $null).Assign.Count 0
+
+Write-Host "`nSelect-TitleAssignments: titles already spoken for"
+# The case that actually happened: sessions named one at a time, each the only
+# one without a name at the moment it was scanned, all ending up as the same
+# conversation. Nothing catches that unless what others answer to is consulted.
+$held = @{ 'Scout Companion' = 'C:\s\a' }
+$steal = Select-TitleAssignments @( (Pair 'C:\s\b' 'Scout Companion') ) $held
+Same 'a taken title is not handed out'    $steal.Assign.Count 0
+Same 'and the holder loses it too'        ($steal.Revoke -join ',') 'C:\s\a'
+
+# Re-proposing what a session already answers to is not a collision.
+$same = Select-TitleAssignments @( (Pair 'C:\s\a' 'Scout Companion') ) $held
+Same 'its own title is left alone'        $same.Assign.Count 0
+Same 'and not revoked'                    $same.Revoke.Count 0
+
+# A clash inside the pass, over a title someone else already holds.
+$both = Select-TitleAssignments @( (Pair 'C:\s\b' 'Scout Companion'), (Pair 'C:\s\c' 'Scout Companion') ) $held
+Same 'nobody gains it'                    $both.Assign.Count 0
+Same 'the holder still loses it'          ($both.Revoke -join ',') 'C:\s\a'
+
+# An unrelated title is unaffected by a collision elsewhere.
+$mix2 = Select-TitleAssignments @( (Pair 'C:\s\b' 'Scout Companion'), (Pair 'C:\s\c' 'Expense') ) $held
+Same 'the clean one still lands'          $mix2.Assign['C:\s\c'] 'Expense'
+Same 'the contested one does not'         $mix2.Assign.ContainsKey('C:\s\b') $false
 
 Write-Host ("`n{0} passed, {1} failed" -f $script:Pass, $script:Fail)
 if ($script:Fail -gt 0) { exit 1 }
+
