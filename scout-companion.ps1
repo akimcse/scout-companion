@@ -61,6 +61,38 @@ if (-not ('ScoutNative' -as [type])) {
 
         [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
         public static extern int DwmSetWindowAttribute(System.IntPtr hwnd, int attr, ref int value, int size);
+
+        // Electron keeps several top-level windows inside one process, and
+        // Process.MainWindowHandle only ever names one of them. Counting
+        // processes therefore says "one window" while two are on screen, which
+        // is exactly the case the Allow/Deny guard exists to catch.
+        public delegate bool EnumProc(System.IntPtr hWnd, System.IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool EnumWindows(EnumProc cb, System.IntPtr lParam);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool IsWindowVisible(System.IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern int GetWindowTextLength(System.IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint pid);
+
+        public static System.Collections.Generic.List<System.IntPtr> TopLevelWindows(
+                System.Collections.Generic.HashSet<uint> pids) {
+            var found = new System.Collections.Generic.List<System.IntPtr>();
+            EnumWindows(delegate (System.IntPtr h, System.IntPtr l) {
+                if (!IsWindowVisible(h)) return true;
+                if (GetWindowTextLength(h) == 0) return true;
+                uint owner;
+                GetWindowThreadProcessId(h, out owner);
+                if (pids.Contains(owner)) found.Add(h);
+                return true;
+            }, System.IntPtr.Zero);
+            return found;
+        }
 '@
 }
 
@@ -94,6 +126,16 @@ $Config = [ordered]@{
     # session history, so the resolved session is cached and only re-resolved
     # this often. Between rescans the companion just stats the file it is tailing.
     sessionRescanMs     = 5000
+    # How often to look for Scout's own chat titles in a sidebar that is
+    # already open. Only ever a read - nothing is clicked, typed or focused -
+    # and it is skipped entirely once every session has a name. Set to 0 to
+    # never look.
+    chatTitleScanMs     = 15000
+    # Reading a sidebar means walking an accessibility tree with hundreds of
+    # nodes in it, and most of the time there is nothing there to learn, so the
+    # interval doubles on every fruitless look up to this ceiling. It drops
+    # back to chatTitleScanMs as soon as a conversation turns up without a name.
+    chatTitleScanMaxMs  = 300000
     # Mascot frame interval. 80 ms (12.5 fps) is smooth enough for a bob and a
     # typing paw, and costs roughly half of the old 50 ms (20 fps).
     animIntervalMs      = 80
@@ -110,6 +152,16 @@ $Config = [ordered]@{
     # but wrong for anyone running, say, an English UI with Korean formats.
     language            = 'auto'
     maxSteps            = 4
+    # Open, Answer and the tray try to land on the chat that raised the prompt
+    # rather than just whatever Scout was last showing. Turn this off to get the
+    # older behaviour of only bringing the window forward.
+    openMatchingSession = $true
+    # Show the toast for a moment at startup, whatever the rules would say.
+    # Launching the companion otherwise produces no visible sign that it worked:
+    # the toast hides while Scout has focus - which it does, because you just
+    # launched something - and Windows files a new tray icon into the hidden
+    # overflow flyout. Set to 0 to start silently.
+    startupGreetingSeconds = 5
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
 }
@@ -298,6 +350,8 @@ function New-SessionRecord([string]$dir, [string]$events) {
         Label        = $null
         BaseLabel    = $null
         Topic        = $null
+        Subject      = $null      # the latest thing asked for, used as a title
+        ChatTitle    = $null      # Scout's own name for this chat, once learnt
         Offset       = [long]0
         Saying       = $null
         Steps        = New-Object System.Collections.ArrayList
@@ -317,6 +371,9 @@ $State = [pscustomobject]@{
     LastEventUtc    = [datetime]::MinValue
     PendingPerms    = [ordered]@{}
     PendingAsks     = [ordered]@{}                # questions waiting on the user
+    # The session the step list and narration belong to, so the toast can name
+    # it. Merged from whichever session moved last, alongside its steps.
+    Primary         = $null
     AgentHwnd       = [IntPtr]::Zero
 }
 
@@ -325,6 +382,49 @@ $script:WinCache          = $null                  # last known agent window
 $script:LastTitleScanUtc  = [datetime]::MinValue   # throttle for the full process scan
 $script:SessionScanUtc    = [datetime]::MinValue   # throttle for the full session scan
 $script:StepSignature     = $null                  # last rendered step list
+$script:ChatScanUtc       = [datetime]::MinValue   # throttle for the sidebar read
+$script:ChatScanEvery     = 0                      # current backoff interval, ms
+$script:ChatScanSig       = $null                  # which sessions were still unnamed
+$script:ChatScanLooked    = $false                 # did the last scan get as far as searching
+
+# ---------------------------------------------------------------------------
+# Learned chat titles.
+#
+# Scout's own name for a chat costs a sidebar read to work out, and without
+# somewhere to keep it that work is thrown away almost immediately: the title
+# lives on the session record, and the record is dropped as soon as the session
+# goes quiet - and again on every restart. A title learned once should stay
+# learned, so it is written next to the config, keyed by session folder.
+# ---------------------------------------------------------------------------
+$TitleStorePath = Join-Path $ScriptDir 'titles.json'
+$script:TitleStore = @{}
+
+function Import-TitleStore {
+    if (-not (Test-Path $TitleStorePath)) { return }
+    try {
+        $o = Get-Content $TitleStorePath -Raw | ConvertFrom-Json
+        foreach ($p in $o.PSObject.Properties) {
+            # Sessions are deleted eventually, and their titles would otherwise
+            # accumulate forever in a file nobody ever prunes.
+            if ($p.Value -and (Test-Path $p.Name)) { $script:TitleStore[$p.Name] = [string]$p.Value }
+        }
+    } catch { }
+}
+
+function Save-TitleStore {
+    try {
+        $o = [ordered]@{}
+        foreach ($k in ($script:TitleStore.Keys | Sort-Object)) { $o[$k] = $script:TitleStore[$k] }
+        ($o | ConvertTo-Json -Depth 3) | Set-Content -Path $TitleStorePath -Encoding UTF8
+    } catch { }
+}
+
+function Set-LearnedTitle([string]$dir, [string]$title) {
+    if (-not $dir -or -not $title) { return }
+    if ($script:TitleStore[$dir] -eq $title) { return }
+    $script:TitleStore[$dir] = $title
+    Save-TitleStore
+}
 
 # ---------------------------------------------------------------------------
 # Helpers.
@@ -404,6 +504,18 @@ function Get-AgentWindow {
     # Fast path: the handle found last time is almost always still valid, so a
     # cheap IsWindow check replaces a full process enumeration on most ticks.
     if ($script:WinCache -and [ScoutNative]::IsWindow($script:WinCache.Hwnd)) {
+        # One process, several windows. If the window in front belongs to the
+        # same process, that is the one the user is looking at, and holding on
+        # to a stale sibling would make the toast think the agent is in the
+        # background while it is filling the screen.
+        $fg = [ScoutNative]::GetForegroundWindow()
+        if ($fg -ne [IntPtr]::Zero -and $fg -ne $script:WinCache.Hwnd) {
+            $owner = [uint32]0
+            [void][ScoutNative]::GetWindowThreadProcessId($fg, [ref]$owner)
+            if ($owner -eq [uint32]$script:WinCache.Pid) {
+                $script:WinCache = @{ Hwnd = $fg; Pid = [int]$owner }
+            }
+        }
         return $script:WinCache
     }
     $script:WinCache = $null
@@ -556,6 +668,55 @@ function Get-SessionTopic([string]$events) {
     return $null
 }
 
+# The latest thing the user asked this session for. That is what the
+# conversation is about right now, and it is what makes a prompt on the toast
+# recognisable - far more so than the folder the session runs in, which reads
+# the same for every session on the same project.
+#
+# Taken from the tail rather than the head on purpose: a resumed session opens
+# with "carry on", and naming it that would be worse than useless.
+function Get-LastUserMessage([string]$events) {
+    try {
+        $fi = New-Object System.IO.FileInfo $events
+        if (-not $fi.Exists) { return $null }
+        $len = $fi.Length
+        if ($len -le 0) { return $null }
+        # A busy session buries the last thing the user said under megabytes of
+        # tool output, so the tail is widened a few times before giving up -
+        # rather than reading the whole file on a session that never had a
+        # message in it at all. Read line by line: splitting sixteen megabytes
+        # in one go would cost more memory than the rest of the app uses.
+        foreach ($take in @(262144, 2097152, 16777216)) {
+            $want = [Math]::Min($len, [long]$take)
+            $best = $null
+            $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+            try {
+                $fs.Seek($len - $want, 'Begin') | Out-Null
+                $sr = New-Object System.IO.StreamReader($fs)
+                while ($null -ne ($line = $sr.ReadLine())) {
+                    if ($line -notmatch '"type":"user\.message"') { continue }
+                    $o = $null
+                    try { $o = $line | ConvertFrom-Json } catch { continue }
+                    if ($o.data.content) { $best = $o.data.content }
+                }
+            } finally { $fs.Dispose() }
+            if ($best) { return (Truncate $best 40) }
+            if ($want -ge $len) { break }
+        }
+    } catch { }
+    return $null
+}
+
+# What the toast calls a session. Scout's own chat title if that has been learnt
+# - it only can be once Open has driven the sidebar - otherwise the latest
+# request. Returns nothing when neither exists, so the caller falls back to the
+# older folder-name rule rather than presenting a folder as a title.
+function Get-SessionSubject($rec) {
+    if ($rec.ChatTitle) { return $rec.ChatTitle }
+    if ($rec.Subject)   { return $rec.Subject }
+    return $null
+}
+
 function Resolve-SessionLabels {
     # Two windows on the same project produce the same cwd, and a label that
     # cannot tell them apart is worse than no label - it names a session
@@ -564,6 +725,9 @@ function Resolve-SessionLabels {
     $byLabel = @{}
     foreach ($dir in $Sessions.Keys) {
         $rec = $Sessions[$dir]
+        # Scout's own title for the chat needs no disambiguating: it is the name
+        # the user reads in the sidebar, and two sessions cannot share a chat.
+        if ($rec.ChatTitle) { $rec.Label = $rec.ChatTitle; continue }
         if (-not $byLabel.ContainsKey($rec.BaseLabel)) { $byLabel[$rec.BaseLabel] = New-Object System.Collections.ArrayList }
         [void]$byLabel[$rec.BaseLabel].Add($rec)
     }
@@ -605,6 +769,15 @@ function Sync-Sessions {
         $rec = New-SessionRecord $s.Dir $s.Events
         $rec.BaseLabel = Get-SessionLabel $s.Dir $s.Events
         $rec.Label     = $rec.BaseLabel
+        # Seeded once from the file, then kept current by Handle-Event as the
+        # user types. Without the seed a session already underway would have no
+        # name until its next message.
+        $rec.Subject   = Get-LastUserMessage $s.Events
+        # A title learned on an earlier run, or before this session last went
+        # quiet. Cheaper and steadier than working it out again, and it means
+        # the name on the toast survives a restart.
+        $t = $script:TitleStore[$s.Dir]
+        if ($t) { $rec.ChatTitle = $t }
         # Start at the end: replaying a whole history would re-raise approvals
         # that were answered long ago.
         $rec.Offset = (New-Object System.IO.FileInfo $s.Events).Length
@@ -657,13 +830,51 @@ function Read-NewEvents {
     foreach ($dir in @($Sessions.Keys)) {
         try { Read-SessionEvents $Sessions[$dir] } catch { }
     }
+
+    # Separate throttle: a sidebar read is much more expensive than a file stat,
+    # and unlike the session scan it is usually pointless - it can only learn
+    # anything while a sidebar is open in front of it, with its search field
+    # open too. Measured at half again the companion's whole CPU cost when run
+    # flat out, so a fruitless look backs off and an unnamed conversation
+    # turning up brings it straight back.
+    $base = [double]$Config.chatTitleScanMs
+    if ($base -gt 0) {
+        $unnamed = @($Sessions.Keys | Where-Object { -not $Sessions[$_].ChatTitle } | Sort-Object)
+        $sig = ($unnamed -join '|')
+        if ($sig -ne $script:ChatScanSig) {
+            $script:ChatScanSig   = $sig
+            $script:ChatScanEvery = $base
+        }
+        if ($script:ChatScanEvery -le 0) { $script:ChatScanEvery = $base }
+        if ($sig -and ([datetime]::UtcNow - $script:ChatScanUtc).TotalMilliseconds -ge $script:ChatScanEvery) {
+            $script:ChatScanUtc = [datetime]::UtcNow
+            $got = $false
+            try { $got = Update-SessionTitles } catch { }
+            if ($got) { $script:ChatScanEvery = $base }
+            elseif ($script:ChatScanLooked) {
+                # Looked and found nothing: worth trying less often.
+                $cap = [double]$Config.chatTitleScanMaxMs
+                $script:ChatScanEvery = [Math]::Min($script:ChatScanEvery * 2, $cap)
+            }
+            # Otherwise it never got to look - almost always because a Scout
+            # window was in front - which says nothing about whether there is
+            # anything to find, so the interval stays where it is. Backing off
+            # for that reason is what stopped it ever learning anything while
+            # the app was being used.
+        }
+    }
 }
 
-# Names the session a prompt came from, but only when more than one is being
-# followed - in the ordinary single-session case the label is noise.
+# Names the conversation a prompt came from. Always, now that it can say
+# something worth reading: Scout's own chat title once it has been read off the
+# sidebar, and until then the latest thing that session was asked to do. Only a
+# bare folder name stays behind the "more than one session" rule it always had,
+# because on its own it says almost nothing.
 function Where-From($item) {
+    if (-not $item) { return '' }
+    if ($item.title) { return "  -  $($item.title)" }
     if ($Sessions.Count -le 1) { return '' }
-    if (-not $item -or -not $item.session) { return '' }
+    if (-not $item.session) { return '' }
     return "  -  $($item.session)"
 }
 
@@ -682,10 +893,10 @@ function Merge-SessionState {
         $rec = $Sessions[$dir]
         if ($rec.TurnActive) { $turn = $true }
         foreach ($k in $rec.PendingPerms.Keys) {
-            $v = $rec.PendingPerms[$k]; $v.session = $rec.Label; $perms[$k] = $v
+            $v = $rec.PendingPerms[$k]; $v.session = $rec.Label; $v.title = (Get-SessionSubject $rec); $perms[$k] = $v
         }
         foreach ($k in $rec.PendingAsks.Keys) {
-            $v = $rec.PendingAsks[$k]; $v.session = $rec.Label; $asks[$k] = $v
+            $v = $rec.PendingAsks[$k]; $v.session = $rec.Label; $v.title = (Get-SessionSubject $rec); $asks[$k] = $v
         }
     }
 
@@ -698,6 +909,8 @@ function Merge-SessionState {
         $State.Saying       = $primary.Saying
         $State.Steps        = $primary.Steps
         $State.LastEventUtc = $primary.LastEventUtc
+        # Shaped like a pending prompt so the same naming rule covers both.
+        $State.Primary      = @{ session = $primary.Label; title = (Get-SessionSubject $primary) }
     }
 }
 
@@ -706,6 +919,12 @@ function Handle-Event($sess, $evt) {
     switch ($evt.type) {
         'assistant.turn_start' { $sess.TurnActive = $true }
         'assistant.turn_end'   { $sess.TurnActive = $false }
+        'user.message' {
+            # Keeps the session's name current as the conversation moves on,
+            # without re-reading the file.
+            $txt = $evt.data.content
+            if ($txt) { $sess.Subject = Truncate $txt 40 }
+        }
         'assistant.message' {
             $txt = $evt.data.content; if (-not $txt) { $txt = $evt.data.text }
             if ($txt) { $sess.Saying = Truncate $txt 200 }
@@ -770,60 +989,94 @@ function Wake-AgentA11y([IntPtr]$hwnd) {
     [void][ScoutNative]::SendMessage($hwnd, 0x003D, [IntPtr]::Zero, [IntPtr](-25))
 }
 
-function Count-AgentWindows {
-    # How many agent windows are on screen. Matters because a pending approval
-    # cannot be traced back to the window that raised it: the session lock names
-    # a backend process, not the UI one.
-    $n = 0
-    $procs = $null
-    try { $procs = Get-Process -ErrorAction SilentlyContinue } catch { return 1 }
-    $seen = @{}
+function Get-AgentPids {
+    $pids = New-Object 'System.Collections.Generic.HashSet[uint32]'
+    $all = $null
+    try { $all = Get-Process -ErrorAction SilentlyContinue } catch { return $pids }
     foreach ($name in $Config.processNames) {
-        foreach ($p in @($procs | Where-Object { $_.ProcessName -like "*$name*" })) {
-            if ($p.MainWindowHandle -eq [IntPtr]::Zero) { continue }
-            if ($seen.ContainsKey($p.Id)) { continue }
-            $seen[$p.Id] = $true
-            $n++
+        foreach ($p in @($all | Where-Object { $_.ProcessName -like "*$name*" })) {
+            if ($Config.browserProcs -contains $p.ProcessName) { continue }
+            [void]$pids.Add([uint32]$p.Id)
         }
     }
-    return $n
+    return $pids
 }
 
-function Invoke-AgentButton([string[]]$labels) {
-    # Refuse to guess when several agent windows are open. Clicking Allow in the
-    # wrong window would approve something the user never saw, which is a far
-    # worse failure than making them click it themselves.
-    if ((Count-AgentWindows) -gt 1) { return $false }
+function Get-AgentWindows {
+    # Every visible top-level agent window, not one per process. Electron keeps
+    # several windows inside a single process, so asking the process for its
+    # "main" window finds one of them and quietly ignores the rest.
+    $pids = Get-AgentPids
+    if ($pids.Count -eq 0) { return @() }
+    try { return @([ScoutNative]::TopLevelWindows($pids)) } catch { return @() }
+}
 
-    $win = Get-AgentWindow
-    if (-not $win) { return $false }
-    Wake-AgentA11y $win.Hwnd
-    Start-Sleep -Milliseconds 350
-    try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($win.Hwnd) } catch { return $false }
-    if (-not $root) { return $false }
+function Find-AgentButton([IntPtr]$hwnd, [string[]]$labels) {
+    # The button with one of these captions in this window, but only if it is
+    # actually on screen. Being on screen is the whole signal: Scout keeps its
+    # approval buttons in the automation tree whether or not a prompt is up, so
+    # mere presence would name every window equally.
+    $root = $null
+    try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd) } catch { return $null }
+    if (-not $root) { return $null }
 
     $btnCond = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
         [System.Windows.Automation.ControlType]::Button)
-    $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond)
+    $buttons = $null
+    try { $buttons = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond) } catch { return $null }
+    if (-not $buttons) { return $null }
 
+    # Exact caption first, so a plain "Allow" is taken over "Allow everywhere"
+    # when Scout offers both.
     foreach ($label in $labels) {
         foreach ($b in $buttons) {
             $n = $b.Current.Name
-            if ($n -and ($n.Trim().ToLower() -eq $label.ToLower()) -and -not $b.Current.IsOffscreen) {
-                try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch { }
-            }
+            if ($n -and ($n.Trim().ToLower() -eq $label.ToLower()) -and -not $b.Current.IsOffscreen) { return $b }
         }
     }
     foreach ($label in $labels) {
         foreach ($b in $buttons) {
             $n = $b.Current.Name
-            if ($n -and ($n -ilike "*$label*") -and -not $b.Current.IsOffscreen) {
-                try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch { }
-            }
+            if ($n -and ($n -ilike "*$label*") -and -not $b.Current.IsOffscreen) { return $b }
         }
     }
-    return $false
+    return $null
+}
+
+function Invoke-AgentButton([string[]]$labels) {
+    # Which window raised a pending approval cannot be read from the session
+    # state - the lock names a backend process, not a UI one - but it can be
+    # seen. The window showing the prompt is the window with the button on
+    # screen, so look in all of them and act only when exactly one qualifies.
+    #
+    # Counting windows and refusing above one, as this did before, meant that
+    # simply having a second Scout window open turned Allow and Deny into
+    # nothing at all - and three windows is an ordinary way to work. The safety
+    # property is unchanged: two windows both showing a prompt is genuinely
+    # ambiguous, and that still refuses rather than guessing.
+    $wins = @(Get-AgentWindows)
+    if ($wins.Count -eq 0) {
+        $w = Get-AgentWindow
+        if (-not $w) { return $false }
+        $wins = @($w.Hwnd)
+    }
+
+    # Wake them all before reading any, so one sleep covers the set.
+    foreach ($h in $wins) { Wake-AgentA11y $h }
+    Start-Sleep -Milliseconds 350
+
+    $hits = @()
+    foreach ($h in $wins) {
+        $b = Find-AgentButton $h $labels
+        if ($b) { $hits += $b }
+    }
+    if ($hits.Count -ne 1) { return $false }
+
+    try {
+        $hits[0].GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+        return $true
+    } catch { return $false }
 }
 
 function Focus-Agent {
@@ -833,6 +1086,517 @@ function Focus-Agent {
     [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
 }
 
+# ---------------------------------------------------------------------------
+# Opening the chat a prompt actually came from.
+#
+# Scout's chats and the folders this companion follows are two different id
+# namespaces. A chat in the sidebar is keyed by an id that never appears in
+# session-state, and the index that would bridge them is encrypted on disk, so
+# there is no lookup to do - the session cannot be named from the outside.
+#
+# What the sidebar does hand over, once its search field is open, is every
+# chat's title and how long ago it was last touched. So the chat is found the
+# way a person would find it: type something the session has talked about,
+# then take the row whose "when" agrees with when this session last moved.
+#
+# The search is semantic, so it is only trusted to bring the chat into view -
+# a long sentence pulls back near-noise, while a couple of words pulls back
+# the right handful. The timestamp is what decides, and when nothing agrees
+# the switch is abandoned rather than guessed at: sending someone to the wrong
+# conversation is worse than leaving them where they were.
+# ---------------------------------------------------------------------------
+$UiaEl   = [System.Windows.Automation.AutomationElement]
+$UiaTree = [System.Windows.Automation.TreeScope]
+$UiaType = [System.Windows.Automation.ControlType]
+
+function Find-UiaByName($root, [string]$name, $type) {
+    if (-not $root) { return $null }
+    try {
+        $cond = New-Object System.Windows.Automation.AndCondition(
+            (New-Object System.Windows.Automation.PropertyCondition($UiaEl::ControlTypeProperty, $type)),
+            (New-Object System.Windows.Automation.PropertyCondition($UiaEl::NameProperty, $name)))
+        return $root.FindFirst($UiaTree::Descendants, $cond)
+    } catch { return $null }
+}
+
+function Invoke-UiaElement($el) {
+    if (-not $el) { return $false }
+    try { $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true }
+    catch { return $false }
+}
+
+# A row reads "Pinned: <title> <when> More actions", with an optional
+# " Automation run" badge in between. Only <when> is load-bearing.
+function Split-ChatRow([string]$raw) {
+    $s = $raw -replace '^Pinned:\s*',''
+    $s = $s -replace '\s*More actions\s*$',''
+    $s = $s -replace '\s*Automation run\s*$',''
+    $when = $null
+    $pat = '\s+(Just now|\d+[smhd] ago|\d{1,2}/\d{1,2}/\d{4})$'
+    if ($s -match $pat) { $when = $Matches[1]; $s = $s -replace $pat,'' }
+    return [pscustomobject]@{ Title = $s.Trim(); When = $when }
+}
+
+function ConvertTo-AgeMinutes([string]$when) {
+    if (-not $when) { return $null }
+    if ($when -eq 'Just now')      { return 0.0 }
+    if ($when -match '^(\d+)s ago$') { return [double]$Matches[1] / 60.0 }
+    if ($when -match '^(\d+)m ago$') { return [double]$Matches[1] }
+    if ($when -match '^(\d+)h ago$') { return [double]$Matches[1] * 60 }
+    if ($when -match '^(\d+)d ago$') { return [double]$Matches[1] * 1440 }
+    # A bare date means the chat is old enough that Scout stopped counting, and
+    # it is parsed only so such rows can be ruled out rather than ignored.
+    if ($when -match '^\d{1,2}/\d{1,2}/\d{4}$') {
+        try { return ([datetime]::Now - [datetime]::Parse($when)).TotalMinutes } catch { return $null }
+    }
+    return $null
+}
+
+# Chat rows are the full-width buttons in the left column. Height is not fixed:
+# a row grows a line once the search field is open and it has to carry a
+# timestamp, which is exactly the state this runs in.
+function Get-ChatRows($root) {
+    $out = New-Object System.Collections.ArrayList
+    if (-not $root) { return @() }
+    $win = $root.Current.BoundingRectangle
+    $cond = New-Object System.Windows.Automation.PropertyCondition($UiaEl::ControlTypeProperty, $UiaType::Button)
+    foreach ($b in $root.FindAll($UiaTree::Descendants, $cond)) {
+        $c = $null; try { $c = $b.Current } catch { continue }
+        if ($c.IsOffscreen) { continue }
+        $r = $c.BoundingRectangle
+        # An element that was never laid out reports an infinite rect, which
+        # would blow up the cast to int further down.
+        if ([double]::IsInfinity($r.X) -or [double]::IsInfinity($r.Y)) { continue }
+        if ($r.X -gt ($win.X + 340)) { continue }
+        if ($r.Width -lt 260 -or $r.Width -gt 330) { continue }
+        if ($r.Height -lt 40 -or $r.Height -gt 96) { continue }
+        if (-not $c.Name -or $c.Name -notmatch 'More actions$') { continue }
+        $p = Split-ChatRow $c.Name
+        [void]$out.Add([pscustomobject]@{ Y = [int]$r.Y; Title = $p.Title; When = $p.When; El = $b })
+    }
+    return @($out | Sort-Object Y)
+}
+
+# Something the session has talked about, short enough that the search stays
+# sharp. The first thing asked for is the best handle; where the session was
+# resumed and opens with a bare "carry on", the project folder is the fallback.
+function Get-SessionQuery($rec) {
+    if (-not $rec) { return $null }
+    if (-not $rec.Topic) { $rec.Topic = Get-SessionTopic $rec.Events }
+    $q = $rec.Topic
+    if ($q) { $q = ($q -replace '\.\.\.$','').Trim() }
+    if (-not $q -or $q.Length -lt 3) { $q = $rec.BaseLabel }
+    if (-not $q) { return $null }
+    return (Truncate $q 40)
+}
+
+# The session a visible prompt belongs to, falling back to whichever session
+# moved last so the tray and the Open button still do something sensible when
+# nothing is pending.
+# Scout stamps a chat when a message lands in it, not when a tool runs, so a
+# session that has spent ten minutes grinding through tool calls still reads
+# "10m ago" in the sidebar while the companion has seen events all along.
+# Comparing those two clocks directly never matches, so the message clock is
+# read straight out of the file instead - only on a click, and only from the
+# tail, since these files reach tens of megabytes.
+function Get-LastMessageUtc([string]$events) {
+    try {
+        $fi = New-Object System.IO.FileInfo $events
+        if (-not $fi.Exists) { return $null }
+        $len  = $fi.Length
+        $take = [Math]::Min($len, 262144)
+        $chunk = $null
+        $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+        try {
+            $fs.Seek($len - $take, 'Begin') | Out-Null
+            $sr = New-Object System.IO.StreamReader($fs)
+            $chunk = $sr.ReadToEnd()
+        } finally { $fs.Dispose() }
+        if (-not $chunk) { return $null }
+
+        $best = $null
+        foreach ($line in ($chunk -split "`n")) {
+            if ($line -notmatch '"(assistant|user)\.message"') { continue }
+            # An event's own timestamp is the last one on the line; anything
+            # earlier belongs to the payload it carries.
+            $ms = [regex]::Matches($line, '"timestamp":"([^"]+)"')
+            if ($ms.Count -eq 0) { continue }
+            $t = $null
+            try { $t = [datetime]::Parse($ms[$ms.Count - 1].Groups[1].Value).ToUniversalTime() } catch { continue }
+            if (-not $best -or $t -gt $best) { $best = $t }
+        }
+        return $best
+    } catch { return $null }
+}
+
+# Picks the chat that belongs to a session last heard from $age minutes ago,
+# or nothing at all when the list holds no plausible candidate.
+#
+# The sidebar's timestamps lag, sometimes by ten minutes or more for a chat
+# that is not the one on screen. Crucially they only ever lag: a chat can be
+# shown as older than it really is, never younger. So the window is asymmetric
+# - a little slack below to absorb rounding, a lot above to absorb the lag -
+# and within it the freshest row wins, since the chat that raised the prompt is
+# the one that moved most recently.
+function Select-ChatRow($rows, [double]$age) {
+    if ($age -lt 0) { $age = 0 }
+    $lo = [Math]::Max(0.0, $age * 0.5 - 2.0)
+    $hi = $age + [Math]::Max(20.0, $age * 0.5)
+
+    $cands = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt @($rows).Count; $i++) {
+        $m = ConvertTo-AgeMinutes $rows[$i].When
+        if ($null -eq $m) { continue }
+        if ($m -lt $lo -or $m -gt $hi) { continue }
+        [void]$cands.Add([pscustomobject]@{ Row = $rows[$i]; Age = $m; Rank = $i })
+    }
+    # Nothing moved anywhere near when this session did. Rather than pick the
+    # most plausible-looking row, give up: the caller has already brought the
+    # window forward, which is what the user actually asked for.
+    if ($cands.Count -eq 0) { return $null }
+
+    # Freshest first, and where two chats share a timestamp the search's own
+    # ordering breaks the tie: it was asked about this session's topic, so the
+    # row it put higher is the one more likely to be this session.
+    return (@($cands | Sort-Object Age, Rank))[0].Row
+}
+
+# True when no Scout window is in front. Anything done to a window nobody is
+# looking at leaves no trace on screen, and that is the only condition under
+# which the sidebar gets touched: the alternative is making the user's own
+# window flicker to read a label off it.
+function Test-AgentUnobserved {
+    $fg = [ScoutNative]::GetForegroundWindow()
+    if ($fg -eq [IntPtr]::Zero) { return $true }
+    $owner = [uint32]0
+    try { [void][ScoutNative]::GetWindowThreadProcessId($fg, [ref]$owner) } catch { return $false }
+    $pids = Get-AgentPids
+    return (-not $pids.Contains([uint32]$owner))
+}
+
+# Reads Scout's chat list, with the timestamps that make a row identifiable.
+#
+# Typing is unavoidable, which took measuring to establish. A sidebar sitting
+# open lists 22 chats and not one carries a timestamp; put a query in the search
+# box and every row that comes back has one. The timestamp is the only thing
+# tying a row to a session - there is no selection marker to read, and the title
+# appears nowhere else in the window - so without typing there is nothing to
+# match on and nothing can be learned.
+#
+# Hence the rule the caller enforces: this only ever runs while no Scout window
+# is in front, so the search that gets typed and cleared is never on screen.
+# Whatever was open is put back, and a query the user left in the box is put
+# back with it.
+function Invoke-ChatSearch([IntPtr]$hwnd, [string[]]$queries) {
+    # Returns one row list per query, in order. An empty list means that query
+    # produced nothing usable.
+    $results = @()
+    Wake-AgentA11y $hwnd
+    Start-Sleep -Milliseconds 250
+    $root = $null
+    try { $root = $UiaEl::FromHandle($hwnd) } catch { return @() }
+    if (-not $root) { return @() }
+
+    $openedSidebar = $false
+    $openedSearch  = $false
+    $original      = $null
+    try {
+        if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) {
+            if (-not (Invoke-UiaElement (Find-UiaByName $root 'Show sidebar' $UiaType::Button))) { return @() }
+            $openedSidebar = $true
+            Start-Sleep -Milliseconds 350
+            $root = $UiaEl::FromHandle($hwnd)
+        }
+
+        $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+        if (-not $box) {
+            if (Invoke-UiaElement (Find-UiaByName $root 'Show chat search' $UiaType::Button)) {
+                $openedSearch = $true
+                Start-Sleep -Milliseconds 400
+                $root = $UiaEl::FromHandle($hwnd)
+                $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+            }
+        }
+        if (-not $box) { return @() }
+
+        # A query the user typed themselves is theirs; note it so it can go back.
+        try { $original = $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { }
+
+        foreach ($q in $queries) {
+            if (-not $q) { $results += ,@(); continue }
+            # No SetFocus. The field takes a value without the caret, and taking
+            # the caret would pull it out of whatever the user was typing in.
+            try { $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($q) }
+            catch { $results += ,@(); continue }
+
+            # Results arrive asynchronously, so poll rather than pay a fixed
+            # worst case on every query.
+            $rows = @()
+            for ($i = 0; $i -lt 12; $i++) {
+                Start-Sleep -Milliseconds 150
+                $rows = @(Get-ChatRows ($UiaEl::FromHandle($hwnd)))
+                if (@($rows | Where-Object { $_.When }).Count -gt 0) { break }
+            }
+            $results += ,$rows
+        }
+        return $results
+    } catch { return $results } finally {
+        try {
+            $root2 = $UiaEl::FromHandle($hwnd)
+            $b2 = Find-UiaByName $root2 'Search chats' $UiaType::Edit
+            if ($b2) {
+                $back = if ($original) { $original } else { '' }
+                try { $b2.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($back) } catch { }
+            }
+            Start-Sleep -Milliseconds 250
+            if ($openedSearch) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($hwnd)) 'Hide chat search' $UiaType::Button))
+            }
+            if ($openedSidebar) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($hwnd)) 'Hide sidebar' $UiaType::Button))
+            }
+        } catch { }
+    }
+}
+
+# The window to do that in: one that already has its sidebar open, so there is
+# less to disturb, and otherwise whichever comes first.
+function Select-SearchWindow {
+    $wins = @(Get-AgentWindows)
+    if ($wins.Count -eq 0) { return [IntPtr]::Zero }
+    foreach ($h in $wins) {
+        $r = $null
+        try { $r = $UiaEl::FromHandle($h) } catch { continue }
+        if (-not $r) { continue }
+        if (Find-UiaByName $r 'Hide sidebar' $UiaType::Button) { return $h }
+    }
+    return $wins[0]
+}
+
+# Which of a set of proposed namings are safe to apply. A title claimed by two
+# sessions is dropped rather than given to either: the whole value of a real
+# chat title is that it identifies the conversation, and one hung on the wrong
+# session is worse than none at all.
+#
+# Takes and returns plain data so the rule can be tested without a sidebar.
+function Select-TitleAssignments($proposals) {
+    $byTitle = @{}
+    foreach ($p in @($proposals)) {
+        if (-not $p -or -not $p.Dir -or -not $p.Title) { continue }
+        if ($byTitle.ContainsKey($p.Title)) { $byTitle[$p.Title] = $null; continue }
+        $byTitle[$p.Title] = $p.Dir
+    }
+    $out = @{}
+    foreach ($t in @($byTitle.Keys)) {
+        $dir = $byTitle[$t]
+        if ($dir) { $out[$dir] = $t }
+    }
+    return $out
+}
+
+# Puts Scout's own name to the sessions being followed, read off its own chat
+# sidebar. Runs only when some session is still unnamed.
+#
+# Refuses outright while a Scout window is in front. Learning a title means
+# typing into the chat search and clearing it again, and doing that to a window
+# someone is looking at would be exactly the overreach an earlier version of
+# this file had to walk back.
+#
+# Returns whether anything was learned, and sets $script:ChatScanLooked to say
+# whether it actually got as far as searching - the caller needs to tell "I
+# looked and there was nothing" from "I never got to look", because only the
+# first is a reason to try less often.
+function Update-SessionTitles {
+    $script:ChatScanLooked = $false
+    $want = @()
+    foreach ($dir in $Sessions.Keys) {
+        if (-not $Sessions[$dir].ChatTitle) { $want += $dir }
+    }
+    if ($want.Count -eq 0) { return $false }
+
+    $unobserved = $false
+    try { $unobserved = Test-AgentUnobserved } catch { }
+    if (-not $unobserved) { return $false }
+
+    $hwnd = [IntPtr]::Zero
+    try { $hwnd = Select-SearchWindow } catch { }
+    if ($hwnd -eq [IntPtr]::Zero) { return $false }
+    # One query per unnamed session, all in a single visit: opening and closing
+    # the sidebar once is less disturbance than doing it per session.
+    $queries = @()
+    $dirs    = @()
+    foreach ($dir in $want) {
+        $rec = $Sessions[$dir]
+        if (-not $rec) { continue }
+        $q = $null
+        try { $q = Get-SessionQuery $rec } catch { }
+        if (-not $q) { continue }
+        $queries += $q
+        $dirs    += $dir
+    }
+    if ($queries.Count -eq 0) { return $false }
+
+    $lists = @()
+    try { $lists = @(Invoke-ChatSearch $hwnd $queries) } catch { return $false }
+    $script:ChatScanLooked = $true
+    if ($lists.Count -eq 0) { return $false }
+
+    $proposals = @()
+    for ($i = 0; $i -lt $dirs.Count -and $i -lt $lists.Count; $i++) {
+        $rec = $Sessions[$dirs[$i]]
+        if (-not $rec -or $rec.ChatTitle) { continue }
+        $rows = @($lists[$i] | Where-Object { $_.When })
+        if ($rows.Count -eq 0) { continue }
+        # Measured from the last message, because that is the kind of thing the
+        # sidebar's own "when" is measuring.
+        $stamp = Get-LastMessageUtc $rec.Events
+        if (-not $stamp) { $stamp = $rec.LastEventUtc }
+        if (-not $stamp) { continue }
+        $pick = Select-ChatRow $rows ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+        if (-not $pick -or -not $pick.Title) { continue }
+        $proposals += [pscustomobject]@{ Dir = $dirs[$i]; Title = $pick.Title }
+    }
+
+    $learned = $false
+    $safe = Select-TitleAssignments $proposals
+    foreach ($dir in @($safe.Keys)) {
+        $Sessions[$dir].ChatTitle = $safe[$dir]
+        Set-LearnedTitle $dir $safe[$dir]
+        $learned = $true
+    }
+    if ($learned) { try { Resolve-SessionLabels } catch { } }
+    return $learned
+}
+
+function Get-RaisingSession {
+    foreach ($bag in @($State.PendingPerms, $State.PendingAsks)) {
+        foreach ($k in $bag.Keys) {
+            $label = $bag[$k].session
+            if (-not $label) { continue }
+            foreach ($dir in $Sessions.Keys) {
+                if ($Sessions[$dir].Label -eq $label) { return $Sessions[$dir] }
+            }
+        }
+    }
+    $best = $null
+    foreach ($dir in $Sessions.Keys) {
+        $rec = $Sessions[$dir]
+        if (-not $best -or $rec.LastEventUtc -gt $best.LastEventUtc) { $best = $rec }
+    }
+    return $best
+}
+
+function Open-AgentSession($rec) {
+    # Returns $true only when the sidebar was actually driven to this session.
+    if (-not $rec) { return $false }
+    if (-not $Config.openMatchingSession) { return $false }
+    $query = Get-SessionQuery $rec
+    if (-not $query) { return $false }
+
+    $win = Get-AgentWindow
+    if (-not $win) { return $false }
+    Wake-AgentA11y $win.Hwnd
+    Start-Sleep -Milliseconds 300
+    $root = $null
+    try { $root = $UiaEl::FromHandle($win.Hwnd) } catch { return $false }
+    if (-not $root) { return $false }
+
+    # The sidebar and its search field are both collapsible, and whatever was
+    # closed on the way in gets closed again on the way out - this is the
+    # user's window, not ours.
+    $openedSidebar = $false
+    $openedSearch  = $false
+    $typed         = $false
+    $navigated     = $false
+    try {
+        if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) {
+            if (Invoke-UiaElement (Find-UiaByName $root 'Show sidebar' $UiaType::Button)) {
+                $openedSidebar = $true
+                Start-Sleep -Milliseconds 350
+                $root = $UiaEl::FromHandle($win.Hwnd)
+            }
+        }
+
+        $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+        if (-not $box) {
+            if (Invoke-UiaElement (Find-UiaByName $root 'Show chat search' $UiaType::Button)) {
+                $openedSearch = $true
+                Start-Sleep -Milliseconds 400
+                $root = $UiaEl::FromHandle($win.Hwnd)
+                $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+            }
+        }
+        if (-not $box) { return $false }
+
+        # No SetFocus. The field takes a value without the caret, and taking the
+        # caret would pull it out of whatever the user was typing in.
+        try { $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($query) }
+        catch { return $false }
+        $typed = $true
+
+        # Results arrive asynchronously; poll rather than sleep for a fixed
+        # worst case, so the common fast answer is not paid for every time.
+        $rows = @()
+        for ($i = 0; $i -lt 12; $i++) {
+            Start-Sleep -Milliseconds 200
+            $rows = Get-ChatRows ($UiaEl::FromHandle($win.Hwnd))
+            if (@($rows | Where-Object { $_.When }).Count -gt 0) { break }
+        }
+
+        # Measured from the last message, because that is the kind of thing the
+        # sidebar's own "when" is measuring - a session grinding through tools
+        # for ten minutes has not "just" done anything as far as Scout's chat
+        # list is concerned.
+        $stamp = Get-LastMessageUtc $rec.Events
+        if (-not $stamp) { $stamp = $rec.LastEventUtc }
+        $pick = Select-ChatRow $rows ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+        if (-not $pick) { return $false }
+
+        # Now that the chat has been identified, remember what Scout calls it so
+        # the toast can name it from here on without looking again.
+        if ($pick.Title) {
+            $rec.ChatTitle = $pick.Title
+            Set-LearnedTitle $rec.Dir $pick.Title
+            try { Resolve-SessionLabels } catch { }
+        }
+        $navigated = Invoke-UiaElement $pick.El
+        if ($navigated) { Start-Sleep -Milliseconds 500 }
+        return $navigated
+    } finally {
+        # Put the sidebar back, but only touch what this function touched: a
+        # query the user typed themselves is theirs, not ours to clear.
+        try {
+            if ($typed) {
+                $root2 = $UiaEl::FromHandle($win.Hwnd)
+                if (-not (Invoke-UiaElement (Find-UiaByName $root2 'Clear search' $UiaType::Button))) {
+                    $b2 = Find-UiaByName $root2 'Search chats' $UiaType::Edit
+                    if ($b2) {
+                        try { $b2.SetFocus() } catch { }
+                        try { $b2.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('') } catch { }
+                    }
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            if ($openedSearch) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Hide chat search' $UiaType::Button))
+            }
+            if ($openedSidebar) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Hide sidebar' $UiaType::Button))
+            }
+        } catch { }
+    }
+}
+
+# What Open, Answer and the tray all mean: show me the thing that is asking.
+# Bringing the window forward is the part that must never fail, so it happens
+# first and the chat switch is a bonus on top of it.
+function Focus-AgentSession {
+    Focus-Agent
+    $rec = $null
+    try { $rec = Get-RaisingSession } catch { }
+    if (-not $rec) { return }
+    try { [void](Open-AgentSession $rec) } catch { }
+}
 # ---------------------------------------------------------------------------
 # WPF overlay UI (with animated quokka mascot).
 # ---------------------------------------------------------------------------
@@ -904,6 +1668,11 @@ function Focus-Agent {
             <Ellipse x:Name="Dot" Width="9" Height="9" Fill="#FF4ADE80" VerticalAlignment="Center" Margin="0,0,7,0" DockPanel.Dock="Left"/>
             <TextBlock x:Name="HeaderText" Text="Scout is working" Foreground="#FFE6EAF2" FontSize="13.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
           </DockPanel>
+          <!-- Which conversation the steps and narration below belong to. Its
+               own line, aligned under the header text rather than beside it: a
+               chat title is a sentence more often than a word. -->
+          <TextBlock x:Name="HeaderFrom" Margin="16,2,0,0" Text="" Foreground="#FF9AA6BE" FontSize="10.5"
+                     Opacity="0.85" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
           <TextBlock x:Name="SayingText" Margin="0,4,0,0" Text="" Foreground="#FF9AA6BE" FontSize="11"
                      FontStyle="Italic" TextWrapping="Wrap" MaxHeight="44" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
@@ -919,7 +1688,13 @@ function Focus-Agent {
       <Border x:Name="PermPanel" Margin="0,12,0,0" Padding="10" CornerRadius="9"
               Background="#FF2A2030" BorderBrush="#FFB4843C" BorderThickness="1" Visibility="Collapsed">
         <StackPanel>
-          <TextBlock x:Name="PermTitle" Text="&#x26A0; Permission requested" Foreground="#FF6A4A00" FontWeight="Bold" FontSize="13"/>
+          <TextBlock x:Name="PermTitle" Text="&#x26A0; Permission requested" Foreground="#FF6A4A00" FontWeight="Bold" FontSize="13"
+                     TextTrimming="CharacterEllipsis"/>
+          <!-- Which conversation is asking. Its own line, because a chat title
+               is a sentence more often than a word and would push the header
+               off the toast if it were appended to it. -->
+          <TextBlock x:Name="PermFrom" Margin="0,2,0,0" Text="" Foreground="#FFD6CFC2" FontSize="10.5"
+                     Opacity="0.85" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
           <TextBlock x:Name="PermText" Margin="0,5,0,0" Foreground="#FFD6CFC2" FontSize="11.5"
                      TextWrapping="Wrap" MaxHeight="90" TextTrimming="CharacterEllipsis"/>
           <!-- MinWidth, not Width. Fixed widths were fine in English and clipped
@@ -949,11 +1724,13 @@ $Window = [Windows.Markup.XamlReader]::Load($reader)
 
 $HeaderText   = $Window.FindName('HeaderText')
 $SayingText   = $Window.FindName('SayingText')
+$HeaderFrom   = $Window.FindName('HeaderFrom')
 $Dot          = $Window.FindName('Dot')
 $StepsPanel   = $Window.FindName('StepsPanel')
 $StepsText    = $Window.FindName('StepsText')
 $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
+$PermFrom     = $Window.FindName('PermFrom')
 $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
 $AnswerBtn    = $Window.FindName('AnswerBtn')
@@ -1000,6 +1777,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAlert
         $PermPanel.BorderBrush  = $Theme.PermBdAlert
         $PermText.Foreground    = $Theme.PermTxtAlert
+        $PermFrom.Foreground    = $Theme.PermTxtAlert
         $PermTitle.Foreground   = $Theme.AlertHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(255, 176, 0)
         $RootGlow.BlurRadius    = 20
@@ -1013,6 +1791,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAsk
         $PermPanel.BorderBrush  = $Theme.PermBdAsk
         $PermText.Foreground    = $Theme.PermTxtAsk
+        $PermFrom.Foreground    = $Theme.PermTxtAsk
         $PermTitle.Foreground   = $Theme.AskHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 150, 210)
         $RootGlow.BlurRadius    = 20
@@ -1026,6 +1805,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermFrom.Foreground    = $Theme.PermTxtNormal
         $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(56, 170, 100)
         $RootGlow.BlurRadius    = 22
@@ -1039,6 +1819,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermFrom.Foreground    = $Theme.PermTxtNormal
         $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 0, 0)
         $RootGlow.BlurRadius    = 20
@@ -1066,6 +1847,13 @@ $script:Pinned = $false
 $script:Pending = $false
 $script:Asking = $false
 $script:AgentGoneSince = $null
+# WPF's idea of whether the toast is on screen, and the window's real state,
+# start out disagreeing - see the reconciliation on the first tick.
+$script:VisibilityReconciled = $false
+# Until when the startup greeting keeps the toast up. Set once the poll loop is
+# about to start, so the greeting covers the moment the app becomes usable
+# rather than the moment the script began parsing.
+$script:GreetUntil = [datetime]::MinValue
 
 # The whole visibility policy, in one place and with no side effects, so the
 # ordering of the rules is reviewable and testable rather than buried in the
@@ -1078,10 +1866,14 @@ function Get-ShouldShow {
     param(
         [bool]$HasPending, [bool]$HasAsk, [bool]$IsActive,
         [bool]$AgentRunning, [bool]$IsMinimized, [bool]$IsForeground,
-        [bool]$Hidden, [bool]$Pinned
+        [bool]$Hidden, [bool]$Pinned, [bool]$Greeting
     )
     $show = $false
     if ($HasPending -or $HasAsk) { $show = $true }
+    # Ranked above the activity rule and below $Hidden on purpose: the greeting
+    # only has to survive the rule that would otherwise hide it at startup, and
+    # closing the toast has to still mean closed.
+    elseif ($Greeting) { $show = $true }
     elseif ($IsActive -and $AgentRunning -and ($IsMinimized -or -not $IsForeground)) { $show = $true }
     if ($Hidden) { $show = $false }
     if ($Pinned) { $show = $true }
@@ -1108,8 +1900,8 @@ $DenyBtn.Add_Click({
         foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
     } else { Focus-Agent }
 })
-$OpenBtn.Add_Click({ Focus-Agent })
-$AnswerBtn.Add_Click({ Focus-Agent })
+$OpenBtn.Add_Click({ Focus-AgentSession })
+$AnswerBtn.Add_Click({ Focus-AgentSession })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $script:Pinned = $false; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
 
@@ -1926,8 +2718,16 @@ function Apply-AutoStartFromUI {
       <TextBlock Text="Opacity" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
       <TextBlock x:Name="OpacityValue" Text="100%" Width="46" Foreground="#FFE6EAF2" VerticalAlignment="Center"
                  TextAlignment="Right" DockPanel.Dock="Right"/>
+      <!-- SmallChange and LargeChange are set explicitly because the defaults
+           are wrong for a range this narrow: LargeChange defaults to 1.0, which
+           is larger than the whole 0.35-1.0 range, so a click on the track
+           slammed the value to whichever end was clicked instead of stepping.
+           Both are one tick now, so a click and an arrow key each move by the
+           interval the ticks are drawn at. -->
       <Slider x:Name="OpacitySlider" Minimum="0.35" Maximum="1.0" Value="1.0"
-              TickFrequency="0.05" IsSnapToTickEnabled="True" VerticalAlignment="Center" Cursor="Hand"/>
+              TickFrequency="0.05" IsSnapToTickEnabled="True"
+              SmallChange="0.05" LargeChange="0.05"
+              VerticalAlignment="Center" Cursor="Hand"/>
     </DockPanel>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
@@ -2128,7 +2928,7 @@ $MenuShow.Add_Click({
         $script:Hidden = $false
     }
 })
-$MenuOpen.Add_Click({ Focus-Agent })
+$MenuOpen.Add_Click({ Focus-AgentSession })
 $MenuPause.Add_Click({
     # CheckOnClick has already flipped Checked by the time this runs.
     Sync-AnimationEnabled (-not $MenuPause.Checked) -Persist
@@ -2148,7 +2948,7 @@ $Tray.ContextMenuStrip = $TrayMenu
 
 # Double-clicking the tray icon brings the agent forward, matching the toast's
 # "Open" button.
-$Tray.Add_MouseDoubleClick({ Focus-Agent })
+$Tray.Add_MouseDoubleClick({ Focus-AgentSession })
 
 # ---------------------------------------------------------------------------
 # Mascot animation: a dedicated timer drives it frame-by-frame.
@@ -2352,6 +3152,30 @@ $anim.Add_Tick({
 # ---------------------------------------------------------------------------
 # Main loop: poll events + decide visibility + render.
 # ---------------------------------------------------------------------------
+# Puts the name of a conversation on a line of its own, or hides the line when
+# there is nothing worth saying. Used for both the prompt card and the header,
+# so a session is named the same way whichever part of the toast is showing it.
+function Set-FromLine($block, $item) {
+    $from = (Where-From $item) -replace '^\s*-\s*',''
+    if ($from) {
+        $block.Text = $from.Trim()
+        $block.Visibility = 'Visible'
+    } else {
+        $block.Text = ''
+        $block.Visibility = 'Collapsed'
+    }
+}
+
+# The "(+2)" after the header. One card can only show one prompt, so the count
+# has to speak for everything else still waiting - approvals and questions
+# together. Counting only the shown prompt's own kind was worse than no count
+# at all: an approval in front of two questions read as a lone approval, and
+# the questions left no trace on screen to say they were there.
+function Get-QueueSuffix([int]$total) {
+    if ($total -gt 1) { return " (+$($total - 1))" }
+    return ''
+}
+
 function Render-Steps {
     if ($State.Steps.Count -eq 0) {
         if ($null -ne $script:StepSignature) { $script:StepSignature = $null; $StepsPanel.Visibility = 'Collapsed' }
@@ -2443,11 +3267,17 @@ $timer.Add_Tick({
     }
 
     # content
+    # Both branches share one count, so whichever prompt is in front, the
+    # header still admits how much is queued behind it.
+    $extra = Get-QueueSuffix ($State.PendingPerms.Count + $State.PendingAsks.Count)
     if ($hasPending) {
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
-        $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
         $HeaderText.Text = (T 'Approval needed') + $extra
-        $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested') + (Where-From $first)
+        $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested')
+        Set-FromLine $PermFrom $first
+        # The card already names the asking conversation, and it need not be the
+        # one the header was following a moment ago.
+        $HeaderFrom.Visibility = 'Collapsed'
         $PermText.Text = $first.text
         $AllowBtn.Visibility  = 'Visible'
         $DenyBtn.Visibility   = 'Visible'
@@ -2460,9 +3290,10 @@ $timer.Add_Tick({
     }
     elseif ($hasAsk) {
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
-        $extra = if ($State.PendingAsks.Count -gt 1) { " (+$($State.PendingAsks.Count - 1))" } else { '' }
         $HeaderText.Text = (T 'Waiting on you') + $extra
-        $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question') + (Where-From $first)
+        $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question')
+        Set-FromLine $PermFrom $first
+        $HeaderFrom.Visibility = 'Collapsed'
         $body = $first.text
         if ($first.choices -and $first.choices.Count) {
             $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
@@ -2483,6 +3314,11 @@ $timer.Add_Tick({
         elseif ($script:Busy)   { $HeaderText.Text = T 'Working hard...';    $Dot.Fill = '#FF4ADE80' }
         else                    { $HeaderText.Text = T 'Idle';               $Dot.Fill = '#FF8A93A6' }
 
+        # Name the conversation whose steps and narration are on screen. Without
+        # this the toast reports work in progress and never says whose, which is
+        # the ordinary state it spends nearly all of its time in.
+        Set-FromLine $HeaderFrom $State.Primary
+
         if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
         else { $SayingText.Visibility = 'Collapsed' }
 
@@ -2490,16 +3326,29 @@ $timer.Add_Tick({
     }
 
     # visibility policy
+    $greeting = [datetime]::UtcNow -lt $script:GreetUntil
     $shouldShow = Get-ShouldShow -HasPending $hasPending -HasAsk $hasAsk `
         -IsActive $isActive -AgentRunning $agentRunning -IsMinimized $isMinimized `
-        -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned
+        -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned `
+        -Greeting $greeting
 
     if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
         try {
-            $dbg = "{0} show={1} pend={2} ask={3} sess={4} active={5} run={6} agent={7} fg={8} min={9} hidden={10} pin={11} age={12}" -f `
-                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, $script:Pinned, [int]$ageSec
+            $dbg = "{0} show={1} vis={2} pend={3} ask={4} sess={5} active={6} run={7} agent={8} fg={9} min={10} hidden={11} pin={12} greet={13} age={14}" -f `
+                (Get-Date -Format 'HH:mm:ss'), $shouldShow, $Window.IsVisible, $hasPending, $hasAsk, $Sessions.Count, $isActive, $running, $agentRunning, $isForeground, $isMinimized, $script:Hidden, $script:Pinned, $greeting, [int]$ageSec
             Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') -Value $dbg
         } catch { }
+    }
+
+    # Application.Run is handed a window whose Visibility was preset to Hidden,
+    # and returns with WPF believing the toast is shown while its window never
+    # was - IsVisible reads True with WS_VISIBLE off. Every later Show() is then
+    # skipped as redundant and the toast never appears at all. Hiding it once,
+    # explicitly, puts the two back in agreement before anything reads them.
+    # Latent until now only because the first tick always wanted it hidden.
+    if (-not $script:VisibilityReconciled) {
+        $script:VisibilityReconciled = $true
+        try { $Window.Hide() } catch { }
     }
 
     if ($shouldShow) {
@@ -2520,6 +3369,7 @@ $timer.Add_Tick({
 
 # Prime to the current end of every active session, so a fresh start does not
 # replay approvals that were answered long ago.
+Import-TitleStore
 Sync-Sessions
 $script:SessionScanUtc = [datetime]::UtcNow
 Merge-SessionState
@@ -2527,6 +3377,14 @@ Merge-SessionState
 # Draw the configured mascot. This has to run after the mascot functions are
 # defined, so it deliberately lives here rather than next to Set-Theme.
 Set-Mascot ([string]$Config.mascot)
+
+# Say hello, so launching the companion has a visible result. Armed here rather
+# than at the top of the script: everything above this line is setup, and a
+# greeting that started counting before the window could be drawn would spend
+# most of itself invisible.
+$greetFor = 0.0
+try { $greetFor = [double]$Config.startupGreetingSeconds } catch { $greetFor = 0.0 }
+if ($greetFor -gt 0) { $script:GreetUntil = [datetime]::UtcNow.AddSeconds($greetFor) }
 
 # The mascot timer is driven by the poll loop and only runs while the toast is
 # on screen, so it deliberately does not start here.

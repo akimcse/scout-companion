@@ -44,6 +44,18 @@
   "language": "auto",
   "_language": "UI language. 'auto' follows the Windows display language, falling back through the culture's parent chain (zh-CN finds zh-Hans, pt-PT finds pt) and finally to English. Set a tag from lang/ to pin it: en, ko, ja, zh-Hans, zh-Hant, fr, de, it, es, ru, pt-BR, tr, pl, cs, hu. Worth pinning if your Windows display language and your regional format differ, since auto-detection follows the display language.",
 
+  "openMatchingSession": true,
+  "_openMatchingSession": "Make Open, Answer and the tray land on the chat that raised the prompt, not just whatever Scout was last showing. Scout's chat ids are a different namespace from the session folders on disk and the index that would join them is encrypted, so the chat is found through the sidebar instead: the companion types something the session talked about into the chat search field and takes the freshest row whose timestamp could plausibly be that session. If no row fits, or the window is too narrow for Scout to show a sidebar at all, it just brings the window forward. The sidebar is always put back the way it was found. Set to false to skip all of that and only focus the window.",
+
+  "chatTitleScanMs": 15000,
+  "_chatTitleScanMs": "How often to look up Scout's own chat titles, so the toast can call a conversation what you call it. It types each unnamed session's topic into the chat search, reads the row that matches, and clears the box again - no chat is clicked, so nothing navigates. It only ever does this while no Scout window is in front, so you never see it, and it stops entirely once every session has a name. Set to 0 to never look.",
+
+  "chatTitleScanMaxMs": 300000,
+  "_chatTitleScanMaxMs": "A look that finds nothing doubles the interval, up to this ceiling, dropping back to chatTitleScanMs as soon as a conversation appears without a name. Not being able to look because Scout is in front does not count as a fruitless look.",
+
+  "startupGreetingSeconds": 5,
+  "_startupGreetingSeconds": "Show the toast for this many seconds at startup, whatever the visibility rules would otherwise say. Without it, launching the companion has no visible result: the toast hides while Scout has focus, which it does because you just launched something, and Windows files a brand-new tray icon into the hidden overflow flyout. Set to 0 to start silently.",
+
   "exitWhenAgentGone": true,
   "_exitWhenAgentGone": "Automatically close the companion shortly after the agent app quits. Pair with Watch-Scout.ps1 (in the Startup folder) to tie the companion's lifetime to Scout: it opens when Scout starts and closes when Scout exits.",
 

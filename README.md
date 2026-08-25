@@ -75,6 +75,10 @@ place.
   asks you a question, it reaches the toast too, tagged with which one it came from. The
   step list and narration follow whichever session moved most recently, so with a single
   session it looks exactly as it always did.
+- **Open lands on the right conversation** — Open, Answer and the tray don't just raise
+  the window, they steer Scout's sidebar to the chat that raised the prompt. If it can't
+  work out which chat that is, it brings the window forward and leaves your sidebar
+  alone (see [How it works](#how-it-works)).
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
 - **Stays out of the way** — around 1.4% of one CPU core and a flat working set while
@@ -219,16 +223,145 @@ Scout Companion:
    - `external_tool.requested` for an ask-the-user tool → pending question
 3. Detects the **agent window** from the running process list and checks whether it's
    minimized or in the foreground to decide when to show the toast.
-4. For approvals, it wakes the agent window's accessibility tree and invokes the
-   matching **Allow/Deny** button through Windows UI Automation. If more than one agent
-   window is open it refuses to click and focuses instead — a pending approval cannot be
-   traced back to the window that raised it, and approving the wrong thing is worse than
-   making you click it yourself.
+4. For approvals, it wakes each agent window's accessibility tree and invokes the
+   matching **Allow/Deny** button through Windows UI Automation. Which window raised the
+   approval cannot be read from the session state — the lock names a backend process, not
+   a UI one — but it can be seen: the window showing the prompt is the one with the button
+   on screen. It clicks only when exactly one window qualifies, and focuses instead when
+   none or several do, because approving something nobody read is worse than making you
+   click it yourself.
+5. For **Open**, it also tries to put Scout on the chat the prompt came from.
+
+### Finding the chat a prompt came from
+
+Scout's chats and the folders the companion follows are two different id namespaces: a
+chat in the sidebar is keyed by an id that never appears in `session-state`, and the
+index that would join them is encrypted on disk. There is no lookup to do — a session
+cannot be named from the outside.
+
+What the sidebar *does* hand over, once its chat search field is open, is every chat's
+title and how long ago it was last touched. So the companion finds the chat the way you
+would:
+
+1. Open the sidebar and its search field if they're collapsed.
+2. Type something the session has talked about — the first thing you asked it for, or the
+   project folder if the session opens with a bare "carry on".
+3. Read the rows that come back, each carrying a **title** and a **when** (`Just now`,
+   `4m ago`, `8/15/2026`).
+4. Take the freshest row whose *when* could plausibly be this session. Plausibly, not
+   exactly: Scout's timestamps **lag** for a chat that isn't the one on screen — a chat
+   being written to right now can still read `11m ago` — but they only ever lag, never
+   run ahead. So the window is lopsided: a little slack below to absorb rounding, a lot
+   above to absorb the lag, and the freshest row inside it wins. Where two rows tie, the
+   search's own ordering breaks it.
+5. Clear the search and re-collapse anything that was opened, so the sidebar ends up
+   exactly as it was found.
+
+The caret is never taken. The search field accepts a value without being focused, and
+focusing it would pull the cursor out of whatever you were typing at the time — the
+companion works in the background, so it has no business moving your cursor.
+
+The session's own clock is read from its last **message**, not its last event — a session
+ten minutes into a run of tool calls hasn't "just" done anything as far as Scout's chat
+list is concerned, and comparing the two clocks directly never matches.
+
+The search is semantic, so it is only trusted to bring the chat *into view* — the
+timestamp is what decides. **If nothing plausible comes back, nothing is clicked**: the
+window has already been brought forward, and sending you to the wrong conversation is
+worse than leaving you where you were. The same is true if the sidebar isn't there at
+all — Scout drops it entirely below a certain window width. Set `openMatchingSession` to
+`false` to skip this whole step.
+
+`Test-SessionMatch.ps1` covers the picker against row lists captured from a real sidebar,
+including the lagging-timestamp case:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Test-SessionMatch.ps1
+```
+
+`Test-ButtonSearch.ps1` covers the other half — the search that decides where **Allow**
+and **Deny** get clicked — against real windows, since Scout will not raise an approval
+on demand. It opens a few throwaway windows while it runs, so it needs a desktop and an
+STA host:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File Test-ButtonSearch.ps1
+```
+
+`Test-TitleLearning.ps1` covers how a session comes to carry Scout's own name for its
+chat — the match, the refusal to name anyone when two sessions want the same row, and
+the store that keeps a learned title from evaporating:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File Test-TitleLearning.ps1
+```
+
+`Test-SettingsUi.ps1` covers the opacity slider, which stepped wrongly because WPF's
+default `LargeChange` of 1.0 is larger than the control's whole 0.35–1.0 range — one
+click on the track jumped to whichever end was clicked. It builds the real settings
+markup, so it needs a desktop and an STA host:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File Test-SettingsUi.ps1
+```
 
 Approvals and questions are merged across every followed session; the step list and
 narration come from whichever moved most recently. A session with something pending is
 kept even after it goes quiet, because an approval does not expire just because nobody
 has typed for a while.
+
+### Naming the conversation on the toast
+
+A prompt carries a second line under its heading saying which conversation raised it,
+and in the ordinary working state the header carries the same line for whichever
+conversation the step list and narration belong to. The toast spends nearly all of its
+life in that ordinary state, so naming only the prompts would have left the label
+practically invisible.
+
+The name is Scout's own chat title once that has been worked out, and until then the
+latest thing that session was asked to do — the *latest*, not the first, because a
+resumed session opens with "carry on" and naming it that would be worse than useless.
+A bare project folder is only shown when more than one session is being followed; on
+its own it says almost nothing, and it reads the same for every session on the project.
+
+**Where the real title comes from.** Scout's sidebar, using the timestamp match above.
+Pressing **Open** learns it as a side effect of finding the chat, and otherwise the
+companion goes and looks: it types each unnamed session's topic into the chat search,
+matches the row, and clears the box again. No chat is clicked, so nothing navigates.
+A learned title is written to `titles.json` next to the script, so it survives the
+session going quiet and survives a restart; entries for sessions that no longer exist
+are dropped when it loads.
+
+**It only ever looks while no Scout window is in front.** Typing into someone's search
+box as they watch would be exactly the overreach this file has had to walk back before,
+so if you are looking at Scout it does not touch it — it waits until you are somewhere
+else, which in practice is a few seconds later. Whatever was open is put back, including
+a query you had left in the box.
+
+Typing is unavoidable, and that took measuring to establish. A sidebar sitting open
+lists its chats with **no timestamps at all** — 22 rows, not one carrying a time — and
+the timestamp is the only thing tying a row to a session: there is no selection marker
+to read, and the title appears nowhere else in the window. Put a query in the search box
+and every row that comes back carries one. So a read-only glance learns nothing, which
+is why it types.
+
+Where two sessions match the same row, neither is named. The point of a real chat title
+is that it identifies the conversation, so one hung on the wrong session is worse than
+none at all.
+
+A look that finds nothing backs off, doubling up to `chatTitleScanMaxMs`, and drops back
+to `chatTitleScanMs` as soon as an unnamed conversation appears. Being unable to look
+because Scout is in front does **not** count as a fruitless look — treating it as one is
+what stopped this ever learning anything while the app was being used.
+
+While a prompt is up the header drops its own name and only the card is labelled: the
+conversation asking for permission need not be the one whose steps were scrolling past
+a moment earlier, and two different names on one toast would be worse than one.
+
+One card shows one prompt, and the header counts everything else that is queued —
+`Approval needed (+2)` — across both kinds. Counting only the shown prompt's own kind
+was worse than not counting at all: an approval standing in front of two questions read
+as a lone approval, and the questions left no trace on screen to say they were waiting.
 
 The session set and the agent window are both cached — the poll tick normally costs one
 file stat per followed session and one `IsWindow` call, rather than a walk over every
@@ -253,11 +386,14 @@ and edit. Common overrides:
 | `pollIntervalMs` | `700` | Event/focus polling interval |
 | `maxSessions` | `6` | How many concurrently active sessions to follow |
 | `sessionRescanMs` | `5000` | How often to re-resolve which session is active. Between rescans the companion just tails the file it already found |
+| `chatTitleScanMs` | `15000` | How often to look up Scout's chat titles. Only ever while no Scout window is in front. `0` never looks |
+| `chatTitleScanMaxMs` | `300000` | Ceiling the above backs off to after a look that finds nothing |
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
 | `mascot` | `quokka` | Which mascot to show. Also in the settings window |
 | `language` | `auto` | UI language. `auto` follows the Windows display language; set a tag from `lang/` to pin it |
 | `opacity` | `1.0` | Toast opacity, clamped to 0.35–1.0 on load. Also in the settings window |
+| `startupGreetingSeconds` | `5` | Show the toast briefly at startup so launching the companion has a visible result. `0` starts silently |
 | `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
 | `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
 
@@ -276,19 +412,32 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
   intentionally hidden while the agent window is focused. Minimize it and start a task.
 - **"Agent not detected"** — your build may use a different process name; add it to
   `processNames` in `config.json`.
+- **I launched it and nothing happened** — it says hello for five seconds now, so you
+  should see the toast once. After that it follows the normal rules, and the main one is
+  that it stays out of the way while Scout has focus — so if you launch it and then keep
+  typing in Scout, you will not see it again until Scout is in the background or something
+  needs you. Its tray icon also starts life in Windows' hidden overflow flyout (the `^`
+  next to the clock); drag it onto the taskbar to keep it in sight. From that icon,
+  **Show toast** pins the toast on screen permanently.
 - **Allow/Deny clicks the wrong thing or does nothing** — the button captions in your
   build may differ; adjust `allowLabels` / `denyLabels`. Scout currently shows **Allow**,
   **Allow for session**, **Allow everywhere**, and **Deny**; the toast's **Allow** maps to
   the safest one-time **Allow**. As a fallback the companion focuses the agent window so
   you can click manually.
-- **Allow/Deny stopped clicking when I opened a second agent window** — deliberate. A
-  pending approval cannot be traced back to the window that raised it, so with more than
-  one window open the companion focuses instead of guessing. Close the extra window to get
-  one-click approvals back.
+- **Allow/Deny stopped clicking when I opened a second agent window** — fixed. It used to
+  count windows and give up above one, which turned the buttons into nothing at all as
+  soon as you worked in two Scout windows. It now looks for the prompt itself and clicks
+  in the window that is showing it. It still declines if two windows are showing a prompt
+  at once, since the approval could belong to either; answer one in Scout and the toast
+  can take the other.
 - **Start-with-Scout won't turn on** — the checkbox disables itself if `Watch-Scout.ps1`
   is missing from the same folder as the script, and reverts if the Startup folder cannot
   be written.
-
+- **Open raises the window but doesn't switch chat** — it only switches when it is sure.
+  No chat whose timestamp could plausibly be that session means no click, and if the
+  Scout window is narrow enough that the sidebar is gone there is nothing to search at
+  all. Widen the window, or set `openMatchingSession` to `false` if you would rather it
+  never tried.
 ## Privacy & safety
 
 - Reads only local session files and the local agent window. No telemetry, no network.

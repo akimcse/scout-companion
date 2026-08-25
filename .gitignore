@@ -1,5 +1,6 @@
 # Gitignore for Scout Companion
 config.json
+titles.json
 *.log
 *.user
 .vs/
