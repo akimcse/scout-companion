@@ -45,9 +45,10 @@ place.
 - **Live progress toast** — streams the agent's current activity as readable steps
   (e.g. "Reading config.json", "Running: git commit ...") with a ✓/▸ status list, plus
   the agent's latest narration.
-- **A mascot to keep you company** — pick from eleven, including five cats. It bobs and
-  "types" while the agent is busy and gently breathes when idle, so you can tell at a
-  glance whether work is happening (see [Mascots](#mascots)).
+- **A mascot to keep you company** — pick from eleven, including five cats. It types while
+  the agent is busy, tilts its head and opens its eyes wide when it needs something from
+  you, breathes gently when idle, and blinks throughout, so you can tell at a glance
+  whether work is happening (see [Mascots](#mascots)).
 - **Tray icon** — the companion has no taskbar button and hides its toast most of the
   time, so the tray icon is how you know it is running. Colour carries the state and the
   silhouette carries your chosen mascot, so a glance answers both "is it running?" and

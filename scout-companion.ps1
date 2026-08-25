@@ -572,6 +572,7 @@ function Focus-Agent {
           <Canvas.RenderTransform>
             <TransformGroup>
               <ScaleTransform x:Name="BodyS" ScaleX="1" ScaleY="1"/>
+              <RotateTransform x:Name="BodyR" Angle="0" CenterX="29" CenterY="52"/>
               <TranslateTransform x:Name="BodyT"/>
             </TransformGroup>
           </Canvas.RenderTransform>
@@ -660,6 +661,7 @@ $CloseBtn     = $Window.FindName('CloseBtn')
 $SettingsBtn  = $Window.FindName('SettingsBtn')
 $BodyT        = $Window.FindName('BodyT')
 $BodyS        = $Window.FindName('BodyS')
+$BodyR        = $Window.FindName('BodyR')
 $LeftPawT     = $Window.FindName('LeftPawT')
 $RightPawT    = $Window.FindName('RightPawT')
 $RootBorder   = $Window.FindName('RootBorder')
@@ -794,17 +796,26 @@ $SettingsBtn.Add_Click({ Show-SettingsWindow })
 function New-CuteEyes($p) {
     # Dark rim, coloured iris, dark pupil, one big highlight and one small: the
     # layering that reads as a glossy eye even at 14 px across.
+    #
+    # Wrapped in a named group so the animation can squash it for a blink and
+    # open it wider when the agent needs something. The pivot sits on the eye
+    # centre line so the lids meet in the middle rather than sliding down.
     @"
-      <Ellipse Canvas.Left="10.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
-      <Ellipse Canvas.Left="33.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
-      <Ellipse Canvas.Left="11.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
-      <Ellipse Canvas.Left="34.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
-      <Ellipse Canvas.Left="14.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
-      <Ellipse Canvas.Left="37.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
-      <Ellipse Canvas.Left="12.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="35.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
-      <Ellipse Canvas.Left="19.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
-      <Ellipse Canvas.Left="42.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+      <Canvas x:Name="EyeGroup" Width="58" Height="60">
+        <Canvas.RenderTransform>
+          <ScaleTransform x:Name="BlinkS" ScaleX="1" ScaleY="1" CenterX="29" CenterY="22.5"/>
+        </Canvas.RenderTransform>
+        <Ellipse Canvas.Left="10.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
+        <Ellipse Canvas.Left="33.5" Canvas.Top="14.5" Width="14"   Height="16"   Fill="#FF241D1F"/>
+        <Ellipse Canvas.Left="11.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
+        <Ellipse Canvas.Left="34.7" Canvas.Top="18.2" Width="11.6" Height="11.6" Fill="$($p.eye)"/>
+        <Ellipse Canvas.Left="14.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
+        <Ellipse Canvas.Left="37.3" Canvas.Top="20.4" Width="6.4"  Height="7.4"  Fill="#FF201A1B"/>
+        <Ellipse Canvas.Left="12.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
+        <Ellipse Canvas.Left="35.9" Canvas.Top="18.6" Width="4.8"  Height="4.8"  Fill="#FFFFFFFF"/>
+        <Ellipse Canvas.Left="19.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+        <Ellipse Canvas.Left="42.4" Canvas.Top="25.6" Width="2.4"  Height="2.4"  Fill="#CCFFFFFF"/>
+      </Canvas>
 "@
 }
 
@@ -1019,7 +1030,9 @@ function Set-Mascot([string]$id) {
     if (-not $build) { return }
 
     $inner = & $build $def.Palette
-    $frag = "<Canvas xmlns=`"http://schemas.microsoft.com/winfx/2006/xaml/presentation`" Width=`"58`" Height=`"60`">$inner</Canvas>"
+    # The x namespace has to be declared here or the x:Name on the animated
+    # parts inside a head cannot be parsed.
+    $frag = "<Canvas xmlns=`"http://schemas.microsoft.com/winfx/2006/xaml/presentation`" xmlns:x=`"http://schemas.microsoft.com/winfx/2006/xaml`" Width=`"58`" Height=`"60`">$inner</Canvas>"
     try {
         $head = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$frag)))
     } catch {
@@ -1031,6 +1044,9 @@ function Set-Mascot([string]$id) {
     $script:MascotHead = $head
     # Index 0 keeps the head behind the laptop and paws.
     $MascotHost.Children.Insert(0, $head)
+    # The eye group is rebuilt with the head, so the animation's handle on it
+    # has to be refreshed on every swap.
+    $script:BlinkS = $head.FindName('BlinkS')
 
     $pawBrush = B $def.Palette.paw
     $LeftPaw.Fill  = $pawBrush
@@ -1593,8 +1609,14 @@ $Tray.ContextMenuStrip = $TrayMenu
 $Tray.Add_MouseDoubleClick({ Focus-Agent })
 
 # ---------------------------------------------------------------------------
-# Quokka animation: a dedicated timer drives the mascot frame-by-frame.
-# Working => bobbing body + alternating "typing" paws. Idle => slow breathing.
+# Mascot animation: a dedicated timer drives it frame-by-frame.
+#
+#   working  => bobbing body, alternating "typing" paws, focused eyes
+#   waiting  => head tilts, eyes open wide, glow pulses
+#   idle     => slow breathing, softer eyes
+#
+# Blinking runs on top of all three at randomised intervals, because a face
+# that never blinks reads as a picture rather than a character.
 #
 # The timer is started and stopped with the toast (see the poll loop below):
 # animating a window nobody can see costs real CPU for nothing.
@@ -1602,12 +1624,26 @@ $Tray.Add_MouseDoubleClick({ Focus-Agent })
 $script:Phase = 0.0
 $script:Busy  = $false
 $script:PrevBusy = $false
+$script:BlinkS = $null          # rebound by Set-Mascot on every mascot swap
+$script:BlinkIn = 24            # frames until the next blink
+$script:BlinkStep = -1          # index into the blink sequence, -1 when open
+$script:EyeBase = 1.0           # openness the eyes return to for this state
+# Get-Random is a cmdlet invocation; this runs inside a frame tick, so use the
+# plain .NET generator instead.
+$script:Rng = New-Object System.Random
+
+# Squash-and-open, held one frame at the bottom so the blink is visible at
+# 12 fps without looking like a dropped frame.
+$BlinkFrames = @(0.55, 0.10, 0.10, 0.60)
 
 function Reset-Mascot {
     # Neutral pose, used when the animation is paused or switched off.
     $BodyT.Y = 0; $BodyT.X = 0
     $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+    $BodyR.Angle = 0
     $LeftPawT.Y = 0; $RightPawT.Y = 0
+    if ($script:BlinkS) { $script:BlinkS.ScaleY = 1.0 }
+    $script:BlinkStep = -1
 }
 
 $anim = New-Object System.Windows.Threading.DispatcherTimer
@@ -1615,6 +1651,8 @@ $anim.Interval = [TimeSpan]::FromMilliseconds([int]$Config.animIntervalMs)
 # Phase steps are scaled so the mascot moves at the same speed regardless of the
 # configured frame rate.
 $script:PhaseScale = [double]$Config.animIntervalMs / 50.0
+# Frames per second, used to keep blink timing in real seconds rather than frames.
+$script:Fps = 1000.0 / [double]$Config.animIntervalMs
 $anim.Add_Tick({
     if ($script:Pending -or $script:Asking) {
         # gentle attention pulse on the glow, whichever colour it is wearing
@@ -1622,11 +1660,13 @@ $anim.Add_Tick({
         $puls = ([Math]::Sin($script:Phase * 3.0) + 1.0) / 2.0
         $RootGlow.BlurRadius = 16 + $puls * 18
         $RootGlow.Opacity    = 0.55 + $puls * 0.4
-        # the quokka peeks up, waiting
+        # peeks up and tilts, waiting on you - eyes wide open
         $BodyT.Y = [Math]::Sin($script:Phase) * 0.8
         $BodyT.X = 0
         $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+        $BodyR.Angle = if ($script:Asking) { [Math]::Sin($script:Phase * 0.6) * 5.0 } else { 0 }
         $LeftPawT.Y = 0; $RightPawT.Y = 0
+        $script:EyeBase = 1.18
     }
     elseif ($script:Busy) {
         $script:Phase += 0.32 * $script:PhaseScale
@@ -1634,8 +1674,12 @@ $anim.Add_Tick({
         $BodyT.X     = [Math]::Sin($script:Phase) * 0.6
         $BodyS.ScaleX = 1.0
         $BodyS.ScaleY = 1.0
+        # nods along with the typing, a beat slower than the paws
+        $BodyR.Angle = [Math]::Sin($script:Phase * 1.5) * 2.5
         $LeftPawT.Y  = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0)) * 2.4
         $RightPawT.Y = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0 + [Math]::PI)) * 2.4
+        # slightly narrowed: concentrating rather than staring
+        $script:EyeBase = 0.94
     } else {
         $script:Phase += 0.04 * $script:PhaseScale
         $breathe = 1.0 + [Math]::Sin($script:Phase) * 0.035
@@ -1643,8 +1687,28 @@ $anim.Add_Tick({
         $BodyS.ScaleY = $breathe
         $BodyT.Y = [Math]::Sin($script:Phase) * 0.6
         $BodyT.X = 0
+        $BodyR.Angle = [Math]::Sin($script:Phase * 0.5) * 1.2
         $LeftPawT.Y = 0
         $RightPawT.Y = 0
+        # relaxed, a touch sleepy
+        $script:EyeBase = 0.86
+    }
+
+    # --- blink ---------------------------------------------------------------
+    if ($script:BlinkS) {
+        if ($script:BlinkStep -ge 0) {
+            $script:BlinkS.ScaleY = $script:EyeBase * $BlinkFrames[$script:BlinkStep]
+            $script:BlinkStep++
+            if ($script:BlinkStep -ge $BlinkFrames.Count) { $script:BlinkStep = -1 }
+        } else {
+            $script:BlinkS.ScaleY = $script:EyeBase
+            $script:BlinkIn--
+            if ($script:BlinkIn -le 0) {
+                $script:BlinkStep = 0
+                # 2.5-6 s apart, so it never falls into a mechanical rhythm.
+                $script:BlinkIn = [int]($script:Fps * (2.5 + $script:Rng.NextDouble() * 3.5))
+            }
+        }
     }
 })
 
