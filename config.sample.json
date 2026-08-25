@@ -20,6 +20,12 @@
   "pollIntervalMs": 700,
   "_pollIntervalMs": "How often (ms) to poll the event stream and window focus.",
 
+  "sessionRescanMs": 5000,
+  "_sessionRescanMs": "How often (ms) to re-resolve which session is active. Between rescans the companion just tails the file it already found, which keeps the poll loop cheap on machines with a long session history. Lower it if you switch sessions constantly and want the toast to follow faster.",
+
+  "animIntervalMs": 80,
+  "_animIntervalMs": "Mascot frame interval in ms (80 = 12.5 fps). The mascot moves at the same speed whatever you set; a smaller number just spends more CPU on smoother motion. The animation only runs while the toast is on screen.",
+
   "exitWhenAgentGone": true,
   "_exitWhenAgentGone": "Automatically close the companion shortly after the agent app quits. Pair with Watch-Scout.ps1 (in the Startup folder) to tie the companion's lifetime to Scout: it opens when Scout starts and closes when Scout exits.",
 

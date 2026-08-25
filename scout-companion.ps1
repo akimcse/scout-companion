@@ -43,6 +43,9 @@ if (-not ('ScoutNative' -as [type])) {
         public static extern bool IsIconic(System.IntPtr hWnd);
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool IsWindow(System.IntPtr hWnd);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(System.IntPtr hWnd);
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -71,6 +74,13 @@ $Config = [ordered]@{
     denyLabels    = @('Deny', 'Reject', 'Decline', 'Block', 'Cancel', 'No')
     activeWindowSeconds = 150
     pollIntervalMs      = 700
+    # A full rescan of every session folder is expensive on machines with a long
+    # session history, so the resolved session is cached and only re-resolved
+    # this often. Between rescans the companion just stats the file it is tailing.
+    sessionRescanMs     = 5000
+    # Mascot frame interval. 80 ms (12.5 fps) is smooth enough for a bob and a
+    # typing paw, and costs roughly half of the old 50 ms (20 fps).
+    animIntervalMs      = 80
     maxSteps            = 4
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
@@ -132,6 +142,12 @@ $State = [pscustomobject]@{
     PendingPerms    = [ordered]@{}
     AgentHwnd       = [IntPtr]::Zero
 }
+
+# Caches that keep the poll loop off the expensive code paths.
+$script:WinCache          = $null                  # last known agent window
+$script:LastTitleScanUtc  = [datetime]::MinValue   # throttle for the full process scan
+$script:SessionScanUtc    = [datetime]::MinValue   # throttle for the full session scan
+$script:StepSignature     = $null                  # last rendered step list
 
 # ---------------------------------------------------------------------------
 # Helpers.
@@ -203,18 +219,54 @@ function Complete-Step([string]$id, [string]$reqId) {
 }
 
 function Get-AgentWindow {
-    $procs = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle }
-    # 1) Match by process name first (most reliable — a browser tab can't spoof this).
-    foreach ($name in $Config.processNames) {
-        $p = $procs | Where-Object { $_.ProcessName -ieq $name -or $_.ProcessName -like "*$name*" } | Select-Object -First 1
-        if ($p) { return @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id } }
+    # Fast path: the handle found last time is almost always still valid, so a
+    # cheap IsWindow check replaces a full process enumeration on most ticks.
+    if ($script:WinCache -and [ScoutNative]::IsWindow($script:WinCache.Hwnd)) {
+        return $script:WinCache
     }
-    # 2) Fall back to window-title hints, but skip browser processes so a tab
-    #    titled "Scout, ..." is never picked instead of the real app window.
+    $script:WinCache = $null
+
+    # 1) Match by process name first (most reliable - a browser tab can't spoof this).
+    #    GetProcessesByName asks the OS for one name instead of materialising a
+    #    Process object for every process on the machine.
+    foreach ($name in $Config.processNames) {
+        $ps = $null
+        try { $ps = [System.Diagnostics.Process]::GetProcessesByName($name) } catch { continue }
+        try {
+            foreach ($p in $ps) {
+                if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+                    $script:WinCache = @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id }
+                    return $script:WinCache
+                }
+            }
+        } finally { foreach ($p in $ps) { $p.Dispose() } }
+    }
+
+    # 2) Fall back to window-title hints. This one does need a full enumeration,
+    #    so it is throttled - it only runs while no agent process is found at all.
+    $sinceScan = ([datetime]::UtcNow - $script:LastTitleScanUtc).TotalMilliseconds
+    if ($sinceScan -lt 3000) { return $null }
+    $script:LastTitleScanUtc = [datetime]::UtcNow
+
+    $procs = Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle }
+    #    Substring match on the process name first, so a partial name in
+    #    config.json (e.g. "Claw" for "Clawpilot") keeps working.
+    foreach ($name in $Config.processNames) {
+        $p = $procs | Where-Object { $_.ProcessName -like "*$name*" } | Select-Object -First 1
+        if ($p) {
+            $script:WinCache = @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id }
+            return $script:WinCache
+        }
+    }
+    #    Skip browser processes so a tab titled "Scout, ..." is never picked
+    #    instead of the real app window.
     $nonBrowser = $procs | Where-Object { $_.ProcessName -notin $Config.browserProcs }
     foreach ($hint in $Config.windowHints) {
         $p = $nonBrowser | Where-Object { $_.MainWindowTitle -like "*$hint*" } | Select-Object -First 1
-        if ($p) { return @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id } }
+        if ($p) {
+            $script:WinCache = @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id }
+            return $script:WinCache
+        }
     }
     return $null
 }
@@ -222,9 +274,18 @@ function Get-AgentWindow {
 # Lightweight presence check (process only, no window). Used to decide when Scout
 # has fully closed so the companion can shut itself down.
 function Test-AgentProcess {
+    foreach ($name in $Config.processNames) {
+        $ps = $null
+        try { $ps = [System.Diagnostics.Process]::GetProcessesByName($name) } catch { continue }
+        try { if ($ps.Count -gt 0) { return $true } }
+        finally { foreach ($p in $ps) { $p.Dispose() } }
+    }
+    # GetProcessesByName matches whole names, so fall back to a substring scan to
+    # keep partial names in config.json working. This only runs when the agent
+    # already looks gone, i.e. right before the companion would shut itself down.
     $all = Get-Process -ErrorAction SilentlyContinue
     foreach ($name in $Config.processNames) {
-        if ($all | Where-Object { $_.ProcessName -ieq $name -or $_.ProcessName -like "*$name*" } | Select-Object -First 1) { return $true }
+        if ($all | Where-Object { $_.ProcessName -like "*$name*" } | Select-Object -First 1) { return $true }
     }
     return $false
 }
@@ -234,49 +295,86 @@ function Test-LiveLock {
     # (inuse.<pid>.lock) belongs to a process that is still running. Stale lock
     # files from crashed/closed sessions are ignored so we never latch onto an
     # ancient session and report it as "active".
-    param([string]$dir)
-    $locks = Get-ChildItem $dir -Filter 'inuse.*.lock' -ErrorAction SilentlyContinue
-    foreach ($l in $locks) {
-        if ($l.BaseName -match 'inuse\.(\d+)') {
+    #
+    # $seen memoises PID liveness for the duration of one scan: most machines
+    # accumulate dozens of stale locks and many repeat the same dead PID.
+    param([string]$dir, [hashtable]$seen)
+    foreach ($lock in [System.IO.Directory]::EnumerateFiles($dir, 'inuse.*.lock')) {
+        if ([System.IO.Path]::GetFileName($lock) -match 'inuse\.(\d+)') {
             $procId = [int]$Matches[1]
-            if (Get-Process -Id $procId -ErrorAction SilentlyContinue) { return $true }
+            if ($seen -and $seen.ContainsKey($procId)) {
+                if ($seen[$procId]) { return $true } else { continue }
+            }
+            $alive = $false
+            try { $p = [System.Diagnostics.Process]::GetProcessById($procId); $p.Dispose(); $alive = $true } catch { }
+            if ($seen) { $seen[$procId] = $alive }
+            if ($alive) { return $true }
         }
     }
     return $false
 }
 
 function Find-ActiveSession {
-    if (-not (Test-Path $SessionRoot)) { return $null }
-    $candidates = Get-ChildItem $SessionRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        $ev = Join-Path $_.FullName 'events.jsonl'
-        if (Test-Path $ev) {
-            $locked = Test-LiveLock $_.FullName
-            [pscustomobject]@{ Dir = $_.FullName; Events = $ev; Mtime = (Get-Item $ev).LastWriteTimeUtc; Locked = $locked }
-        }
+    if (-not [System.IO.Directory]::Exists($SessionRoot)) { return $null }
+
+    # Collect candidates with raw .NET calls - Get-ChildItem/Get-Item allocate a
+    # PSObject wrapper per entry, which dominates the cost once a machine has
+    # accumulated a few hundred session folders.
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($dir in [System.IO.Directory]::EnumerateDirectories($SessionRoot)) {
+        $ev = [System.IO.Path]::Combine($dir, 'events.jsonl')
+        $fi = New-Object System.IO.FileInfo $ev
+        if (-not $fi.Exists) { continue }
+        [void]$candidates.Add([pscustomobject]@{ Dir = $dir; Events = $ev; Mtime = $fi.LastWriteTimeUtc })
     }
-    if (-not $candidates) { return $null }
-    # Prefer a session with a live lock, then the most recently written events file.
-    # If nothing has a live lock, fall back to plain recency so we still track the
-    # newest session.
-    return $candidates | Sort-Object @{ Expression = 'Locked'; Descending = $true }, @{ Expression = 'Mtime'; Descending = $true } | Select-Object -First 1
+    if ($candidates.Count -eq 0) { return $null }
+
+    # Prefer a session with a live lock, then the most recently written events
+    # file. Walking newest-first and returning the first live lock gives the same
+    # answer as ranking every folder, but normally only tests a single lock.
+    $sorted = $candidates | Sort-Object -Property Mtime -Descending
+    $seen = @{}
+    foreach ($c in $sorted) {
+        if (Test-LiveLock $c.Dir $seen) { return $c }
+    }
+    # Nothing holds a live lock - fall back to plain recency so we still track
+    # the newest session.
+    return $sorted[0]
 }
 
 function Read-NewEvents {
-    $sess = Find-ActiveSession
-    if (-not $sess) { return }
-
-    if ($State.EventsPath -ne $sess.Events) {
-        $State.SessionDir = $sess.Dir
-        $State.EventsPath = $sess.Events
-        $State.Offset     = (Get-Item $sess.Events).Length
-        $State.PendingPerms = [ordered]@{}
-        $State.Steps.Clear()
-        $State.Saying = $null
-        $State.TurnActive = $false
-        return
+    # Between full rescans, keep tailing the file we already latched onto. This
+    # turns the common tick into a single file stat instead of a walk over every
+    # session folder on the machine.
+    $sess = $null
+    $needScan = $true
+    if ($State.EventsPath) {
+        $cur = New-Object System.IO.FileInfo $State.EventsPath
+        if ($cur.Exists -and ([datetime]::UtcNow - $script:SessionScanUtc).TotalMilliseconds -lt [double]$Config.sessionRescanMs) {
+            $needScan = $false
+            $sess = [pscustomobject]@{ Dir = $State.SessionDir; Events = $State.EventsPath }
+            $len = $cur.Length
+        }
     }
 
-    $len = (Get-Item $sess.Events).Length
+    if ($needScan) {
+        $script:SessionScanUtc = [datetime]::UtcNow
+        $sess = Find-ActiveSession
+        if (-not $sess) { return }
+
+        if ($State.EventsPath -ne $sess.Events) {
+            $State.SessionDir = $sess.Dir
+            $State.EventsPath = $sess.Events
+            $State.Offset     = (New-Object System.IO.FileInfo $sess.Events).Length
+            $State.PendingPerms = [ordered]@{}
+            $State.Steps.Clear()
+            $State.Saying = $null
+            $State.TurnActive = $false
+            return
+        }
+        $len = (New-Object System.IO.FileInfo $sess.Events).Length
+    }
+
     if ($len -lt $State.Offset) { $State.Offset = 0 }
     if ($len -eq $State.Offset) { return }
 
@@ -394,8 +492,15 @@ function Focus-Agent {
         Width="380" SizeToContent="Height"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize">
-  <Border x:Name="RootBorder" CornerRadius="14" Background="#FF1B1F2A" BorderBrush="#FF3A4358" BorderThickness="1" Padding="14">
-    <Border.Effect><DropShadowEffect x:Name="RootGlow" BlurRadius="20" ShadowDepth="3" Opacity="0.55" Color="#000000"/></Border.Effect>
+  <Grid>
+    <!-- Glow layer. The drop shadow lives here, on a plain rounded rectangle with
+         no animating content, so a moving mascot never forces the whole toast
+         back through the blur shader. Measured at ~1.9 points of CPU when the
+         shadow sat on the content border instead. -->
+    <Border x:Name="GlowBorder" CornerRadius="14" Background="#FF1B1F2A">
+      <Border.Effect><DropShadowEffect x:Name="RootGlow" BlurRadius="20" ShadowDepth="3" Opacity="0.55" Color="#000000"/></Border.Effect>
+    </Border>
+    <Border x:Name="RootBorder" CornerRadius="14" Background="#FF1B1F2A" BorderBrush="#FF3A4358" BorderThickness="1" Padding="14">
     <StackPanel>
       <DockPanel LastChildFill="True">
 
@@ -496,7 +601,8 @@ function Focus-Agent {
         </StackPanel>
       </Border>
     </StackPanel>
-  </Border>
+    </Border>
+  </Grid>
 </Window>
 '@
 
@@ -519,6 +625,7 @@ $BodyS        = $Window.FindName('BodyS')
 $LeftPawT     = $Window.FindName('LeftPawT')
 $RightPawT    = $Window.FindName('RightPawT')
 $RootBorder   = $Window.FindName('RootBorder')
+$GlowBorder   = $Window.FindName('GlowBorder')
 $RootGlow     = $Window.FindName('RootGlow')
 $PermTitle    = $Window.FindName('PermTitle')
 
@@ -571,6 +678,9 @@ function Set-Theme([string]$state) {
         $RootGlow.BlurRadius    = 20
         $RootGlow.Opacity       = 0.55
     }
+    # The glow layer sits behind the content and only exists to cast the shadow,
+    # so keep its fill matched to the content border.
+    $GlowBorder.Background = $RootBorder.Background
 }
 
 function Place-BottomRight {
@@ -601,18 +711,24 @@ $OpenBtn.Add_Click({ Focus-Agent })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $Window.Hide() })
 
 # ---------------------------------------------------------------------------
-# Quokka animation: a dedicated fast timer drives the mascot frame-by-frame.
+# Quokka animation: a dedicated timer drives the mascot frame-by-frame.
 # Working => bobbing body + alternating "typing" paws. Idle => slow breathing.
+#
+# The timer is started and stopped with the toast (see the poll loop below):
+# animating a window nobody can see costs real CPU for nothing.
 # ---------------------------------------------------------------------------
 $script:Phase = 0.0
 $script:Busy  = $false
 $script:PrevBusy = $false
 $anim = New-Object System.Windows.Threading.DispatcherTimer
-$anim.Interval = [TimeSpan]::FromMilliseconds(50)
+$anim.Interval = [TimeSpan]::FromMilliseconds([int]$Config.animIntervalMs)
+# Phase steps are scaled so the mascot moves at the same speed regardless of the
+# configured frame rate.
+$script:PhaseScale = [double]$Config.animIntervalMs / 50.0
 $anim.Add_Tick({
     if ($script:Pending) {
         # gentle attention pulse on the yellow alert glow
-        $script:Phase += 0.20
+        $script:Phase += 0.20 * $script:PhaseScale
         $puls = ([Math]::Sin($script:Phase * 3.0) + 1.0) / 2.0
         $RootGlow.BlurRadius = 16 + $puls * 18
         $RootGlow.Opacity    = 0.55 + $puls * 0.4
@@ -623,7 +739,7 @@ $anim.Add_Tick({
         $LeftPawT.Y = 0; $RightPawT.Y = 0
     }
     elseif ($script:Busy) {
-        $script:Phase += 0.32
+        $script:Phase += 0.32 * $script:PhaseScale
         $BodyT.Y     = [Math]::Sin($script:Phase * 2.0) * 1.6
         $BodyT.X     = [Math]::Sin($script:Phase) * 0.6
         $BodyS.ScaleX = 1.0
@@ -631,7 +747,7 @@ $anim.Add_Tick({
         $LeftPawT.Y  = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0)) * 2.4
         $RightPawT.Y = -[Math]::Max(0, [Math]::Sin($script:Phase * 6.0 + [Math]::PI)) * 2.4
     } else {
-        $script:Phase += 0.04
+        $script:Phase += 0.04 * $script:PhaseScale
         $breathe = 1.0 + [Math]::Sin($script:Phase) * 0.035
         $BodyS.ScaleX = $breathe
         $BodyS.ScaleY = $breathe
@@ -646,13 +762,26 @@ $anim.Add_Tick({
 # Main loop: poll events + decide visibility + render.
 # ---------------------------------------------------------------------------
 function Render-Steps {
-    if ($State.Steps.Count -eq 0) { $StepsPanel.Visibility = 'Collapsed'; return }
+    if ($State.Steps.Count -eq 0) {
+        if ($null -ne $script:StepSignature) { $script:StepSignature = $null; $StepsPanel.Visibility = 'Collapsed' }
+        return
+    }
+    # Rebuilding the string and re-setting the TextBlock forces a layout pass, so
+    # skip it entirely while the step list is unchanged.
     $sb = New-Object System.Text.StringBuilder
     foreach ($s in $State.Steps) {
         $mark = if ($s.Done) { [char]0x2713 } else { [char]0x25B8 }   # check / triangle
         [void]$sb.AppendLine("$mark  $($s.Text)")
     }
-    $StepsText.Text = $sb.ToString().TrimEnd()
+    $text = $sb.ToString().TrimEnd()
+    if ($text -eq $script:StepSignature) {
+        # The panel is force-collapsed while an approval is showing, so make sure
+        # it comes back even when the step text itself has not moved on.
+        if ($StepsPanel.Visibility -ne 'Visible') { $StepsPanel.Visibility = 'Visible' }
+        return
+    }
+    $script:StepSignature = $text
+    $StepsText.Text = $text
     $StepsPanel.Visibility = 'Visible'
 }
 
@@ -740,7 +869,10 @@ $timer.Add_Tick({
     if ($shouldShow) {
         if (-not $Window.IsVisible) { $Window.Show() }
         $Window.Topmost = $true
+        # Only animate while the toast is actually on screen.
+        if (-not $anim.IsEnabled) { $anim.Start() }
     } else {
+        if ($anim.IsEnabled) { $anim.Stop() }
         if ($Window.IsVisible) { $Window.Hide() }
     }
 })
@@ -748,13 +880,16 @@ $timer.Add_Tick({
 # prime to current end of the active session
 $initial = Find-ActiveSession
 if ($initial) {
+    $fi = New-Object System.IO.FileInfo $initial.Events
     $State.SessionDir = $initial.Dir
     $State.EventsPath = $initial.Events
-    $State.Offset     = (Get-Item $initial.Events).Length
-    $State.LastEventUtc = (Get-Item $initial.Events).LastWriteTimeUtc
+    $State.Offset     = $fi.Length
+    $State.LastEventUtc = $fi.LastWriteTimeUtc
 }
+$script:SessionScanUtc = [datetime]::UtcNow
 
-$anim.Start()
+# The mascot timer is driven by the poll loop and only runs while the toast is
+# on screen, so it deliberately does not start here.
 $timer.Start()
 
 $Window.Visibility = 'Hidden'
