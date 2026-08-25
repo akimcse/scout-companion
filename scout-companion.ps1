@@ -104,6 +104,11 @@ $Config = [ordered]@{
     opacity             = 1.0
     # Which mascot the toast shows. See $Mascots for the available ids.
     mascot              = 'quokka'
+    # UI language. 'auto' follows the Windows display language; set a tag from
+    # lang/ (e.g. 'ko', 'ja', 'pt-BR') to pin it. Windows keeps display language
+    # and regional format separate, so auto-detection is right for most people
+    # but wrong for anyone running, say, an English UI with Korean formats.
+    language            = 'auto'
     maxSteps            = 4
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
@@ -120,6 +125,92 @@ if (Test-Path $cfgPath) {
         Write-Warning "Could not parse config.json: $($_.Exception.Message)"
     }
 }
+
+# ---------------------------------------------------------------------------
+# Language.
+#
+# English lives in the script and every other language is a file in lang/, so a
+# missing or malformed translation degrades to English instead of breaking the
+# app, and a translator only has to touch one JSON file. Any key absent from a
+# translation falls back to English individually, which means a partial
+# translation is useful immediately rather than all-or-nothing.
+#
+# Detection reads CurrentUICulture and walks its parent chain: zh-CN resolves to
+# zh-Hans, pt-BR to pt-BR then pt, and so on. It is deliberately overridable,
+# because UI language and regional format are independent settings in Windows
+# and the machine this was written on runs an English UI with Korean formats --
+# guessing from either one alone would be wrong half the time.
+# ---------------------------------------------------------------------------
+$script:Strings = @{}
+
+function Import-Language([string]$pref) {
+    $dir = Join-Path $ScriptDir 'lang'
+    if (-not (Test-Path $dir)) { return 'en' }
+
+    $order = @()
+    if ($pref -and $pref -ne 'auto') {
+        $order += $pref
+    } else {
+        $ci = [System.Globalization.CultureInfo]::CurrentUICulture
+        while ($ci -and $ci.Name) { $order += $ci.Name; $ci = $ci.Parent }
+    }
+
+    foreach ($tag in $order) {
+        $file = Join-Path $dir "$tag.json"
+        if (-not (Test-Path $file)) { continue }
+        try {
+            $json = Get-Content $file -Raw -Encoding UTF8 | ConvertFrom-Json
+            $map = @{}
+            foreach ($p in $json.PSObject.Properties) {
+                # Keys starting with _ are notes for translators, not strings.
+                if ($p.Name -notlike '_*') { $map[$p.Name] = [string]$p.Value }
+            }
+            $script:Strings = $map
+            return $tag
+        } catch {
+            Write-Warning "Could not parse lang/$tag.json, falling back to English: $($_.Exception.Message)"
+        }
+    }
+    return 'en'
+}
+
+# T for "translate". Takes the English string as the key, so the script stays
+# readable and an untranslated build is still correct English. Optional -f
+# arguments are applied after lookup, because word order differs between
+# languages and the translation has to own the whole sentence.
+function T([string]$key) {
+    $s = $script:Strings[$key]
+    if (-not $s) { $s = $key }
+    if ($args.Count -gt 0) {
+        try { return [string]::Format($s, $args) } catch { return $s }
+    }
+    return $s
+}
+
+# Translates the user-facing attributes of a XAML document in place. Doing it
+# here rather than interpolating T into the markup keeps the XAML a plain
+# single-quoted here-string, and means a string added to the markup later is
+# picked up automatically instead of being quietly left in English.
+#
+# Only Text, Content, ToolTip and Title are touched, and bindings, glyph escapes
+# and pure format placeholders are skipped -- translating "{TemplateBinding
+# SelectionBoxItem}" would break the control it belongs to.
+function Convert-XamlText([xml]$doc) {
+    if ($script:Strings.Count -eq 0) { return $doc }
+    $attrs = 'Text', 'Content', 'ToolTip', 'Title'
+    foreach ($node in $doc.SelectNodes('//*')) {
+        foreach ($a in $attrs) {
+            $v = $node.GetAttribute($a)
+            if (-not $v) { continue }
+            if ($v -match '^\{' -or $v -match '^&#x' -or $v -match '^\s*$') { continue }
+            $t = $script:Strings[$v]
+            if ($t) { $node.SetAttribute($a, $t) }
+        }
+    }
+    return $doc
+}
+
+$script:Lang = Import-Language $Config.language
 
 # Writes a subset of settings back to config.json, preserving anything the user
 # put there by hand. Used by the settings window and the tray menu.
@@ -141,6 +232,21 @@ function Save-Setting([hashtable]$changes) {
     } catch {
         Write-Warning "Could not write config.json: $($_.Exception.Message)"
         return $false
+    }
+}
+
+# The opacity slider coalesces its writes behind a timer, so any path that ends
+# the process or closes the settings window has to drain it first. Without this
+# a value set in the last 600 ms before quitting was lost, which reads to the
+# user as "settings don't save at all".
+$script:OpacitySaveTimer = $null
+$script:OpacityPendingValue = $null
+function Save-PendingOpacity {
+    if (-not $script:OpacitySaveTimer) { return }
+    if (-not $script:OpacitySaveTimer.IsEnabled) { return }
+    $script:OpacitySaveTimer.Stop()
+    if ($null -ne $script:OpacityPendingValue) {
+        [void](Save-Setting @{ opacity = $script:OpacityPendingValue })
     }
 }
 
@@ -238,39 +344,44 @@ function Leaf([string]$p) {
 
 function Describe-Tool([string]$name, $a) {
     # Turn a tool call into a short, human-readable action.
-    if (-not $name) { return 'Working' }
+    #
+    # Labels with a value in them go through T with a {0} placeholder rather than
+    # being built by interpolation, because word order is not universal: the file
+    # name comes after the verb in English and before it in Korean and Japanese,
+    # so the translation has to own the whole sentence.
+    if (-not $name) { return T 'Working' }
     switch -Regex ($name) {
-        '^report_intent$'              { if ($a.intent) { return [string]$a.intent } ; return 'Planning' }
+        '^report_intent$'              { if ($a.intent) { return [string]$a.intent } ; return T 'Planning' }
         '^(powershell|bash|shell|run_command)$' {
             $c = $a.command; if (-not $c) { $c = $a.script }
             if ($c) { $first = ($c -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
-                      return "Running: $(Truncate $first 64)" }
-            return 'Running a command'
+                      return T 'Running: {0}' (Truncate $first 64) }
+            return T 'Running a command'
         }
-        '^view$'                       { return "Reading $(Leaf $a.path)" }
-        '^edit$'                       { return "Editing $(Leaf $a.path)" }
-        '^create$'                     { return "Creating $(Leaf $a.path)" }
-        '^grep$'                       { return "Searching `"$(Truncate $a.pattern 40)`"" }
-        '^glob$'                       { return "Finding files: $(Truncate $a.pattern 40)" }
-        '^task$'                       { if ($a.description) { return "Delegating: $(Truncate $a.description 50)" } ; return 'Delegating a subtask' }
-        '^web_fetch$'                  { return "Fetching $(Truncate $a.url 50)" }
-        '^web_search$'                 { return "Web search: $(Truncate $a.query 44)" }
-        '^m_filesystem_(list|tree)$'   { return "Listing $(Leaf $a.path)" }
-        '^m_filesystem_stat$'          { return "Checking $(Leaf $a.path)" }
-        '^m_filesystem_mkdir$'         { return "New folder $(Leaf $a.path)" }
-        '^m_filesystem_move$'          { return "Moving $(Leaf $a.source)" }
-        '^sql$'                        { if ($a.description) { return "DB: $(Truncate $a.description 46)" } ; return 'Querying database' }
-        '^workiq_list_emails$'         { return 'Checking emails' }
-        '^workiq_(search_emails|get_email)$' { return "Email: $(Truncate $a.query 40)" }
-        '^workiq_(send_email|reply_to_email|create_draft).*' { return 'Composing email' }
-        '^workiq_.*chat.*'             { return 'Teams chat' }
-        '^workiq_.*event.*'            { return 'Calendar' }
-        '^workiq_.*(people|profile|manager).*' { return 'Looking up people' }
-        '^workiq_.*file.*'             { return 'OneDrive files' }
-        '^m_remember$'                 { return 'Saving a memory' }
-        '^m_recall$'                   { return 'Recalling memory' }
-        '^skill$'                      { if ($a.skill) { return "Skill: $($a.skill)" } ; return 'Using a skill' }
-        '^browser_'                    { return 'Browsing the web' }
+        '^view$'                       { return T 'Reading {0}' (Leaf $a.path) }
+        '^edit$'                       { return T 'Editing {0}' (Leaf $a.path) }
+        '^create$'                     { return T 'Creating {0}' (Leaf $a.path) }
+        '^grep$'                       { return T 'Searching "{0}"' (Truncate $a.pattern 40) }
+        '^glob$'                       { return T 'Finding files: {0}' (Truncate $a.pattern 40) }
+        '^task$'                       { if ($a.description) { return T 'Delegating: {0}' (Truncate $a.description 50) } ; return T 'Delegating a subtask' }
+        '^web_fetch$'                  { return T 'Fetching {0}' (Truncate $a.url 50) }
+        '^web_search$'                 { return T 'Web search: {0}' (Truncate $a.query 44) }
+        '^m_filesystem_(list|tree)$'   { return T 'Listing {0}' (Leaf $a.path) }
+        '^m_filesystem_stat$'          { return T 'Checking {0}' (Leaf $a.path) }
+        '^m_filesystem_mkdir$'         { return T 'New folder {0}' (Leaf $a.path) }
+        '^m_filesystem_move$'          { return T 'Moving {0}' (Leaf $a.source) }
+        '^sql$'                        { if ($a.description) { return T 'DB: {0}' (Truncate $a.description 46) } ; return T 'Querying database' }
+        '^workiq_list_emails$'         { return T 'Checking emails' }
+        '^workiq_(search_emails|get_email)$' { return T 'Email: {0}' (Truncate $a.query 40) }
+        '^workiq_(send_email|reply_to_email|create_draft).*' { return T 'Composing email' }
+        '^workiq_.*chat.*'             { return T 'Teams chat' }
+        '^workiq_.*event.*'            { return T 'Calendar' }
+        '^workiq_.*(people|profile|manager).*' { return T 'Looking up people' }
+        '^workiq_.*file.*'             { return T 'OneDrive files' }
+        '^m_remember$'                 { return T 'Saving a memory' }
+        '^m_recall$'                   { return T 'Recalling memory' }
+        '^skill$'                      { if ($a.skill) { return T 'Skill: {0}' $a.skill } ; return T 'Using a skill' }
+        '^browser_'                    { return T 'Browsing the web' }
         default                        { return (($name -replace '^m_','') -replace '_',' ') }
     }
 }
@@ -613,7 +724,7 @@ function Handle-Event($sess, $evt) {
             if ($Config.askToolNames -contains $evt.data.toolName) {
                 $q = $evt.data.arguments.question
                 if (-not $q) { $q = $evt.data.arguments.prompt }
-                if (-not $q) { $q = 'The agent is waiting for your answer.' }
+                if (-not $q) { $q = T 'The agent is waiting for your answer.' }
                 $choices = @()
                 foreach ($a in @($evt.data.arguments.answers)) {
                     if ($a -and $a.title) { $choices += $a.title }
@@ -757,20 +868,25 @@ function Focus-Agent {
             </TransformGroup>
           </Canvas.RenderTransform>
           <!-- head is inserted here at index 0 -->
-          <!-- laptop: screen lid (seen from behind) -->
-          <Border Canvas.Left="17" Canvas.Top="40" Width="24" Height="13" CornerRadius="2" Background="#FF3A4257"/>
-          <Border Canvas.Left="19" Canvas.Top="42" Width="20" Height="9"  CornerRadius="1" Background="#FF5C6B86"/>
-          <Ellipse Canvas.Left="27" Canvas.Top="45" Width="4" Height="4" Fill="#FF9DE7FF"/>
-          <!-- laptop: keyboard base -->
-          <Polygon Points="11,52 47,52 53,60 5,60" Fill="#FFC9D0DC"/>
-          <Polygon Points="14,53 44,53 48,58 10,58" Fill="#FFA9B3C4"/>
-          <!-- paws on the keyboard (animated typing); recoloured per mascot -->
-          <Ellipse x:Name="LeftPaw" Canvas.Left="14" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
-            <Ellipse.RenderTransform><TranslateTransform x:Name="LeftPawT"/></Ellipse.RenderTransform>
-          </Ellipse>
-          <Ellipse x:Name="RightPaw" Canvas.Left="32" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
-            <Ellipse.RenderTransform><TranslateTransform x:Name="RightPawT"/></Ellipse.RenderTransform>
-          </Ellipse>
+          <!-- The desk furniture, grouped so a mascot that does not type can hide
+               it in one move. Positions are unchanged: a nested Canvas at 0,0
+               keeps every Canvas.Left/Top in the same coordinate space. -->
+          <Canvas x:Name="Desk" Width="58" Height="60">
+            <!-- laptop: screen lid (seen from behind) -->
+            <Border Canvas.Left="17" Canvas.Top="40" Width="24" Height="13" CornerRadius="2" Background="#FF3A4257"/>
+            <Border Canvas.Left="19" Canvas.Top="42" Width="20" Height="9"  CornerRadius="1" Background="#FF5C6B86"/>
+            <Ellipse Canvas.Left="27" Canvas.Top="45" Width="4" Height="4" Fill="#FF9DE7FF"/>
+            <!-- laptop: keyboard base -->
+            <Polygon Points="11,52 47,52 53,60 5,60" Fill="#FFC9D0DC"/>
+            <Polygon Points="14,53 44,53 48,58 10,58" Fill="#FFA9B3C4"/>
+            <!-- paws on the keyboard (animated typing); recoloured per mascot -->
+            <Ellipse x:Name="LeftPaw" Canvas.Left="14" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
+              <Ellipse.RenderTransform><TranslateTransform x:Name="LeftPawT"/></Ellipse.RenderTransform>
+            </Ellipse>
+            <Ellipse x:Name="RightPaw" Canvas.Left="32" Canvas.Top="49" Width="11" Height="8" Fill="#FFB87A50">
+              <Ellipse.RenderTransform><TranslateTransform x:Name="RightPawT"/></Ellipse.RenderTransform>
+            </Ellipse>
+          </Canvas>
         </Canvas>
 
         <Button x:Name="CloseBtn" Content="&#x2715;" DockPanel.Dock="Right" Width="22" Height="22"
@@ -806,12 +922,17 @@ function Focus-Agent {
           <TextBlock x:Name="PermTitle" Text="&#x26A0; Permission requested" Foreground="#FF6A4A00" FontWeight="Bold" FontSize="13"/>
           <TextBlock x:Name="PermText" Margin="0,5,0,0" Foreground="#FFD6CFC2" FontSize="11.5"
                      TextWrapping="Wrap" MaxHeight="90" TextTrimming="CharacterEllipsis"/>
+          <!-- MinWidth, not Width. Fixed widths were fine in English and clipped
+               the moment the captions were translated: "Отклонить" and
+               "Odmítnout" both overrun a 74 px Deny button. MinWidth keeps the
+               English layout identical while letting a longer caption push the
+               button out instead of truncating it. -->
           <StackPanel Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
-            <Button x:Name="DenyBtn" Content="Deny" Width="74" Height="28" Margin="0,0,8,0"
+            <Button x:Name="DenyBtn" Content="Deny" MinWidth="74" Height="28" Margin="0,0,8,0" Padding="10,0"
                     Background="#FF3A2730" Foreground="#FFF0B4B4" BorderThickness="0" Cursor="Hand"/>
-            <Button x:Name="AllowBtn" Content="Allow" Width="90" Height="28"
+            <Button x:Name="AllowBtn" Content="Allow" MinWidth="90" Height="28" Padding="10,0"
                     Background="#FF2E7D46" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold" Cursor="Hand"/>
-            <Button x:Name="AnswerBtn" Content="Answer in Scout" Width="140" Height="28"
+            <Button x:Name="AnswerBtn" Content="Answer in Scout" MinWidth="140" Height="28" Padding="10,0"
                     Background="#FF0E7FB8" Foreground="#FFFFFFFF" BorderThickness="0" FontWeight="SemiBold"
                     Cursor="Hand" Visibility="Collapsed"/>
           </StackPanel>
@@ -823,7 +944,7 @@ function Focus-Agent {
 </Window>
 '@
 
-$reader = New-Object System.Xml.XmlNodeReader $xaml
+$reader = New-Object System.Xml.XmlNodeReader (Convert-XamlText $xaml)
 $Window = [Windows.Markup.XamlReader]::Load($reader)
 
 $HeaderText   = $Window.FindName('HeaderText')
@@ -847,6 +968,7 @@ $RightPawT    = $Window.FindName('RightPawT')
 $RootBorder   = $Window.FindName('RootBorder')
 $GlowBorder   = $Window.FindName('GlowBorder')
 $MascotHost   = $Window.FindName('MascotHost')
+$Desk         = $Window.FindName('Desk')
 $LeftPaw      = $Window.FindName('LeftPaw')
 $RightPaw     = $Window.FindName('RightPaw')
 $RootGlow     = $Window.FindName('RootGlow')
@@ -1175,6 +1297,106 @@ $(New-CuteEyes $p)
 "@
 }
 
+# Not an animal, and the only mascot that does not sit at the laptop: a ribbon
+# of light that turns on the spot and drifts through its colours. Built from
+# stroked arcs rather than a filled outline -- the top of one loop plus the
+# bottom of the next is what reads as a helix, and a stroke keeps the band an
+# even thickness at 58 px where a filled outline goes muddy.
+#
+# Everything the animation touches is named here: SpinS foreshortens it, SpinR
+# adds the tilt, and the gradient stops are re-coloured in place. Measured
+# against rotating the gradient axis and swapping pre-built frozen brushes; all
+# three landed inside the run-to-run noise, so this one was picked for being the
+# clearest to read.
+function New-RibbonMascot($p) {
+    @"
+      <Canvas x:Name="RibbonRoot" Width="58" Height="60">
+        <!-- The animals get visual mass from the laptop and paws they sit at.
+             With those hidden the sash alone filled only about 60% of the
+             canvas and read as small next to them, so the whole mark is scaled
+             up to match. Applied here rather than baked into the coordinates so
+             the traced geometry stays readable against the icon it came from. -->
+        <Canvas.RenderTransform>
+          <ScaleTransform ScaleX="1.18" ScaleY="1.18" CenterX="29" CenterY="33"/>
+        </Canvas.RenderTransform>
+        <Canvas.Resources>
+          <!-- Three stops, not two: the mark runs magenta at the left edge,
+               through a pale warm centre where the sash faces you, into purple
+               where it turns away. A two-stop ramp lost the bright middle and
+               the band stopped reading as a lit surface.
+               The axis is 34 degrees, measured off the real icon by taking the
+               centroid of its warm pixels and the centroid of its cool ones,
+               rather than picked by eye. -->
+          <LinearGradientBrush x:Key="RibbonBrush" StartPoint="0.08,0.22" EndPoint="0.92,0.78">
+            <GradientStop x:Name="RibbonA" Color="$($p.warm)" Offset="0"/>
+            <GradientStop x:Name="RibbonM" Color="$($p.spark)" Offset="0.42"/>
+            <GradientStop x:Name="RibbonB" Color="$($p.cool)" Offset="1"/>
+          </LinearGradientBrush>
+          <!-- the cut end, running the other way so the back of the band reads
+               as a face turned away from the light -->
+          <LinearGradientBrush x:Key="RibbonBack" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop x:Name="RibbonC" Color="$($p.cool)" Offset="0"/>
+            <GradientStop x:Name="RibbonD" Color="$($p.warm)" Offset="1"/>
+          </LinearGradientBrush>
+        </Canvas.Resources>
+        <!-- The sphere sits behind the band and outside the turning group:
+             carried along it swings out to the side and the mark reads as off
+             balance, where a still sphere with the band turning past it reads
+             as one thing moving in front of another. -->
+        <Ellipse Canvas.Left="21" Canvas.Top="13" Width="16" Height="16">
+          <Ellipse.Fill>
+            <RadialGradientBrush GradientOrigin="0.34,0.28" Center="0.5,0.5" RadiusX="0.72" RadiusY="0.72">
+              <GradientStop x:Name="OrbA" Color="$($p.spark)" Offset="0"/>
+              <GradientStop x:Name="OrbB" Color="$($p.cool)" Offset="1"/>
+            </RadialGradientBrush>
+          </Ellipse.Fill>
+        </Ellipse>
+        <Canvas x:Name="RibbonGroup" Width="58" Height="60">
+          <Canvas.RenderTransform>
+            <TransformGroup>
+              <ScaleTransform x:Name="SpinS" ScaleX="1" ScaleY="1" CenterX="29" CenterY="33"/>
+              <RotateTransform x:Name="SpinR" Angle="0" CenterX="29" CenterY="33"/>
+            </TransformGroup>
+          </Canvas.RenderTransform>
+          <!-- The Scout mark is a broad sash crossing the middle on the
+               diagonal with a twist in it, and a sphere in the upper nook.
+
+               Filled polygons with straight edges and a pinch at the twist,
+               rather than a stroked centreline. A stroke has one width and
+               round joins, so every version built that way read as a bent tube:
+               what makes a ribbon look flat is straight edges and the pinch
+               where it turns edge-on. Five earlier attempts are on the record:
+               concentric loops read as a donut, a helix as a spring, two filled
+               S outlines as crescents, and a single fat stroke as a tube.
+
+               Coordinates come from tracing the real icon row by row and
+               scoring candidates by silhouette overlap. This one sits at about
+               three quarters, which is the point where chasing the number
+               started making it look worse rather than better: the last of the
+               difference is the internal fold, and a 58 px mascot cannot show
+               that anyway. -->
+          <!-- near half: facing you, so wide and bright -->
+          <Path Fill="{StaticResource RibbonBrush}"
+                Data="M 11,17 C 19,18 26,22 31,27 L 30,38 C 24,32 17,29 11,31 Z"/>
+          <!-- far half, past the twist: turned away, so narrower and darker -->
+          <Path Fill="{StaticResource RibbonBack}"
+                Data="M 31,27 L 30,38 C 35,41 38,45 37,50 L 44,43
+                      C 44,35 39,29 31,27 Z"/>
+          <!-- the tail, dropping off the fold -->
+          <Path Fill="{StaticResource RibbonBrush}"
+                Data="M 37,50 C 37,45 35,41 30,38 L 27,46
+                      C 30,48 31,51 30,54 Z"/>
+          <!-- the cut end at the left, showing the back of the sash: it is what
+               tells you this is a strip and not a solid shape -->
+          <Path Fill="{StaticResource RibbonBack}"
+                Data="M 11,17 C 8,19 8,29 11,31 C 13,29 13,19 11,17 Z"/>
+        </Canvas>
+        <!-- specular highlight, on top of everything -->
+        <Ellipse Canvas.Left="25" Canvas.Top="15.5" Width="4.5" Height="3.5" Fill="#66FFFFFF"/>
+      </Canvas>
+"@
+}
+
 $MascotBuilders = @{
     quokka  = ${function:New-QuokkaHead}
     cat     = ${function:New-CatHead}
@@ -1183,6 +1405,7 @@ $MascotBuilders = @{
     bunny   = ${function:New-BunnyHead}
     penguin = ${function:New-PenguinHead}
     tuna    = ${function:New-TunaHead}
+    ribbon  = ${function:New-RibbonMascot}
 }
 
 # Ordered so the picker reads sensibly: the original mascot, then the cats with
@@ -1233,6 +1456,11 @@ $Mascots = [ordered]@{
     'penguin' = @{ Label = 'Penguin'; Species = 'penguin'; Palette = @{
         fur='#FF343945'; shade='#FF1A1D24'; ear='#FF464C5A'; earInner='#FF464C5A'
         muzzle='#FFFAF8F5'; nose='#FFF5AE44'; eye='#FF5E6B80'; blush='#FF8FA2C0'; paw='#FFF5AE44' } }
+
+    # The odd one out, and deliberately so: no face, no laptop, no paws. Desk is
+    # what tells Set-Mascot to hide the desk furniture the animals share.
+    'ribbon' = @{ Label = 'Ribbon'; Species = 'ribbon'; Desk = $false; Palette = @{
+        warm='#FFFF9E63'; cool='#FFB44BE0'; spark='#FFFFD9A8'; paw='#FFB44BE0' } }
 }
 
 $script:MascotHead = $null
@@ -1261,6 +1489,23 @@ function Set-Mascot([string]$id) {
     # The eye group is rebuilt with the head, so the animation's handle on it
     # has to be refreshed on every swap.
     $script:BlinkS = $head.FindName('BlinkS')
+    # Same for the ribbon's own parts. These come back null for every animal,
+    # which is exactly how the tick decides which body plan it is animating.
+    $script:SpinR    = $head.FindName('SpinR')
+    $script:SpinS    = $head.FindName('SpinS')
+    $script:RibbonA  = $head.FindName('RibbonA')
+    $script:RibbonM  = $head.FindName('RibbonM')
+    $script:RibbonB  = $head.FindName('RibbonB')
+    $script:RibbonC  = $head.FindName('RibbonC')
+    $script:RibbonD  = $head.FindName('RibbonD')
+    $script:OrbA     = $head.FindName('OrbA')
+    $script:OrbB     = $head.FindName('OrbB')
+
+    # A mascot that does not type has no use for the laptop or the paws. Default
+    # is $true so every existing mascot keeps its desk without being edited.
+    $wantsDesk = $true
+    if ($def.Contains('Desk')) { $wantsDesk = [bool]$def.Desk }
+    $Desk.Visibility = if ($wantsDesk) { 'Visible' } else { 'Collapsed' }
 
     $pawBrush = B $def.Palette.paw
     $LeftPaw.Fill  = $pawBrush
@@ -1326,7 +1571,12 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
     $pale  = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(235, 250, 250, 248))
 
     function Tri([single[]]$pts) {
-        $poly = @(
+        # Typed explicitly: an untyped @(...) is an Object[], and PowerShell 7
+        # will not bind that to DrawPolygon's PointF[] overload the way 5.1
+        # does. The launcher uses powershell.exe so this never fired in normal
+        # use, but running the script under pwsh broke every species that draws
+        # a polygon -- cat, fox, tuna and penguin all lost their tray icon.
+        [System.Drawing.PointF[]]$poly = @(
             (New-Object System.Drawing.PointF $pts[0], $pts[1]),
             (New-Object System.Drawing.PointF $pts[2], $pts[3]),
             (New-Object System.Drawing.PointF $pts[4], $pts[5]))
@@ -1336,6 +1586,9 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
 
     # head rect, then the eyes are placed relative to it
     $hx = 3.0; $hy = 8.0; $hw = 26.0; $hh = 22.0
+    # The ribbon has no head and no eyes, so it opts out of the shared body plan
+    # below rather than trying to squeeze into it.
+    $faceless = ($species -eq 'ribbon')
     try {
         switch ($species) {
             'cat' {
@@ -1352,11 +1605,11 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
                 $hy = 10; $hh = 20
                 Tri @(4,16, 7,1, 16,11)
                 Tri @(28,16, 25,1, 16,11)
-                $g.FillPolygon($dark, @(
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
                     (New-Object System.Drawing.PointF 6.2, 7.0),
                     (New-Object System.Drawing.PointF 7.0, 1.0),
                     (New-Object System.Drawing.PointF 11.0, 4.6)))
-                $g.FillPolygon($dark, @(
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
                     (New-Object System.Drawing.PointF 25.8, 7.0),
                     (New-Object System.Drawing.PointF 25.0, 1.0),
                     (New-Object System.Drawing.PointF 21.0, 4.6)))
@@ -1375,6 +1628,25 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
                 Tri @(31.5,9, 24,17.5, 31.5,26)
                 Tri @(12,7, 16,0.5, 20,7)
             }
+            'ribbon' {
+                # The sash alone, filling the frame on the diagonal, with the
+                # twist as a change of colour rather than a change of shape.
+                # The sphere is dropped: at 16 px a circle above a body reads as
+                # a head above shoulders no matter what the body is, and two
+                # attempts at keeping it both came out looking like a generic
+                # person icon. Tray glyphs are simplifications anyway -- the
+                # tuna is fins, the penguin is a beak.
+                $g.FillPolygon($brush, [System.Drawing.PointF[]]@(
+                    (New-Object System.Drawing.PointF 1.0, 6.0),
+                    (New-Object System.Drawing.PointF 18.0, 15.0),
+                    (New-Object System.Drawing.PointF 17.0, 28.0),
+                    (New-Object System.Drawing.PointF 1.0, 19.0)))
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
+                    (New-Object System.Drawing.PointF 18.0, 15.0),
+                    (New-Object System.Drawing.PointF 17.0, 28.0),
+                    (New-Object System.Drawing.PointF 30.0, 32.0),
+                    (New-Object System.Drawing.PointF 31.0, 19.0)))
+            }
             default {
                 # quokka: soft round ears
                 $g.FillEllipse($brush, 3.5, 1.5, 10, 11); $g.DrawEllipse($pen, 3.5, 1.5, 10, 11)
@@ -1382,23 +1654,25 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
             }
         }
 
-        $g.FillEllipse($brush, $hx, $hy, $hw, $hh)
-        $g.DrawEllipse($pen,   $hx, $hy, $hw, $hh)
+        if (-not $faceless) {
+            $g.FillEllipse($brush, $hx, $hy, $hw, $hh)
+            $g.DrawEllipse($pen,   $hx, $hy, $hw, $hh)
 
-        if ($species -eq 'penguin') {
-            $g.FillEllipse($pale, ($hx + 4), ($hy + 4), ($hw - 8), ($hh - 5))
-        }
+            if ($species -eq 'penguin') {
+                $g.FillEllipse($pale, ($hx + 4), ($hy + 4), ($hw - 8), ($hh - 5))
+            }
 
-        # Eyes, in the edge colour so they read on any taskbar background.
-        $ey = $hy + $hh * 0.32
-        $g.FillEllipse($dark, ($hx + $hw * 0.20), $ey, 5.4, 6.4)
-        $g.FillEllipse($dark, ($hx + $hw * 0.60), $ey, 5.4, 6.4)
+            # Eyes, in the edge colour so they read on any taskbar background.
+            $ey = $hy + $hh * 0.32
+            $g.FillEllipse($dark, ($hx + $hw * 0.20), $ey, 5.4, 6.4)
+            $g.FillEllipse($dark, ($hx + $hw * 0.60), $ey, 5.4, 6.4)
 
-        if ($species -eq 'penguin') {
-            $g.FillPolygon($dark, @(
-                (New-Object System.Drawing.PointF 13.0, 21.0),
-                (New-Object System.Drawing.PointF 19.0, 21.0),
-                (New-Object System.Drawing.PointF 16.0, 26.0)))
+            if ($species -eq 'penguin') {
+                $g.FillPolygon($dark, [System.Drawing.PointF[]]@(
+                    (New-Object System.Drawing.PointF 13.0, 21.0),
+                    (New-Object System.Drawing.PointF 19.0, 21.0),
+                    (New-Object System.Drawing.PointF 16.0, 26.0)))
+            }
         }
     } finally {
         $brush.Dispose(); $pen.Dispose(); $dark.Dispose(); $pale.Dispose(); $g.Dispose()
@@ -1444,7 +1718,7 @@ Rebuild-TrayIcons 'quokka'
 
 $Tray = New-Object System.Windows.Forms.NotifyIcon
 $Tray.Icon = $script:TrayIcons.idle
-$Tray.Text = 'Scout Companion - idle'
+$Tray.Text = 'Scout Companion - ' + (T 'Idle')
 $Tray.Visible = $true
 
 function Set-TrayState([string]$state, [string]$detail) {
@@ -1458,6 +1732,12 @@ function Set-TrayState([string]$state, [string]$detail) {
 function Stop-Companion {
     # Every exit path funnels through here: an orphaned NotifyIcon lingers in
     # the tray until the user hovers over it, which looks like a crash.
+    #
+    # Flush first. The opacity slider coalesces its writes behind a 600 ms timer
+    # so dragging it does not hammer the disk, which means a value set moments
+    # before quitting was still sitting in that timer and died with the process.
+    # From the outside that looks exactly like "settings don't save".
+    try { Save-PendingOpacity } catch { }
     try { $timer.Stop() } catch { }
     try { $anim.Stop() }  catch { }
     try { if ($script:SettingsWindow) { $script:SettingsWindow.Close() } } catch { }
@@ -1528,7 +1808,7 @@ function Apply-AutoStartFromUI {
     $script:SettingsSuppress = $true
     try { $script:SettingsAutoCheck.IsChecked = Test-AutoStart }
     finally { $script:SettingsSuppress = $false }
-    $script:SettingsAutoHint.Text = 'Could not update the Startup folder. Check that you can write to it.'
+    $script:SettingsAutoHint.Text = T 'Could not update the Startup folder. Check that you can write to it.'
 }
 
 [xml]$settingsXaml = @'
@@ -1684,7 +1964,7 @@ function Show-SettingsWindow {
         try { $script:SettingsWindow.Activate(); return } catch { $script:SettingsWindow = $null }
     }
 
-    $sw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $settingsXaml))
+    $sw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader (Convert-XamlText $settingsXaml)))
 
     # Every control the event handlers touch is held at script scope: a
     # PowerShell event handler runs long after its defining function has
@@ -1706,7 +1986,7 @@ function Show-SettingsWindow {
     $script:SettingsAutoCheck.IsChecked = Test-AutoStart
     if (-not (Test-Path $WatcherPath)) {
         $script:SettingsAutoCheck.IsEnabled = $false
-        $script:SettingsAutoHint.Text = "Watch-Scout.ps1 is missing from $ScriptDir, so this cannot be turned on."
+        $script:SettingsAutoHint.Text = T 'Watch-Scout.ps1 is missing from {0}, so this cannot be turned on.' $ScriptDir
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
 
@@ -1718,15 +1998,14 @@ function Show-SettingsWindow {
         $v = Set-ToastOpacity ([double]$script:SettingsOpacity.Value)
         $script:SettingsOpacityText.Text = '{0:N0}%' -f ($v * 100)
         # Dragging a slider fires this continuously, so coalesce the writes and
-        # persist once the value has settled.
+        # persist once the value has settled. Anything that ends the process has
+        # to flush this first: see Save-PendingOpacity, called from both the
+        # settings window's Closed handler and Stop-Companion.
         $script:OpacityPendingValue = $v
         if (-not $script:OpacitySaveTimer) {
             $script:OpacitySaveTimer = New-Object System.Windows.Threading.DispatcherTimer
             $script:OpacitySaveTimer.Interval = [TimeSpan]::FromMilliseconds(600)
-            $script:OpacitySaveTimer.Add_Tick({
-                $script:OpacitySaveTimer.Stop()
-                [void](Save-Setting @{ opacity = $script:OpacityPendingValue })
-            })
+            $script:OpacitySaveTimer.Add_Tick({ Save-PendingOpacity })
         }
         $script:OpacitySaveTimer.Stop()
         $script:OpacitySaveTimer.Start()
@@ -1793,6 +2072,9 @@ function Show-SettingsWindow {
 
     $closeBtn.Add_Click({ if ($script:SettingsWindow) { $script:SettingsWindow.Close() } })
     $sw.Add_Closed({
+        # Drain the debounced opacity write before the window goes: closing the
+        # settings window right after moving the slider otherwise dropped it.
+        try { Save-PendingOpacity } catch { }
         try { $script:SettingsResTimer.Stop() } catch { }
         $script:SettingsWindow    = $null
         $script:SettingsAnimCheck = $null
@@ -1824,11 +2106,11 @@ function Show-SettingsWindow {
     $sw.Activate()
 }
 
-$MenuShow  = New-Object System.Windows.Forms.ToolStripMenuItem 'Show toast'
-$MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem 'Open Scout'
-$MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem 'Pause animation'
-$MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem 'Settings...'
-$MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem 'Exit'
+$MenuShow  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Show toast')
+$MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Open Scout')
+$MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Pause animation')
+$MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Settings...')
+$MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Exit')
 $MenuPause.CheckOnClick = $true
 $MenuPause.Checked = -not $script:AnimEnabled
 
@@ -1892,6 +2174,34 @@ $script:EyeBase = 1.0           # openness the eyes return to for this state
 # plain .NET generator instead.
 $script:Rng = New-Object System.Random
 
+# Handles on the ribbon mascot, null for every animal. Set-Mascot rebinds them.
+$script:SpinR = $null; $script:SpinS = $null
+$script:RibbonA = $null; $script:RibbonM = $null; $script:RibbonB = $null
+$script:RibbonC = $null; $script:RibbonD = $null
+$script:OrbA = $null; $script:OrbB = $null
+$script:Hue = 0.06
+$script:SpinPhase = 0.0
+
+# HSV to Color, written out longhand because this runs four times a frame and
+# System.Drawing's converter would mean a managed<->GDI hop for each one.
+function Hue-Color([double]$h, [double]$s, [double]$v) {
+    $h = $h - [Math]::Floor($h)          # wrap into 0..1
+    $i = [int][Math]::Floor($h * 6) % 6
+    $f = $h * 6 - [Math]::Floor($h * 6)
+    $p = $v * (1 - $s)
+    $q = $v * (1 - $f * $s)
+    $t = $v * (1 - (1 - $f) * $s)
+    switch ($i) {
+        0 { $r=$v; $g=$t; $b=$p }
+        1 { $r=$q; $g=$v; $b=$p }
+        2 { $r=$p; $g=$v; $b=$t }
+        3 { $r=$p; $g=$q; $b=$v }
+        4 { $r=$t; $g=$p; $b=$v }
+        default { $r=$v; $g=$p; $b=$q }
+    }
+    return [System.Windows.Media.Color]::FromRgb([byte]($r*255), [byte]($g*255), [byte]($b*255))
+}
+
 # Squash-and-open, held one frame at the bottom so the blink is visible at
 # 12 fps without looking like a dropped frame.
 $BlinkFrames = @(0.55, 0.10, 0.10, 0.60)
@@ -1903,6 +2213,10 @@ function Reset-Mascot {
     $BodyR.Angle = 0
     $LeftPawT.Y = 0; $RightPawT.Y = 0
     if ($script:BlinkS) { $script:BlinkS.ScaleY = 1.0 }
+    # The ribbon parks facing forward rather than mid-turn, which would read as
+    # a frozen frame rather than a resting pose.
+    if ($script:SpinR) { $script:SpinR.Angle = 0 }
+    if ($script:SpinS) { $script:SpinS.ScaleX = 1.0; $script:SpinS.ScaleY = 1.0 }
     $script:BlinkStep = -1
 }
 
@@ -1952,6 +2266,69 @@ $anim.Add_Tick({
         $RightPawT.Y = 0
         # relaxed, a touch sleepy
         $script:EyeBase = 0.86
+    }
+
+    # --- ribbon ---------------------------------------------------------------
+    # Only the ribbon mascot binds these, so the animals skip the whole block.
+    if ($script:SpinR) {
+        # The desk transforms pivot on the laptop base at y=52, which swings a
+        # mascot that has no laptop. Neutralise them and let the ribbon's own
+        # transforms carry the motion.
+        $BodyR.Angle = 0; $BodyT.X = 0
+        $BodyS.ScaleX = 1.0; $BodyS.ScaleY = 1.0
+
+        # Rates: spin is radians per frame, hue is turns of the colour wheel per
+        # frame. Multiply either by PhaseScale * fps to read it in real time --
+        # busy turns once every 3.5 seconds and comes round the wheel in 8, idle
+        # takes 14 and 30. Note the band reads wide-narrow-wide twice per
+        # revolution, since you see the front, the edge, the back, the edge.
+        # The first pass ran the hue 25x faster than this and strobed through the
+        # whole wheel in a second and a quarter, which was unpleasant to sit
+        # next to.
+        if ($script:Pending -or $script:Asking) { $spin = 0.052; $hueRate = 0.0100; $pin = $true }
+        elseif ($script:Busy)                   { $spin = 0.090; $hueRate = 0.0060; $pin = $false }
+        else                                    { $spin = 0.022; $hueRate = 0.0018; $pin = $false }
+
+        $script:SpinPhase += $spin * $script:PhaseScale
+
+        # A band turning about its own vertical axis does not rotate on screen --
+        # it foreshortens. Projected into 2D that is exactly ScaleX = cos(theta),
+        # which passes through zero and goes negative, mirroring the band as its
+        # far side comes round. Driving a RotateTransform instead made it tumble
+        # end over end like a steering wheel, which is a different object.
+        #
+        # The floor stops it collapsing to an invisible sliver when it is
+        # edge-on: true in perspective, but a ribbon has thickness, and a live
+        # screenshot caught it at 0.28 looking like a stray purple squiggle
+        # rather than a mascot.
+        $c = [Math]::Cos($script:SpinPhase)
+        $mag = [Math]::Max(0.42, [Math]::Abs($c))
+        $script:SpinS.ScaleX = if ($c -lt 0) { -$mag } else { $mag }
+        # Just enough tilt to keep it from looking like a machine part.
+        $script:SpinR.Angle = [Math]::Sin($script:SpinPhase * 0.5) * 6.0
+
+        # The toast already says what state it is in through the glow colour, so
+        # a free-running rainbow would argue with it. Left alone the hue drifts
+        # wherever it likes; the moment something is waiting on you it is pinned
+        # to a narrow shimmer around that state's own colour and reinforces the
+        # signal instead of competing with it.
+        $script:Hue += $hueRate * $script:PhaseScale
+        $h = if (-not $pin) { $script:Hue }
+             elseif ($script:Pending) { 0.11 + [Math]::Sin($script:Hue * 6.283) * 0.035 }   # amber
+             else                     { 0.52 + [Math]::Sin($script:Hue * 6.283) * 0.035 }   # cyan
+
+        # Every stop moves together, front face and back alike. Leaving the
+        # middle stop and the back-face pair fixed while the outer two drifted
+        # made the sash look like it was lit by two different lamps.
+        $script:RibbonA.Color = Hue-Color $h            0.62 1.00
+        $script:RibbonM.Color = Hue-Color ($h + 0.06)   0.34 1.00
+        $script:RibbonB.Color = Hue-Color ($h + 0.17)   0.78 0.92
+        # the back of the sash: same hues, run the other way and dimmer, because
+        # it is the face turned away from the light
+        $script:RibbonC.Color = Hue-Color ($h + 0.17)   0.80 0.72
+        $script:RibbonD.Color = Hue-Color $h            0.66 0.82
+        $script:OrbA.Color    = Hue-Color ($h - 0.04)   0.28 1.00
+        $script:OrbB.Color    = Hue-Color ($h + 0.17)   0.72 0.95
     }
 
     # --- blink ---------------------------------------------------------------
@@ -2052,11 +2429,15 @@ $timer.Add_Tick({
     if ($desiredState -ne $script:ThemeState) {
         Set-Theme $desiredState
         $script:ThemeState = $desiredState
+        # Same strings as the header, not lowercase variants. JSON object keys
+        # are matched case-insensitively by ConvertFrom-Json, so "Idle" and
+        # "idle" as separate keys made every language file fail to parse -- and
+        # the loader's catch turned that into a silent fall back to English.
         $detail = switch ($desiredState) {
-            'alert'   { 'approval needed' }
-            'ask'     { 'waiting on your answer' }
-            'working' { 'Scout is working' }
-            default   { if ($agentRunning) { 'idle' } else { 'agent not detected' } }
+            'alert'   { T 'Approval needed' }
+            'ask'     { T 'Waiting on you' }
+            'working' { T 'Scout is working' }
+            default   { if ($agentRunning) { T 'Idle' } else { T 'Agent not detected' } }
         }
         Set-TrayState $desiredState $detail
     }
@@ -2065,8 +2446,8 @@ $timer.Add_Tick({
     if ($hasPending) {
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
         $extra = if ($State.PendingPerms.Count -gt 1) { " (+$($State.PendingPerms.Count - 1))" } else { '' }
-        $HeaderText.Text = "Approval needed$extra"
-        $PermTitle.Text  = [char]0x26A0 + ' Permission requested' + (Where-From $first)
+        $HeaderText.Text = (T 'Approval needed') + $extra
+        $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested') + (Where-From $first)
         $PermText.Text = $first.text
         $AllowBtn.Visibility  = 'Visible'
         $DenyBtn.Visibility   = 'Visible'
@@ -2080,8 +2461,8 @@ $timer.Add_Tick({
     elseif ($hasAsk) {
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
         $extra = if ($State.PendingAsks.Count -gt 1) { " (+$($State.PendingAsks.Count - 1))" } else { '' }
-        $HeaderText.Text = "Waiting on you$extra"
-        $PermTitle.Text  = [char]0x2753 + ' The agent asked you a question' + (Where-From $first)
+        $HeaderText.Text = (T 'Waiting on you') + $extra
+        $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question') + (Where-From $first)
         $body = $first.text
         if ($first.choices -and $first.choices.Count) {
             $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
@@ -2098,9 +2479,9 @@ $timer.Add_Tick({
     }
     else {
         $PermPanel.Visibility = 'Collapsed'
-        if (-not $agentRunning) { $HeaderText.Text = 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
-        elseif ($script:Busy)   { $HeaderText.Text = 'Working hard...';     $Dot.Fill = '#FF4ADE80' }
-        else                    { $HeaderText.Text = 'Idle';                $Dot.Fill = '#FF8A93A6' }
+        if (-not $agentRunning) { $HeaderText.Text = T 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
+        elseif ($script:Busy)   { $HeaderText.Text = T 'Working hard...';    $Dot.Fill = '#FF4ADE80' }
+        else                    { $HeaderText.Text = T 'Idle';               $Dot.Fill = '#FF8A93A6' }
 
         if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
         else { $SayingText.Visibility = 'Collapsed' }
@@ -2133,7 +2514,7 @@ $timer.Add_Tick({
 
     # The tray item is a toggle, so its caption has to say what clicking it will
     # do rather than name a state.
-    $wantCaption = if ($shouldShow) { 'Hide toast' } else { 'Show toast' }
+    $wantCaption = if ($shouldShow) { T 'Hide toast' } else { T 'Show toast' }
     if ($MenuShow.Text -ne $wantCaption) { $MenuShow.Text = $wantCaption }
 })
 
@@ -2154,6 +2535,9 @@ $timer.Start()
 $Window.Visibility = 'Hidden'
 # Make sure the tray icon never outlives the process, however it ends.
 $Window.Add_Closed({
+    # Last line of defence: closing the toast ends the app, and a pending
+    # opacity write has to survive that.
+    try { Save-PendingOpacity } catch { }
     try { $Tray.Visible = $false; $Tray.Dispose() } catch { }
 })
 $app = New-Object System.Windows.Application
