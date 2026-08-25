@@ -25,6 +25,12 @@
 
 #Requires -Version 5.0
 
+# Bumped by hand, and the tag that goes with it is what a release is cut from.
+# Semantic versioning, read from the user's side of the app: MAJOR when
+# something they rely on changes shape, MINOR for a new capability, PATCH for a
+# fix that only ever makes an existing one behave.
+$CompanionVersion = '1.0.0'
+
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
@@ -2937,6 +2943,7 @@ function Apply-AutoStartFromUI {
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
       <TextBlock Grid.Row="0" Grid.Column="0" Text="Memory" Width="120" Foreground="#FF9AA6BE"/>
       <TextBlock Grid.Row="0" Grid.Column="1" x:Name="MemText" Text="-"/>
@@ -2944,6 +2951,10 @@ function Apply-AutoStartFromUI {
       <TextBlock Grid.Row="1" Grid.Column="1" x:Name="CpuText" Text="-" Margin="0,5,0,0"/>
       <TextBlock Grid.Row="2" Grid.Column="0" Text="Uptime" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
       <TextBlock Grid.Row="2" Grid.Column="1" x:Name="UpText" Text="-" Margin="0,5,0,0"/>
+      <!-- Which build this is. Worth having somewhere reachable: a bug report
+           that cannot say what it was running is most of the way to useless. -->
+      <TextBlock Grid.Row="3" Grid.Column="0" Text="Version" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
+      <TextBlock Grid.Row="3" Grid.Column="1" x:Name="VerText" Text="-" Margin="0,5,0,0"/>
     </Grid>
 
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
@@ -2974,6 +2985,8 @@ function Show-SettingsWindow {
     $script:SettingsMascot    = $sw.FindName('MascotPicker')
     $script:SettingsOpacity   = $sw.FindName('OpacitySlider')
     $script:SettingsOpacityText = $sw.FindName('OpacityValue')
+    $verText                  = $sw.FindName('VerText')
+    if ($verText) { $verText.Text = $CompanionVersion }
     $closeBtn                 = $sw.FindName('CloseSettingsBtn')
 
     # Reflect reality, not a remembered flag. Set before the handlers are
