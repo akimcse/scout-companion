@@ -65,8 +65,10 @@ place.
   approval is needed (see [Status at a glance](#status-at-a-glance)).
 - **One-click approvals** — surfaces pending permission requests and clicks the real
   Allow/Deny button inside the agent window for you (via UI Automation — no need to
-  bring the window to the foreground). When approval is needed the whole toast turns a
-  **bright pulsing yellow** so you can't miss it.
+  bring the window to the foreground). With several Scout windows open it finds the one
+  actually showing the prompt rather than guessing, and declines only when two windows
+  are asking at once. When approval is needed the whole toast turns a **bright pulsing
+  yellow** so you can't miss it.
 - **Tells you when the agent is stuck on a question** — if the agent asks you something,
   the turn is parked until you answer, exactly like an approval. The toast turns **cyan**,
   shows the question and its options, and offers to bring the agent window forward. It
@@ -75,12 +77,20 @@ place.
   asks you a question, it reaches the toast too, tagged with which one it came from. The
   step list and narration follow whichever session moved most recently, so with a single
   session it looks exactly as it always did.
+- **Says which conversation is talking** — the toast carries Scout's own chat title, the
+  name you read in its sidebar, both on a prompt and in the ordinary working state. With
+  several sessions running, that is the difference between a step list you can place and
+  one you cannot. It works the title out from the sidebar without ever touching a window
+  you are looking at, keeps it once learned, and leaves a session unnamed rather than
+  risk naming it wrongly (see [Naming the conversation](#naming-the-conversation-on-the-toast)).
 - **Open lands on the right conversation** — Open, Answer and the tray don't just raise
   the window, they steer Scout's sidebar to the chat that raised the prompt. If it can't
   work out which chat that is, it brings the window forward and leaves your sidebar
   alone (see [How it works](#how-it-works)).
 - **Smart visibility** — stays hidden while the agent window is focused; appears only
   when the agent is busy *and* you've looked away, or whenever an approval is pending.
+  It also shows itself for a few seconds at startup, so launching it has a visible result
+  rather than none.
 - **Stays out of the way** — around 1.4% of one CPU core and a flat working set while
   running. The mascot timer stops whenever the toast is off screen, and the session and
   window lookups are cached rather than rescanned every tick.
@@ -152,7 +162,12 @@ where English puts it.
 1. Download/clone this repo anywhere.
 2. Double-click **`Start-ScoutCompanion.cmd`**.
 
-That's it. The toast stays hidden until the agent is working in the background.
+That's it. The toast stays hidden until the agent is working in the background — apart
+from a brief hello at startup, so you can see it worked.
+
+To pin a particular build rather than tracking `main`, grab a tagged
+[release](https://github.com/akimcse/scout-companion/releases) instead of cloning. There
+is nothing to compile either way; the tag is just a known-good point.
 
 ### Put it in the Start Menu
 
@@ -215,8 +230,8 @@ Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast
 | **Start automatically with Scout** | Adds or removes the `Watch-Scout.ps1` shortcut in your Startup folder. Per-user, no registry writes, no admin rights. The checkbox reads the real state of the folder, so editing it outside the app still shows up correctly. |
 | **Animate the mascot** | Off leaves the mascot in a resting pose and stops its timer entirely. Shares one setting with **Pause animation** in the tray menu. |
 | **Mascot** | Switches between the twelve mascots live, no restart needed. |
-| **Opacity** | Fades the whole toast, from solid down to 35%. Useful if you want it present but not loud. Applies as you drag; the value is saved once you settle. The 35% floor is deliberate — a fully transparent window would still swallow clicks. |
-| **This process** | Live working set, CPU and uptime for the companion itself, so "how much is this costing me?" does not require hunting through Task Manager for the right `powershell.exe`. |
+| **Opacity** | Fades the whole toast, from solid down to 35%. Useful if you want it present but not loud. Applies as you drag; the value is saved once you settle. Clicking the track steps one notch at a time. The 35% floor is deliberate — a fully transparent window would still swallow clicks. |
+| **This process** | Live working set, CPU, uptime and the version you are running, so "how much is this costing me?" and "which build is this?" do not require hunting through Task Manager for the right `powershell.exe`. |
 
 Changes are written straight into `config.json`, so they survive a restart. Anything you
 put in that file by hand is preserved.
@@ -479,6 +494,20 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
   Scout window is narrow enough that the sidebar is gone there is nothing to search at
   all. Widen the window, or set `openMatchingSession` to `false` if you would rather it
   never tried.
+- **A session shows its latest message instead of a chat title** — it has not worked the
+  title out yet, or it refused to. It only looks while no Scout window is in front, and
+  it names nobody where two sessions could equally be the same chat. Both are deliberate;
+  the latest message is the fallback, not a failure.
+
+## Versioning
+
+[Semantic versioning](https://semver.org/), read from your side of the app rather than
+the code's: **major** when something you rely on changes shape, **minor** for a new
+capability, **patch** for a fix that only makes an existing one behave.
+
+The running version is in **Settings → This process**, and every release is tagged, so a
+bug report can say what it was running.
+
 ## Privacy & safety
 
 - Reads only local session files and the local agent window. No telemetry, no network.
