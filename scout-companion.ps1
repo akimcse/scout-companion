@@ -2718,8 +2718,16 @@ function Apply-AutoStartFromUI {
       <TextBlock Text="Opacity" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
       <TextBlock x:Name="OpacityValue" Text="100%" Width="46" Foreground="#FFE6EAF2" VerticalAlignment="Center"
                  TextAlignment="Right" DockPanel.Dock="Right"/>
+      <!-- SmallChange and LargeChange are set explicitly because the defaults
+           are wrong for a range this narrow: LargeChange defaults to 1.0, which
+           is larger than the whole 0.35-1.0 range, so a click on the track
+           slammed the value to whichever end was clicked instead of stepping.
+           Both are one tick now, so a click and an arrow key each move by the
+           interval the ticks are drawn at. -->
       <Slider x:Name="OpacitySlider" Minimum="0.35" Maximum="1.0" Value="1.0"
-              TickFrequency="0.05" IsSnapToTickEnabled="True" VerticalAlignment="Center" Cursor="Hand"/>
+              TickFrequency="0.05" IsSnapToTickEnabled="True"
+              SmallChange="0.05" LargeChange="0.05"
+              VerticalAlignment="Center" Cursor="Hand"/>
     </DockPanel>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>

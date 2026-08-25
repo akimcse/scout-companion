@@ -296,6 +296,15 @@ the store that keeps a learned title from evaporating:
 powershell -NoProfile -ExecutionPolicy Bypass -File Test-TitleLearning.ps1
 ```
 
+`Test-SettingsUi.ps1` covers the opacity slider, which stepped wrongly because WPF's
+default `LargeChange` of 1.0 is larger than the control's whole 0.35–1.0 range — one
+click on the track jumped to whichever end was clicked. It builds the real settings
+markup, so it needs a desktop and an STA host:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -STA -File Test-SettingsUi.ps1
+```
+
 Approvals and questions are merged across every followed session; the step list and
 narration come from whichever moved most recently. A session with something pending is
 kept even after it goes quiet, because an approval does not expire just because nobody
