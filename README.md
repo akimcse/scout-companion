@@ -315,27 +315,35 @@ resumed session opens with "carry on" and naming it that would be worse than use
 A bare project folder is only shown when more than one session is being followed; on
 its own it says almost nothing, and it reads the same for every session on the project.
 
-**Where the real title comes from.** Two places, both using the timestamp match above.
-Pressing **Open** learns it as a side effect of finding the chat. Otherwise the
-companion reads whatever sidebar happens to be open already — no clicking, no typing,
-no focus taken, because this is your window and rearranging it to read a label would be
-overstepping. A learned title is written to `titles.json` next to the script, so it
-survives the session going quiet and survives a restart; entries for sessions that no
-longer exist are dropped when it loads.
+**Where the real title comes from.** Scout's sidebar, using the timestamp match above.
+Pressing **Open** learns it as a side effect of finding the chat, and otherwise the
+companion goes and looks: it types each unnamed session's topic into the chat search,
+matches the row, and clears the box again. No chat is clicked, so nothing navigates.
+A learned title is written to `titles.json` next to the script, so it survives the
+session going quiet and survives a restart; entries for sessions that no longer exist
+are dropped when it loads.
 
-Be aware the passive read is genuinely best-effort, and usually finds nothing. Sidebar
-rows only carry a timestamp while the **search field** is open, and the timestamp is the
-only thing tying a row to a session — there is no selection marker to read, and the
-title appears nowhere else in the window. With the sidebar open and the search closed
-the companion gets a list of titles it cannot match to anything, so it learns nothing
-rather than guessing. Reading a sidebar means walking an accessibility tree of several
-hundred nodes, which measured at half again the companion's entire CPU cost when run on
-a fixed timer, so a fruitless look backs off — doubling up to `chatTitleScanMaxMs` — and
-drops back to `chatTitleScanMs` the moment an unnamed conversation appears.
+**It only ever looks while no Scout window is in front.** Typing into someone's search
+box as they watch would be exactly the overreach this file has had to walk back before,
+so if you are looking at Scout it does not touch it — it waits until you are somewhere
+else, which in practice is a few seconds later. Whatever was open is put back, including
+a query you had left in the box.
+
+Typing is unavoidable, and that took measuring to establish. A sidebar sitting open
+lists its chats with **no timestamps at all** — 22 rows, not one carrying a time — and
+the timestamp is the only thing tying a row to a session: there is no selection marker
+to read, and the title appears nowhere else in the window. Put a query in the search box
+and every row that comes back carries one. So a read-only glance learns nothing, which
+is why it types.
 
 Where two sessions match the same row, neither is named. The point of a real chat title
 is that it identifies the conversation, so one hung on the wrong session is worse than
 none at all.
+
+A look that finds nothing backs off, doubling up to `chatTitleScanMaxMs`, and drops back
+to `chatTitleScanMs` as soon as an unnamed conversation appears. Being unable to look
+because Scout is in front does **not** count as a fruitless look — treating it as one is
+what stopped this ever learning anything while the app was being used.
 
 While a prompt is up the header drops its own name and only the card is labelled: the
 conversation asking for permission need not be the one whose steps were scrolling past
@@ -369,8 +377,8 @@ and edit. Common overrides:
 | `pollIntervalMs` | `700` | Event/focus polling interval |
 | `maxSessions` | `6` | How many concurrently active sessions to follow |
 | `sessionRescanMs` | `5000` | How often to re-resolve which session is active. Between rescans the companion just tails the file it already found |
-| `chatTitleScanMs` | `15000` | How often to read an already-open sidebar for Scout's chat titles. `0` never looks |
-| `chatTitleScanMaxMs` | `300000` | Ceiling the above backs off to while it keeps finding nothing |
+| `chatTitleScanMs` | `15000` | How often to look up Scout's chat titles. Only ever while no Scout window is in front. `0` never looks |
+| `chatTitleScanMaxMs` | `300000` | Ceiling the above backs off to after a look that finds nothing |
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps). The mascot moves at the same speed whatever you set |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in the settings window |
 | `mascot` | `quokka` | Which mascot to show. Also in the settings window |

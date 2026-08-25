@@ -385,6 +385,7 @@ $script:StepSignature     = $null                  # last rendered step list
 $script:ChatScanUtc       = [datetime]::MinValue   # throttle for the sidebar read
 $script:ChatScanEvery     = 0                      # current backoff interval, ms
 $script:ChatScanSig       = $null                  # which sessions were still unnamed
+$script:ChatScanLooked    = $false                 # did the last scan get as far as searching
 
 # ---------------------------------------------------------------------------
 # Learned chat titles.
@@ -850,10 +851,16 @@ function Read-NewEvents {
             $got = $false
             try { $got = Update-SessionTitles } catch { }
             if ($got) { $script:ChatScanEvery = $base }
-            else {
+            elseif ($script:ChatScanLooked) {
+                # Looked and found nothing: worth trying less often.
                 $cap = [double]$Config.chatTitleScanMaxMs
                 $script:ChatScanEvery = [Math]::Min($script:ChatScanEvery * 2, $cap)
             }
+            # Otherwise it never got to look - almost always because a Scout
+            # window was in front - which says nothing about whether there is
+            # anything to find, so the interval stays where it is. Backing off
+            # for that reason is what stopped it ever learning anything while
+            # the app was being used.
         }
     }
 }
@@ -1254,29 +1261,116 @@ function Select-ChatRow($rows, [double]$age) {
     return (@($cands | Sort-Object Age, Rank))[0].Row
 }
 
-# Rows from any sidebar that is already open, read and nothing more: no
-# clicking, no typing, no focus taken. This is the user's window, and a
-# companion that rearranges it to read a label has overstepped.
+# True when no Scout window is in front. Anything done to a window nobody is
+# looking at leaves no trace on screen, and that is the only condition under
+# which the sidebar gets touched: the alternative is making the user's own
+# window flicker to read a label off it.
+function Test-AgentUnobserved {
+    $fg = [ScoutNative]::GetForegroundWindow()
+    if ($fg -eq [IntPtr]::Zero) { return $true }
+    $owner = [uint32]0
+    try { [void][ScoutNative]::GetWindowThreadProcessId($fg, [ref]$owner) } catch { return $false }
+    $pids = Get-AgentPids
+    return (-not $pids.Contains([uint32]$owner))
+}
+
+# Reads Scout's chat list, with the timestamps that make a row identifiable.
 #
-# The catch, and it is the whole reason this is best-effort: rows only carry a
-# timestamp while the search field is open, and the timestamp is the only thing
-# that ties a row to a session. A sidebar opened without it hands over titles
-# that match nothing, so nothing is learned - and nothing is guessed.
-function Read-VisibleChatRows {
-    $out = @()
-    foreach ($h in @(Get-AgentWindows)) {
-        # Chromium builds its accessibility tree on demand, so without this the
-        # window looks empty. It is a message, not a change to anything on screen.
-        Wake-AgentA11y $h
-        $root = $null
-        try { $root = $UiaEl::FromHandle($h) } catch { continue }
-        if (-not $root) { continue }
-        # An open sidebar is the one offering to hide itself.
-        if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) { continue }
-        $rows = @(Get-ChatRows $root)
-        if ($rows.Count) { $out += ,$rows }
+# Typing is unavoidable, which took measuring to establish. A sidebar sitting
+# open lists 22 chats and not one carries a timestamp; put a query in the search
+# box and every row that comes back has one. The timestamp is the only thing
+# tying a row to a session - there is no selection marker to read, and the title
+# appears nowhere else in the window - so without typing there is nothing to
+# match on and nothing can be learned.
+#
+# Hence the rule the caller enforces: this only ever runs while no Scout window
+# is in front, so the search that gets typed and cleared is never on screen.
+# Whatever was open is put back, and a query the user left in the box is put
+# back with it.
+function Invoke-ChatSearch([IntPtr]$hwnd, [string[]]$queries) {
+    # Returns one row list per query, in order. An empty list means that query
+    # produced nothing usable.
+    $results = @()
+    Wake-AgentA11y $hwnd
+    Start-Sleep -Milliseconds 250
+    $root = $null
+    try { $root = $UiaEl::FromHandle($hwnd) } catch { return @() }
+    if (-not $root) { return @() }
+
+    $openedSidebar = $false
+    $openedSearch  = $false
+    $original      = $null
+    try {
+        if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) {
+            if (-not (Invoke-UiaElement (Find-UiaByName $root 'Show sidebar' $UiaType::Button))) { return @() }
+            $openedSidebar = $true
+            Start-Sleep -Milliseconds 350
+            $root = $UiaEl::FromHandle($hwnd)
+        }
+
+        $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+        if (-not $box) {
+            if (Invoke-UiaElement (Find-UiaByName $root 'Show chat search' $UiaType::Button)) {
+                $openedSearch = $true
+                Start-Sleep -Milliseconds 400
+                $root = $UiaEl::FromHandle($hwnd)
+                $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+            }
+        }
+        if (-not $box) { return @() }
+
+        # A query the user typed themselves is theirs; note it so it can go back.
+        try { $original = $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { }
+
+        foreach ($q in $queries) {
+            if (-not $q) { $results += ,@(); continue }
+            # No SetFocus. The field takes a value without the caret, and taking
+            # the caret would pull it out of whatever the user was typing in.
+            try { $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($q) }
+            catch { $results += ,@(); continue }
+
+            # Results arrive asynchronously, so poll rather than pay a fixed
+            # worst case on every query.
+            $rows = @()
+            for ($i = 0; $i -lt 12; $i++) {
+                Start-Sleep -Milliseconds 150
+                $rows = @(Get-ChatRows ($UiaEl::FromHandle($hwnd)))
+                if (@($rows | Where-Object { $_.When }).Count -gt 0) { break }
+            }
+            $results += ,$rows
+        }
+        return $results
+    } catch { return $results } finally {
+        try {
+            $root2 = $UiaEl::FromHandle($hwnd)
+            $b2 = Find-UiaByName $root2 'Search chats' $UiaType::Edit
+            if ($b2) {
+                $back = if ($original) { $original } else { '' }
+                try { $b2.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($back) } catch { }
+            }
+            Start-Sleep -Milliseconds 250
+            if ($openedSearch) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($hwnd)) 'Hide chat search' $UiaType::Button))
+            }
+            if ($openedSidebar) {
+                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($hwnd)) 'Hide sidebar' $UiaType::Button))
+            }
+        } catch { }
     }
-    return $out
+}
+
+# The window to do that in: one that already has its sidebar open, so there is
+# less to disturb, and otherwise whichever comes first.
+function Select-SearchWindow {
+    $wins = @(Get-AgentWindows)
+    if ($wins.Count -eq 0) { return [IntPtr]::Zero }
+    foreach ($h in $wins) {
+        $r = $null
+        try { $r = $UiaEl::FromHandle($h) } catch { continue }
+        if (-not $r) { continue }
+        if (Find-UiaByName $r 'Hide sidebar' $UiaType::Button) { return $h }
+    }
+    return $wins[0]
 }
 
 # Which of a set of proposed namings are safe to apply. A title claimed by two
@@ -1300,45 +1394,75 @@ function Select-TitleAssignments($proposals) {
     return $out
 }
 
-# Puts Scout's own name to the sessions being followed, using whatever an
-# already-open sidebar happens to be showing. Runs only when some session is
-# still unnamed, and does nothing at all when no sidebar is open - which is the
-# ordinary case, and costs one tree probe per window.
+# Puts Scout's own name to the sessions being followed, read off its own chat
+# sidebar. Runs only when some session is still unnamed.
 #
-# Returns whether anything was learned, so the caller can back off when there
-# is evidently nothing here to find.
+# Refuses outright while a Scout window is in front. Learning a title means
+# typing into the chat search and clearing it again, and doing that to a window
+# someone is looking at would be exactly the overreach an earlier version of
+# this file had to walk back.
+#
+# Returns whether anything was learned, and sets $script:ChatScanLooked to say
+# whether it actually got as far as searching - the caller needs to tell "I
+# looked and there was nothing" from "I never got to look", because only the
+# first is a reason to try less often.
 function Update-SessionTitles {
+    $script:ChatScanLooked = $false
     $want = @()
     foreach ($dir in $Sessions.Keys) {
         if (-not $Sessions[$dir].ChatTitle) { $want += $dir }
     }
     if ($want.Count -eq 0) { return $false }
 
-    $lists = @(Read-VisibleChatRows)
+    $unobserved = $false
+    try { $unobserved = Test-AgentUnobserved } catch { }
+    if (-not $unobserved) { return $false }
+
+    $hwnd = [IntPtr]::Zero
+    try { $hwnd = Select-SearchWindow } catch { }
+    if ($hwnd -eq [IntPtr]::Zero) { return $false }
+    # One query per unnamed session, all in a single visit: opening and closing
+    # the sidebar once is less disturbance than doing it per session.
+    $queries = @()
+    $dirs    = @()
+    foreach ($dir in $want) {
+        $rec = $Sessions[$dir]
+        if (-not $rec) { continue }
+        $q = $null
+        try { $q = Get-SessionQuery $rec } catch { }
+        if (-not $q) { continue }
+        $queries += $q
+        $dirs    += $dir
+    }
+    if ($queries.Count -eq 0) { return $false }
+
+    $lists = @()
+    try { $lists = @(Invoke-ChatSearch $hwnd $queries) } catch { return $false }
+    $script:ChatScanLooked = $true
     if ($lists.Count -eq 0) { return $false }
 
+    $proposals = @()
+    for ($i = 0; $i -lt $dirs.Count -and $i -lt $lists.Count; $i++) {
+        $rec = $Sessions[$dirs[$i]]
+        if (-not $rec -or $rec.ChatTitle) { continue }
+        $rows = @($lists[$i] | Where-Object { $_.When })
+        if ($rows.Count -eq 0) { continue }
+        # Measured from the last message, because that is the kind of thing the
+        # sidebar's own "when" is measuring.
+        $stamp = Get-LastMessageUtc $rec.Events
+        if (-not $stamp) { $stamp = $rec.LastEventUtc }
+        if (-not $stamp) { continue }
+        $pick = Select-ChatRow $rows ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+        if (-not $pick -or -not $pick.Title) { continue }
+        $proposals += [pscustomobject]@{ Dir = $dirs[$i]; Title = $pick.Title }
+    }
+
     $learned = $false
-    foreach ($rows in $lists) {
-        $timed = @($rows | Where-Object { $_.When })
-        if ($timed.Count -eq 0) { continue }
-
-        $proposals = @()
-        foreach ($dir in $want) {
-            $rec = $Sessions[$dir]
-            if (-not $rec -or $rec.ChatTitle) { continue }
-            $stamp = Get-LastMessageUtc $rec.Events
-            if (-not $stamp) { continue }
-            $pick = Select-ChatRow $timed ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
-            if (-not $pick -or -not $pick.Title) { continue }
-            $proposals += [pscustomobject]@{ Dir = $dir; Title = $pick.Title }
-        }
-
-        $safe = Select-TitleAssignments $proposals
-        foreach ($dir in @($safe.Keys)) {
-            $Sessions[$dir].ChatTitle = $safe[$dir]
-            Set-LearnedTitle $dir $safe[$dir]
-            $learned = $true
-        }
+    $safe = Select-TitleAssignments $proposals
+    foreach ($dir in @($safe.Keys)) {
+        $Sessions[$dir].ChatTitle = $safe[$dir]
+        Set-LearnedTitle $dir $safe[$dir]
+        $learned = $true
     }
     if ($learned) { try { Resolve-SessionLabels } catch { } }
     return $learned
