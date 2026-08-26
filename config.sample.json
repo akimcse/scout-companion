@@ -56,6 +56,12 @@
   "startupGreetingSeconds": 5,
   "_startupGreetingSeconds": "Show the toast for this many seconds at startup, whatever the visibility rules would otherwise say. Without it, launching the companion has no visible result: the toast hides while Scout has focus, which it does because you just launched something, and Windows files a brand-new tray icon into the hidden overflow flyout. Set to 0 to start silently.",
 
+  "notifyOnFinish": true,
+  "_notifyOnFinish": "Raise a tray balloon when a long turn finishes. Measured over three days of real use: 83 turns ran longer than two minutes and 8 longer than ten, and while one of those is going you are looking at another window with no way to know it ended. Only fires when the toast is not already on screen and the agent is not in front - otherwise it would be telling you something you are already looking at. Also in the settings window.",
+
+  "notifyAfterSeconds": 60,
+  "_notifyAfterSeconds": "How long a turn has to run before finishing is worth a notification. The median turn is 11 seconds and the 90th percentile 36, so a low value here would fire constantly for work that never left your screen.",
+
   "updateCheck": true,
   "_updateCheck": "Ask GitHub every so often whether there is a newer release, and say so in the tray. The check runs off the UI thread so a slow or unreachable GitHub never stalls the toast, and it fails silently - being offline is not an error worth reporting. Set to false to never look.",
 

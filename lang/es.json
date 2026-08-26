@@ -82,5 +82,13 @@
     "{0} is available.":  "{0} está disponible.",
     "{0} is available, but this copy runs from a source checkout.":  "{0} está disponible, pero esta copia se ejecuta desde un checkout del código fuente.",
     "This copy runs from a source checkout, so it will not be replaced automatically.":  "Esta copia se ejecuta desde un checkout del código fuente, así que no se reemplazará automáticamente.",
-    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "Desactivado de forma predeterminada a propósito: este acompañante pulsa Permitir en los avisos de seguridad, y sustituirlo en cuanto sale una versión lo reiniciaría en un momento que no has elegido. Nunca toca una copia que se ejecuta desde un checkout del código fuente."
+    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "Desactivado de forma predeterminada a propósito: este acompañante pulsa Permitir en los avisos de seguridad, y sustituirlo en cuanto sale una versión lo reiniciaría en un momento que no has elegido. Nunca toca una copia que se ejecuta desde un checkout del código fuente.",
+    "Finished":  "Terminado",
+    "Ran for":  "Duración",
+    "THE AGENT TODAY":  "EL AGENTE HOY",
+    "Working time":  "Tiempo de trabajo",
+    "Turns":  "Turnos",
+    "Conversations":  "Conversaciones",
+    "Tell me when a long turn finishes":  "Avisarme cuando termine un turno largo",
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Se cuenta desde que arrancó el acompañante, no todo el día: iniciado a mediodía, no sabrá nada de la mañana."
 }

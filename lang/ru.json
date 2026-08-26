@@ -82,5 +82,13 @@
     "{0} is available.":  "Доступна версия {0}.",
     "{0} is available, but this copy runs from a source checkout.":  "Доступна версия {0}, но эта копия запущена из рабочей копии исходников.",
     "This copy runs from a source checkout, so it will not be replaced automatically.":  "Эта копия запущена из рабочей копии исходников, поэтому не будет заменена автоматически.",
-    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "По умолчанию выключено намеренно: этот помощник нажимает «Разрешить» в запросах безопасности, и замена сразу после выхода версии перезапустила бы его в момент, который вы не выбирали. Копию, запущенную из рабочей копии исходников, он никогда не трогает."
+    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "По умолчанию выключено намеренно: этот помощник нажимает «Разрешить» в запросах безопасности, и замена сразу после выхода версии перезапустила бы его в момент, который вы не выбирали. Копию, запущенную из рабочей копии исходников, он никогда не трогает.",
+    "Finished":  "Готово",
+    "Ran for":  "Длительность",
+    "THE AGENT TODAY":  "АГЕНТ СЕГОДНЯ",
+    "Working time":  "Время работы",
+    "Turns":  "Ходы",
+    "Conversations":  "Разговоры",
+    "Tell me when a long turn finishes":  "Сообщать, когда длинный ход завершится",
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Отсчёт ведётся с момента запуска приложения, а не за весь день: запущенное в обед, оно не знает про утро."
 }

@@ -82,5 +82,13 @@
     "{0} is available.":  "{0} est disponible.",
     "{0} is available, but this copy runs from a source checkout.":  "{0} est disponible, mais cette copie s\u0027exécute depuis un dépôt source.",
     "This copy runs from a source checkout, so it will not be replaced automatically.":  "Cette copie s\u0027exécute depuis un dépôt source ; elle ne sera pas remplacée automatiquement.",
-    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "Désactivé par défaut à dessein : ce compagnon clique sur Autoriser dans les invites de sécurité, et le remplacer dès la parution d\u0027une version le redémarrerait à un moment que vous n\u0027avez pas choisi. Il ne touche jamais à une copie exécutée depuis un dépôt source."
+    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "Désactivé par défaut à dessein : ce compagnon clique sur Autoriser dans les invites de sécurité, et le remplacer dès la parution d\u0027une version le redémarrerait à un moment que vous n\u0027avez pas choisi. Il ne touche jamais à une copie exécutée depuis un dépôt source.",
+    "Finished":  "Terminé",
+    "Ran for":  "Durée",
+    "THE AGENT TODAY":  "L\u0027AGENT AUJOURD\u0027HUI",
+    "Working time":  "Temps de travail",
+    "Turns":  "Tours",
+    "Conversations":  "Conversations",
+    "Tell me when a long turn finishes":  "Me prévenir quand un long tour se termine",
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Compté depuis le démarrage du compagnon, et non sur la journée entière : lancé à midi, il ignorera la matinée."
 }

@@ -97,7 +97,7 @@ try {
     # the behaviour, and the convention the behaviour depends on.
     # ------------------------------------------------------------------
     Write-Host "`nthe update checkboxes answer to more than a mouse"
-    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk')) {
+    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'NotifyFinishChk')) {
         $cb = $w.FindName($n)
         if (-not $cb) {
             $script:Fail++; Write-Host ("  FAIL missing control {0}" -f $n); continue
@@ -125,7 +125,7 @@ try {
     # both use Checked/Unchecked; a control that quietly used Click instead
     # would behave differently for reasons no reader could see.
     Write-Host "`nand are wired the same way as the rest of the window"
-    foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk')) {
+    foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk', 'SettingsNotifyChk')) {
         $usesToggle = $text -match [regex]::Escape("`$script:$n.Add_Checked")
         $usesClick  = $text -match [regex]::Escape("`$script:$n.Add_Click")
         Check "$n subscribes to Checked"   ([int][bool]$usesToggle) 1
@@ -135,9 +135,12 @@ try {
     # The controls the update code binds all exist, and the two activity panels
     # are never on screen together.
     Write-Host "`nthe controls the update code binds all exist"
-    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'CheckUpdateBtn', 'UpdateStatus', 'VerText')) {
+    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'CheckUpdateBtn', 'UpdateStatus', 'VerText',
+                     'NotifyFinishChk', 'AgentTimeText', 'AgentTurnsText', 'AgentSessText')) {
         Check "$n is present" ([int][bool]($w.FindName($n))) 1
     }
+    # ElapsedText lives on the toast, not here; checked with the toast markup
+    # further down.
 
     # ------------------------------------------------------------------
     # One activity panel at a time.
@@ -159,6 +162,18 @@ try {
     $names = @($tx.SelectNodes('//*') | ForEach-Object { $_.GetAttribute('x:Name') })
     Check 'StepsPanel exists'    ([int]($names -contains 'StepsPanel')) 1
     Check 'SessionsPanel exists' ([int]($names -contains 'SessionsPanel')) 1
+
+    # The elapsed counter, which is the one thing the single-session view gained
+    # - and it is 89% of the time this toast is on screen.
+    Check 'ElapsedText exists'   ([int]($names -contains 'ElapsedText')) 1
+    # Collapsed to begin with, or a toast with no turn running shows an empty
+    # gap beside the header from the first frame.
+    $ev = @($tx.SelectNodes('//*') | Where-Object { $_.GetAttribute('x:Name') -eq 'ElapsedText' } | ForEach-Object { $_.GetAttribute('Visibility') })
+    Check 'and starts collapsed' ([int]($ev -contains 'Collapsed')) 1
+    # Docked right and declared before the header: DockPanel fills with its last
+    # child, so a header docked last would take the width and leave none for it.
+    $ed = @($tx.SelectNodes('//*') | Where-Object { $_.GetAttribute('x:Name') -eq 'ElapsedText' } | ForEach-Object { $_.GetAttribute('DockPanel.Dock') })
+    Check 'and is docked right'  ([int]($ed -contains 'Right')) 1
 
     # Both start collapsed, or the toast would flash a panel on the first frame.
     foreach ($p in @('StepsPanel', 'SessionsPanel')) {
