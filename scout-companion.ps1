@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.5.0'
+$CompanionVersion = '0.6.0'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -2989,6 +2989,21 @@ function Apply-AutoStartFromUI {
       <TextBlock Grid.Row="3" Grid.Column="1" x:Name="VerText" Text="-" Margin="0,5,0,0"/>
     </Grid>
 
+    <!-- Updates. These were config-only at first, which meant the feature
+         existed but nobody could see whether it was on, or make it check
+         without waiting six hours. -->
+    <TextBlock Style="{StaticResource Section}" Text="UPDATES"/>
+    <CheckBox x:Name="UpdateCheckChk" Content="Check for new versions"/>
+    <CheckBox x:Name="AutoUpdateChk" Content="Install them automatically" Margin="0,6,0,0"/>
+    <TextBlock x:Name="AutoUpdateHint" Style="{StaticResource Hint}"
+               Text="Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout."/>
+    <DockPanel Margin="0,8,0,0">
+      <Button x:Name="CheckUpdateBtn" Content="Check now" Width="96" Height="26" DockPanel.Dock="Left"
+              Background="#FF2A3142" Foreground="#FFE6EAF2" BorderThickness="0" Cursor="Hand"/>
+      <TextBlock x:Name="UpdateStatus" Text="" Foreground="#FF9AA6BE" Margin="10,0,0,0"
+                 VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+    </DockPanel>
+
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
       <Button x:Name="CloseSettingsBtn" Content="Close" Width="88" Height="28"
               Background="#FF2A3142" Foreground="#FFE6EAF2" BorderThickness="0" Cursor="Hand"/>
@@ -3017,7 +3032,11 @@ function Show-SettingsWindow {
     $script:SettingsMascot    = $sw.FindName('MascotPicker')
     $script:SettingsOpacity   = $sw.FindName('OpacitySlider')
     $script:SettingsOpacityText = $sw.FindName('OpacityValue')
-    $verText                  = $sw.FindName('VerText')
+    $script:SettingsUpdateChk   = $sw.FindName('UpdateCheckChk')
+    $script:SettingsAutoUpdChk  = $sw.FindName('AutoUpdateChk')
+    $script:SettingsUpdStatus   = $sw.FindName('UpdateStatus')
+    $checkUpdBtn                = $sw.FindName('CheckUpdateBtn')
+    $verText                    = $sw.FindName('VerText')
     if ($verText) { $verText.Text = $CompanionVersion }
     $closeBtn                 = $sw.FindName('CloseSettingsBtn')
 
@@ -3029,6 +3048,56 @@ function Show-SettingsWindow {
         $script:SettingsAutoHint.Text = T 'Watch-Scout.ps1 is missing from {0}, so this cannot be turned on.' $ScriptDir
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
+
+    # Updates. Primed under suppression: with Checked/Unchecked handlers, simply
+    # setting IsChecked fires them, and opening the window would write config.
+    # Auto-install is meaningless without the check, and a checkbox you can tick
+    # that then does nothing is worse than one that is visibly unavailable.
+    $script:SettingsSuppress = $true
+    try {
+        $script:SettingsUpdateChk.IsChecked  = [bool]$Config.updateCheck
+        $script:SettingsAutoUpdChk.IsChecked = [bool]$Config.autoUpdate
+        $script:SettingsAutoUpdChk.IsEnabled = [bool]$Config.updateCheck
+    } finally { $script:SettingsSuppress = $false }
+    Sync-UpdateStatusText
+
+    # Checked/Unchecked, not Click. Click fires only for an actual mouse press,
+    # so a keyboard toggle or an accessibility tool would flip the box and save
+    # nothing - the control would show one thing and config.json another.
+    $onUpdateCheck = {
+        if ($script:SettingsSuppress) { return }
+        $on = [bool]$script:SettingsUpdateChk.IsChecked
+        $Config.updateCheck = $on
+        $script:SettingsAutoUpdChk.IsEnabled = $on
+        # Turning it back on should look now, not in six hours.
+        if ($on) { $script:UpdateCheckUtc = [datetime]::MinValue }
+        Save-Setting @{ updateCheck = $on }
+        Sync-UpdateStatusText
+    }
+    $script:SettingsUpdateChk.Add_Checked($onUpdateCheck)
+    $script:SettingsUpdateChk.Add_Unchecked($onUpdateCheck)
+
+    $onAutoUpdate = {
+        if ($script:SettingsSuppress) { return }
+        $on = [bool]$script:SettingsAutoUpdChk.IsChecked
+        $Config.autoUpdate = $on
+        Save-Setting @{ autoUpdate = $on }
+        # If one is already waiting, honour the new setting immediately rather
+        # than leaving it sitting there after being told to install it.
+        if ($on -and $script:UpdateAvail) { Install-CompanionUpdate }
+    }
+    $script:SettingsAutoUpdChk.Add_Checked($onAutoUpdate)
+    $script:SettingsAutoUpdChk.Add_Unchecked($onAutoUpdate)
+    if ($checkUpdBtn) {
+        $checkUpdBtn.Add_Click({
+            Write-CompanionLog 'update check requested from settings'
+            $script:UpdateCheckUtc = [datetime]::MinValue
+            $script:UpdateAvail = $null      # so an already-known one is re-announced
+            $script:UpdateAnnounce = $true   # and so it looks even if checking is off
+            $script:SettingsUpdStatus.Text = T 'Checking...'
+            Update-CheckForRelease
+        })
+    }
 
     # Opacity. Primed before the handler is attached so setting the initial
     # value does not fire a save.
@@ -3208,14 +3277,50 @@ $script:InstallDir     = [System.IO.Path]::Combine($env:LOCALAPPDATA, 'Programs'
 $script:UpdateAvail    = $null      # the tag, once one is found
 $script:UpdateCheckUtc = [datetime]::MinValue
 $script:UpdateBusy     = $false
+$script:UpdateFailed   = $false
+$script:UpdateChecked  = $false   # a check has completed at least once
+$script:UpdateAnnounce = $false   # set for a check the user asked for explicitly
 $script:UpdatePs       = $null
 $script:UpdateHandle   = $null
 
+# What to say about updates in the settings window. One function, because the
+# state is asked about from three places - opening the window, finishing a
+# check, and toggling the checkbox - and three ways of phrasing it would drift.
+#
+# The result of the last check outranks "Not checking.". Letting the setting
+# speak first meant pressing Check now with periodic checks turned off ran the
+# check, got an answer, and then overwrote it with "Not checking." - so the
+# button appeared to do nothing at all.
+function Sync-UpdateStatusText {
+    if (-not $script:SettingsUpdStatus) { return }
+    try {
+        $t = if ($script:UpdateBusy) { T 'Checking...' }
+             elseif ($script:UpdateAvail) {
+                 if (Test-UpdatableInstall $PSScriptRoot $script:InstallDir) {
+                     (T '{0} is available.' $script:UpdateAvail)
+                 } else {
+                     # Say why, rather than offering a button that would refuse.
+                     (T '{0} is available, but this copy runs from a source checkout.' $script:UpdateAvail)
+                 }
+             }
+             elseif ($script:UpdateFailed) { T 'Could not reach GitHub.' }
+             elseif ($script:UpdateChecked) { T 'Up to date.' }
+             elseif (-not $Config.updateCheck) { T 'Not checking.' }
+             else { '' }
+        $script:SettingsUpdStatus.Text = $t
+    } catch { }
+}
+
 function Update-CheckForRelease {
-    if (-not $Config.updateCheck) { return }
+    # An explicit ask overrides both the setting and the timer. Refusing to look
+    # because the periodic check is off would make the menu item and the button
+    # do nothing at all, which reads as broken rather than as disabled.
+    if (-not $Config.updateCheck -and -not $script:UpdateAnnounce) { return }
     if ($script:UpdateBusy) { return }
-    $due = $script:UpdateCheckUtc.AddHours([double]$Config.updateCheckHours)
-    if ([datetime]::UtcNow -lt $due) { return }
+    if (-not $script:UpdateAnnounce) {
+        $due = $script:UpdateCheckUtc.AddHours([double]$Config.updateCheckHours)
+        if ([datetime]::UtcNow -lt $due) { return }
+    }
     $script:UpdateCheckUtc = [datetime]::UtcNow
 
     # The network call blocks, and this runs on the UI thread, so a slow or
@@ -3245,23 +3350,49 @@ function Complete-UpdateCheck {
     try { $tag = @($script:UpdatePs.EndInvoke($script:UpdateHandle))[0] } catch { }
     try { $script:UpdatePs.Dispose() } catch { }
     $script:UpdatePs = $null; $script:UpdateHandle = $null; $script:UpdateBusy = $false
-    if (-not $tag) { return }
-    Write-CompanionLog "update check: latest=$tag running=$CompanionVersion"
 
-    if ((Compare-CompanionVersion $tag $CompanionVersion) -le 0) { $script:UpdateAvail = $null; return }
-    if ($script:UpdateAvail -eq $tag) { return }     # already told them
-    $script:UpdateAvail = $tag
-
-    if (-not (Test-UpdatableInstall $PSScriptRoot $script:InstallDir)) {
-        # Still worth saying, because a developer wants to know a release went
-        # out - but do not offer to install over their checkout.
-        Write-CompanionLog "update $tag available; not installable from $PSScriptRoot"
-        return
-    }
-    if ($Config.autoUpdate) { Install-CompanionUpdate; return }
+    # Every path from here has to end at Sync-UpdateStatusText. An early return
+    # left the settings window saying "Checking..." for the rest of the session,
+    # which is exactly what someone who just pressed the button would read as a
+    # hang - and a failed check is the most likely reason to be looking.
     try {
-        $Tray.BalloonTipTitle = (T 'Update available')
-        $Tray.BalloonTipText  = "$CompanionVersion -> $($tag.TrimStart('v'))"
+        if (-not $tag) {
+            Write-CompanionLog 'update check failed (offline or rate-limited)'
+            $script:UpdateFailed = $true
+            if ($script:UpdateAnnounce) { Show-UpdateBalloon (T 'Update check failed') (T 'Could not reach GitHub.') }
+            return
+        }
+        $script:UpdateFailed = $false
+        $script:UpdateChecked = $true
+        Write-CompanionLog "update check: latest=$tag running=$CompanionVersion"
+
+        if ((Compare-CompanionVersion $tag $CompanionVersion) -le 0) {
+            $script:UpdateAvail = $null
+            if ($script:UpdateAnnounce) { Show-UpdateBalloon (T 'Up to date.') "$CompanionVersion" }
+            return
+        }
+        if ($script:UpdateAvail -eq $tag -and -not $script:UpdateAnnounce) { return }   # already told them
+        $script:UpdateAvail = $tag
+
+        if (-not (Test-UpdatableInstall $PSScriptRoot $script:InstallDir)) {
+            # Still worth saying, because a developer wants to know a release went
+            # out - but do not offer to install over their checkout.
+            Write-CompanionLog "update $tag available; not installable from $PSScriptRoot"
+            if ($script:UpdateAnnounce) { Show-UpdateBalloon (T 'Update available') $tag }
+            return
+        }
+        if ($Config.autoUpdate) { Install-CompanionUpdate; return }
+        Show-UpdateBalloon (T 'Update available') "$CompanionVersion -> $($tag.TrimStart('v'))"
+    } finally {
+        $script:UpdateAnnounce = $false
+        Sync-UpdateStatusText
+    }
+}
+
+function Show-UpdateBalloon([string]$title, [string]$text) {
+    try {
+        $Tray.BalloonTipTitle = $title
+        $Tray.BalloonTipText  = $text
         $Tray.ShowBalloonTip(8000)
     } catch { }
 }
@@ -3326,6 +3457,18 @@ $MenuUpdate = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Install upda
 $MenuUpdate.Available = $false
 $MenuUpdate.Add_Click({ Install-CompanionUpdate })
 
+# Always present, unlike the item above. Without it the whole feature was
+# invisible until it had something to say, so there was no way to ask.
+$MenuCheck = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Check for updates')
+$MenuCheck.Add_Click({
+    $script:UpdateCheckUtc = [datetime]::MinValue
+    $script:UpdateAvail = $null
+    # An explicit ask deserves an answer even when the answer is "nothing new" -
+    # otherwise a silent check is indistinguishable from a broken menu item.
+    $script:UpdateAnnounce = $true
+    Update-CheckForRelease
+})
+
 $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$TrayMenu.Items.Add($MenuShow)
 [void]$TrayMenu.Items.Add($MenuOpen)
@@ -3334,6 +3477,7 @@ $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$TrayMenu.Items.Add($MenuSet)
 [void]$TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$TrayMenu.Items.Add($MenuUpdate)
+[void]$TrayMenu.Items.Add($MenuCheck)
 [void]$TrayMenu.Items.Add($MenuExit)
 $Tray.ContextMenuStrip = $TrayMenu
 

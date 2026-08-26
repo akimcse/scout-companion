@@ -84,6 +84,60 @@ try {
     $s.Value = 0.95
     Track 'up';   Check 'up to the ceiling'           $s.Value 1.00
     Track 'up';   Check 'and stays there'             $s.Value 1.00
+
+    # ------------------------------------------------------------------
+    # The update checkboxes have to react to a toggle that did not come from a
+    # mouse, and they have to do it the way the rest of this window does.
+    #
+    # They were first wired to Click. That turned out to still fire under WPF's
+    # toggle peer - so the obvious behavioural test passes either way and proves
+    # nothing. What Click does not cover is a programmatic change to IsChecked,
+    # which is exactly what priming the window does, and it leaves these two
+    # controls inconsistent with every other checkbox here. So this pins both:
+    # the behaviour, and the convention the behaviour depends on.
+    # ------------------------------------------------------------------
+    Write-Host "`nthe update checkboxes answer to more than a mouse"
+    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk')) {
+        $cb = $w.FindName($n)
+        if (-not $cb) {
+            $script:Fail++; Write-Host ("  FAIL missing control {0}" -f $n); continue
+        }
+        $script:Fired = 0
+        $cb.Add_Checked({ $script:Fired++ })
+        $cb.Add_Unchecked({ $script:Fired++ })
+
+        # What UI Automation's TogglePattern does.
+        $peer = [System.Windows.Automation.Peers.CheckBoxAutomationPeer]::new($cb)
+        $tp = $peer.GetPattern([System.Windows.Automation.Peers.PatternInterface]::Toggle)
+        $cb.IsChecked = $false; Settle
+        $script:Fired = 0
+        $tp.Toggle(); Settle
+        Check "$n reacts to a non-mouse toggle" $script:Fired 1
+        Check "$n actually changed"             ([int][bool]$cb.IsChecked) 1
+
+        # And to code setting the value, which Click would miss entirely.
+        $script:Fired = 0
+        $cb.IsChecked = $false; Settle
+        Check "$n reacts when code sets it"     $script:Fired 1
+    }
+
+    # The convention, checked against the source. AutoStartCheck and AnimCheck
+    # both use Checked/Unchecked; a control that quietly used Click instead
+    # would behave differently for reasons no reader could see.
+    Write-Host "`nand are wired the same way as the rest of the window"
+    foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk')) {
+        $usesToggle = $text -match [regex]::Escape("`$script:$n.Add_Checked")
+        $usesClick  = $text -match [regex]::Escape("`$script:$n.Add_Click")
+        Check "$n subscribes to Checked"   ([int][bool]$usesToggle) 1
+        Check "$n does not use Click"      ([int][bool]$usesClick)  0
+    }
+
+    # A settings window that names a control the code does not bind is a silent
+    # dead control, so pin the names the handlers rely on.
+    Write-Host "`nthe controls the update code binds all exist"
+    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'CheckUpdateBtn', 'UpdateStatus', 'VerText')) {
+        Check "$n is present" ([int][bool]($w.FindName($n))) 1
+    }
 } finally {
     try { $w.Close() } catch { }
 }
