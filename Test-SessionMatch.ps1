@@ -20,7 +20,9 @@ $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$nul
 $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
 foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow',
                  'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix',
-                 'Get-ShouldShow', 'Select-SessionRowPairs', 'Select-TitleAssignments')) {
+                 'Get-ShouldShow', 'Select-SessionRowPairs', 'Select-TitleAssignments',
+                 'Format-Idle', 'Format-SessionLines',
+                 'Compare-CompanionVersion', 'Test-UpdatableInstall')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -202,7 +204,89 @@ Same 'greeting shows even when idle'      (Get-ShouldShow @idleGreet) $true
 $bg = $busyFg.Clone(); $bg.IsForeground = $false
 Same 'busy in background -> shown'        (Get-ShouldShow @bg) $true
 
-Write-Host "`nSelect-SessionRowPairs"
+Write-Host "`nFormat-Idle"
+Same 'seconds stay seconds'            (Format-Idle 42)   '42s'
+Same 'a minute is minutes'             (Format-Idle 60)   '1m'
+Same 'and not a big number of seconds' (Format-Idle 187)  '3m'
+Same 'an hour is hours'                (Format-Idle 7200) '2h'
+
+Write-Host "`nFormat-SessionLines"
+# One line per session, because handing the whole body to whichever moved last
+# put two unrelated jobs on screen as though they were one list - measured at 21
+# changes of owner in 30 seconds.
+function Sn($name, $busy, $act, $idle) {
+    [pscustomobject]@{ Name = $name; Busy = $busy; Activity = $act; IdleSeconds = $idle }
+}
+$two = @(Format-SessionLines @( (Sn 'alpha' $true 'python merge.py' 0), (Sn 'beta' $false '' 12) ))
+Same 'a line each'                     $two.Count 2
+Same 'the busy one is marked running'  ($two[0].StartsWith([string][char]0x25B8)) $true
+Same 'the quiet one is marked done'    ($two[1].StartsWith([string][char]0x2713)) $true
+Same 'the busy one shows its work'     ($two[0] -match 'python merge\.py') $true
+Same 'the quiet one shows how long'    ($two[1] -match 'idle 12s') $true
+
+# Every line the same length keeps the activity column straight; a ragged
+# right-hand edge is the thing that makes a list hard to skim.
+$ragged = @(Format-SessionLines @( (Sn 'a' $true 'x' 0), (Sn 'a-much-longer-name' $true 'y' 0) ))
+Same 'columns line up'                 ($ragged[0].IndexOf('x')) ($ragged[1].IndexOf('y'))
+
+# A session with nothing to say still gets a line - leaving it out would say it
+# is not running.
+$silent = @(Format-SessionLines @( (Sn 'quiet' $true '' 0) ))
+Same 'no activity still gets a line'   $silent.Count 1
+Same 'and does not render as blank'    ($silent[0].Trim().Length -gt 6) $true
+
+# Long names and long commands both have to give way, and neither may push the
+# line past the width it was given.
+$long = @(Format-SessionLines @( (Sn ('n' * 60) $true ('c' * 80) 0) ) 46)
+Same 'a long line is cut to the width' ($long[0].Length -le 46) $true
+Same 'and says it was cut'             ($long[0] -match [string][char]0x2026) $true
+
+Same 'nothing in, nothing out'         (@(Format-SessionLines @())).Count 0
+$noname = @(Format-SessionLines @( (Sn $null $true 'z' 0) ))
+Same 'an unnamed session is labelled'  ($noname[0] -match 'unnamed') $true
+
+# 53 is what a 380px toast actually holds in Consolas 11.5, so the default has
+# to be that and not a round number someone liked the look of.
+$dflt = @(Format-SessionLines @( (Sn ('n' * 90) $true ('c' * 90) 0) ))
+Same 'the default width is the real one' ($dflt[0].Length -le 53) $true
+Same 'and it uses all of it'             ($dflt[0].Length -ge 50) $true
+
+Write-Host "`nCompare-CompanionVersion"
+Same 'newer is newer'                  (Compare-CompanionVersion '0.4.0' '0.3.0')  1
+Same 'older is older'                  (Compare-CompanionVersion '0.3.0' '0.4.0') -1
+Same 'same is same'                    (Compare-CompanionVersion '0.3.0' '0.3.0')  0
+# Release tags carry a leading v; [version] throws on it, which would have made
+# every check silently decide there was no update.
+Same 'a v prefix is not a difference'  (Compare-CompanionVersion 'v0.3.0' '0.3.0') 0
+Same 'and still compares'              (Compare-CompanionVersion 'v0.4.0' '0.3.0') 1
+Same 'patch counts'                    (Compare-CompanionVersion '0.3.1' '0.3.0')  1
+Same 'minor beats patch'               (Compare-CompanionVersion '0.4.0' '0.3.9')  1
+Same 'major beats minor'               (Compare-CompanionVersion '1.0.0' '0.9.9')  1
+# 10 > 9 only if these are numbers, not text.
+Same 'numbers, not text'               (Compare-CompanionVersion '0.10.0' '0.9.0') 1
+Same 'a short tag is padded'           (Compare-CompanionVersion '1' '1.0.0')      0
+Same 'a pre-release suffix is ignored' (Compare-CompanionVersion 'v0.4.0-beta.1' '0.4.0') 0
+Same 'junk does not throw'             (Compare-CompanionVersion 'not-a-version' '0.3.0') -1
+Same 'nothing is not newer'            (Compare-CompanionVersion $null '0.3.0')   -1
+
+Write-Host "`nTest-UpdatableInstall"
+# Only the installed copy may be replaced. The installer overwrites its target
+# wholesale, so running it over a checkout would destroy uncommitted work - and
+# a checkout is exactly where this gets developed.
+$inst = 'C:\Users\x\AppData\Local\Programs\ScoutCompanion'
+Same 'the installed copy updates'      (Test-UpdatableInstall $inst $inst) $true
+Same 'a trailing slash is the same'    (Test-UpdatableInstall "$inst\" $inst) $true
+Same 'case is not a difference'        (Test-UpdatableInstall $inst.ToUpper() $inst) $true
+Same 'somewhere else does not'         (Test-UpdatableInstall 'C:\repos\scout-companion' $inst) $false
+Same 'nothing does not'                (Test-UpdatableInstall $null $inst) $false
+
+# The guard that matters: a .git folder means a working tree, even if someone
+# has cloned into the install path.
+$tmp = Join-Path $env:TEMP ('_upd_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Path (Join-Path $tmp '.git') -Force | Out-Null
+Same 'a checkout is refused'           (Test-UpdatableInstall $tmp $tmp) $false
+Remove-Item -Recurse -Force $tmp -EA SilentlyContinue
+
 # Every session picking on its own reaches for the freshest row, and then the
 # one-title-one-session rule refuses the lot. They are pairs, not a race.
 function Sess($d, $age) { [pscustomobject]@{ Dir = $d; Age = [double]$age } }
