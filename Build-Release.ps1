@@ -35,6 +35,7 @@ $Payload = @(
     'Watch-Scout.ps1'
     'Add-ToStartMenu.ps1'
     'Install.ps1'
+    'Install.cmd'
     'config.sample.json'
     'LICENSE'
     'README.md'

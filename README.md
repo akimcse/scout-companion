@@ -159,16 +159,20 @@ where English puts it.
 
 ## Install & run
 
-Download **`ScoutCompanion-<version>.zip`** from the
+**One line, nothing to download by hand:**
+
+```powershell
+irm https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1 | iex
+```
+
+That fetches the latest release, installs it, and starts it.
+
+**Or do it by hand** — download `ScoutCompanion-<version>.zip` from the
 [latest release](https://github.com/akimcse/scout-companion/releases/latest), unzip it,
-and run:
+and **double-click `Install.cmd`**.
 
-```
-powershell -ExecutionPolicy Bypass -File .\Install.ps1 -Run
-```
-
-That copies the app to `%LOCALAPPDATA%\Programs\ScoutCompanion`, adds the Start Menu
-entries, and registers it in **Settings → Apps** so it uninstalls like anything else.
+Either way it installs to `%LOCALAPPDATA%\Programs\ScoutCompanion`, adds the Start Menu
+entries, and registers in **Settings → Apps** so it uninstalls like anything else.
 Per-user throughout: no admin rights, nothing in `Program Files`, nothing in `HKLM`.
 
 Installing over an existing copy keeps your settings — `config.json` and the learned chat
@@ -177,11 +181,18 @@ titles are carried across.
 **To remove it:** Settings → Apps → Scout Companion, or
 `Install.ps1 -Uninstall` from the installed folder.
 
+> **On piping a script from the internet into your shell.** That one-liner is the
+> `curl | bash` pattern and deserves the suspicion it usually gets. Two things make it
+> checkable here: [`web-install.ps1`](web-install.ps1) is short enough to read in a
+> minute at the URL above, and everything it installs comes from a published release
+> asset rather than from whatever is on a branch. If you would rather not, the manual
+> route is three steps and no worse off.
+
 ### Or just run it
 
 There is nothing to install, strictly. Unzip anywhere and double-click
 **`Start-ScoutCompanion.cmd`** — the app runs out of whatever folder it is sitting in.
-`Install.ps1` exists to answer "where should this live and how do I get rid of it",
+The installer exists to answer "where should this live and how do I get rid of it",
 which the zip on its own does not.
 
 The toast stays hidden until the agent is working in the background, apart from a brief
