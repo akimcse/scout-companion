@@ -65,17 +65,18 @@ place.
   "is Scout busy?". Right-clicking gives Show/Hide toast, Open Scout, Pause animation,
   Settings and Exit — and **Install update** when a newer release exists.
 - **Settings window** — reachable from the tray or the ⚙ on the toast. Turn on
-  start-with-Scout, switch the mascot, dim the toast, turn the animation off, and see
-  exactly how much memory and CPU the companion is using (see [Settings](#settings)).
+  start-with-Scout, switch the mascot, dim the toast, turn the animation off, control
+  updates, and see exactly how much memory and CPU the companion is using
+  (see [Settings](#settings)).
 - **Fifteen languages** — follows your Windows display language, or pin one in
   `config.json` (see [Languages](#languages)).
 - **Tells you when there is a new version** — checks GitHub for a newer release a few
-  times a day and offers it in the tray menu. Notifying rather than installing is
-  deliberate: this thing's job is to click Allow on security prompts, and replacing it
-  the moment a release lands would restart it at an unpredictable time and could drop a
-  prompt already on screen. Set `autoUpdate` if you would rather it just got on with it.
-  Either way it only ever replaces a copy installed by `Install.ps1`, never a source
-  checkout (see [Updates](#updates)).
+  times a day and offers it in the tray menu. **Settings → Updates** turns the check on or
+  off, turns on unattended installing, and has a **Check now** button. Notifying rather
+  than installing is deliberate: this thing's job is to click Allow on security prompts,
+  and replacing it the moment a release lands would restart it at an unpredictable time
+  and could drop a prompt already on screen. Either way it only ever replaces a copy
+  installed by `Install.ps1`, never a source checkout (see [Updates](#updates)).
 - **Color-coded status** — the whole toast shifts color with the agent's state: calm
   **green** while working, dim **navy** when idle, and bright pulsing **yellow** when an
   approval is needed (see [Status at a glance](#status-at-a-glance)).
@@ -290,6 +291,9 @@ Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast
 | **Mascot** | Switches between the twelve mascots live, no restart needed. |
 | **Opacity** | Fades the whole toast, from solid down to 35%. Useful if you want it present but not loud. Applies as you drag; the value is saved once you settle. Clicking the track steps one notch at a time. The 35% floor is deliberate — a fully transparent window would still swallow clicks. |
 | **This process** | Live working set, CPU, uptime and the version you are running, so "how much is this costing me?" and "which build is this?" do not require hunting through Task Manager for the right `powershell.exe`. |
+| **Check for new versions** | Whether to ask GitHub about releases at all. Off makes no network calls of any kind. |
+| **Install them automatically** | Skips the offer and installs as soon as one is found. Off by default, for the reason in [Updates](#updates). Greyed out when checking is off, since it would have nothing to act on. |
+| **Check now** | Asks immediately rather than waiting for the next slot, and says what it found. Works even with checking turned off — an explicit question deserves an answer. |
 
 Changes are written straight into `config.json`, so they survive a restart. Anything you
 put in that file by hand is preserved.
@@ -536,11 +540,23 @@ offline is not something worth interrupting you about. When a newer version exis
 a tray balloon once, and an **Install update** item stays in the tray menu until you take
 it.
 
+**Settings → Updates** has the controls:
+
+| | |
+|---|---|
+| **Check for new versions** | Whether to look at all. Off makes no network calls. |
+| **Install them automatically** | Skip the offer and just do it. Off by default — see below. Greyed out when checking is off, since it would have nothing to act on. |
+| **Check now** | Ask immediately rather than waiting for the next six-hour slot. This works even with checking turned off — an explicit question deserves an answer — and reports what it found next to the button. |
+
+The tray menu carries **Check for updates** at all times, and adds **Install update** when
+there is one. The check-now path had to be built to override the setting: without that,
+pressing a button that then reported "Not checking." would read as broken rather than as
+disabled.
+
 It notifies rather than installing, by default, because of what this program is. It clicks
 Allow on security prompts. Replacing it the instant a release appears would restart it at a
 moment nobody chose, and a prompt already on screen would be dropped mid-answer. If you
-would rather not be asked, set `autoUpdate: true` and it will install as soon as it finds
-one.
+would rather not be asked, tick **Install them automatically**.
 
 **It will not update a source checkout.** The installer overwrites its target wholesale, so
 pointing it at a working tree would throw away uncommitted work — and a working tree is
