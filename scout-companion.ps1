@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.4.0'
+$CompanionVersion = '0.5.0'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -1904,6 +1904,17 @@ function Focus-AgentSession {
                    TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
       </Border>
 
+      <!-- Several sessions at once. Built from real elements rather than the
+           monospace block above, for two reasons. One, a single TextBlock has
+           one colour and one weight, so every session looked equally important
+           and nothing said which was running. Two, character counting is wrong
+           for anything but Latin: Consolas renders Hangul at 1.82x the width of
+           a Latin glyph, so a Korean chat title was cut a third short of the
+           space it had. Letting WPF measure removes that whole class of bug. -->
+      <Border x:Name="SessionsPanel" Margin="0,10,0,0" Padding="10,8" CornerRadius="9" Background="#FF232838" Visibility="Collapsed">
+        <StackPanel x:Name="SessionsList"/>
+      </Border>
+
       <!-- permission prompt -->
       <Border x:Name="PermPanel" Margin="0,12,0,0" Padding="10" CornerRadius="9"
               Background="#FF2A2030" BorderBrush="#FFB4843C" BorderThickness="1" Visibility="Collapsed">
@@ -1948,6 +1959,8 @@ $HeaderFrom   = $Window.FindName('HeaderFrom')
 $Dot          = $Window.FindName('Dot')
 $StepsPanel   = $Window.FindName('StepsPanel')
 $StepsText    = $Window.FindName('StepsText')
+$SessionsPanel = $Window.FindName('SessionsPanel')
+$SessionsList  = $Window.FindName('SessionsList')
 $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
 $PermFrom     = $Window.FindName('PermFrom')
@@ -3554,64 +3567,27 @@ function Get-QueueSuffix([int]$total) {
     return ''
 }
 
-# One line per session, for when more than one is running.
+# Order and group the sessions for display.
 #
-# The toast hands its whole body to whichever session moved most recently,
-# which is fine for one and useless for several: measured with two working at
-# once, the body changed owner 21 times in 30 seconds. What was on screen was
-# two unrelated jobs interleaved - not merely uninformative, but untrustworthy,
+# The toast hands its whole body to whichever session moved most recently, which
+# is fine for one and useless for several: measured with two working at once,
+# the body changed owner 21 times in 30 seconds. What was on screen was two
+# unrelated jobs interleaved - not merely uninformative, but untrustworthy,
 # because it reads as one coherent list.
 #
-# So each session gets its own line and keeps it. Deliberately not sorted by
-# recency: reordering the lines under the reader's eye would reintroduce the
-# same churn one level down. The glyph says who is busy; position stays put.
+# Working sessions come first, and that is not the churn this was meant to
+# avoid. Sorting by last-event time would reorder every second or two; running
+# versus idle is a binary that changes only when a session actually starts or
+# stops, which is exactly the event worth reacting to. Within each group the
+# order is by when the session appeared, so nothing shuffles.
 #
-# Takes and returns plain data so the layout can be tested without a toast.
-#   $sessions : objects with .Name, .Busy, .Activity, .IdleSeconds
-#   $width    : characters available on a line. 53 is measured, not guessed:
-#               a 380px toast less 2x14 card padding and 2x10 panel padding
-#               leaves 332px, and Consolas at 11.5 advances 6.323px per glyph.
-function Format-SessionLines($sessions, [int]$width = 53) {
-    $out = New-Object System.Collections.ArrayList
+# Pure, so the arrangement can be tested without a toast.
+function Group-SessionRows($sessions) {
     $items = @($sessions)
     if ($items.Count -eq 0) { return @() }
-
-    # Resolve the names first, fallback included. Sizing the column from the raw
-    # names left an unnamed session with a zero-width column, and its label was
-    # then truncated to a single character.
-    $names = @()
-    foreach ($s in $items) {
-        $n = if ($s.Name) { [string]$s.Name } else { '(unnamed)' }
-        $names += $n
-    }
-
-    # Give the name up to half the line, but no more than the longest one needs,
-    # so two short names do not sit either side of a gulf of whitespace.
-    $longest = 0
-    foreach ($n in $names) { if ($n.Length -gt $longest) { $longest = $n.Length } }
-    $nameCol = [Math]::Min($longest, [Math]::Max(12, [int]($width / 2)))
-
-    # mark + gap + name + gap  =  1 + 2 + nameCol + 2
-    $room = $width - $nameCol - 5
-    if ($room -lt 6) { $room = 6 }
-
-    for ($i = 0; $i -lt $items.Count; $i++) {
-        $s = $items[$i]
-        $mark = if ($s.Busy) { [char]0x25B8 } else { [char]0x2713 }   # triangle / check
-        $name = $names[$i]
-        if ($name.Length -gt $nameCol) { $name = $name.Substring(0, [Math]::Max(1, $nameCol - 1)) + [char]0x2026 }
-
-        # What it is doing, or how long since it stopped. "idle" on its own
-        # invites the question this is meant to answer.
-        $act = if ($s.Busy) { [string]$s.Activity }
-               elseif ($null -ne $s.IdleSeconds) { 'idle ' + (Format-Idle ([int]$s.IdleSeconds)) }
-               else { '' }
-        if (-not $act) { $act = '-' }
-        if ($act.Length -gt $room) { $act = $act.Substring(0, [Math]::Max(1, $room - 1)) + [char]0x2026 }
-
-        [void]$out.Add(("{0}  {1}  {2}" -f $mark, $name.PadRight($nameCol), $act))
-    }
-    return @($out)
+    $busy = @($items | Where-Object { $_.Busy })
+    $rest = @($items | Where-Object { -not $_.Busy })
+    return @($busy + $rest)
 }
 
 # Short enough to sit at the end of a line, and never a bare number of seconds
@@ -3622,21 +3598,115 @@ function Format-Idle([int]$seconds) {
     return ("{0}h" -f [int]($seconds / 3600))
 }
 
+# Build the rows. Real elements, so colour and weight can say what a single
+# monospace block could not: which session is running, and which activity line
+# belongs to which name.
+#
+# Three signals, because one was not enough. A left accent bar ties a name and
+# its activity together as one object and marks the running ones green. The
+# name is brighter and heavier while working. The activity sits inside the bar
+# so it cannot be read as belonging to the row above.
+$script:SessionSignature = $null
+function Render-SessionRows($rows) {
+    # Rebuilding a StackPanel is far more expensive than setting a string, and
+    # this runs every poll, so skip it entirely when nothing has changed.
+    $sig = ($rows | ForEach-Object { "$($_.Busy)|$($_.Name)|$($_.Activity)|$(Format-Idle ([int]$_.IdleSeconds))" }) -join "`n"
+    if ($sig -ne $script:SessionSignature) {
+        $script:SessionSignature = $sig
+        $SessionsList.Children.Clear()
+
+        $accentOn   = '#FF4ADE80'   # same green the header dot uses while working
+        $accentOff  = '#FF39415A'
+        $nameOn     = '#FFEDF2FA'
+        $nameOff    = '#FF8A93A6'
+        $actOn      = '#FFC7D0E2'
+        $actOff     = '#FF6C7488'
+
+        $first = $true
+        foreach ($r in $rows) {
+            $busy = [bool]$r.Busy
+
+            $bar = New-Object System.Windows.Controls.Border
+            $bar.Width = 3
+            $bar.CornerRadius = New-Object System.Windows.CornerRadius 2
+            $bar.Background = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($(if ($busy) { $accentOn } else { $accentOff }))
+            $bar.VerticalAlignment = 'Stretch'
+
+            $texts = New-Object System.Windows.Controls.StackPanel
+            $texts.Margin = New-Object System.Windows.Thickness 8, 0, 0, 0
+
+            $nameTb = New-Object System.Windows.Controls.TextBlock
+            $nameTb.Text = if ($r.Name) { [string]$r.Name } else { '(unnamed)' }
+            $nameTb.FontSize = 11.5
+            $nameTb.FontWeight = if ($busy) { 'SemiBold' } else { 'Normal' }
+            $nameTb.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($(if ($busy) { $nameOn } else { $nameOff }))
+            # Let WPF measure. Counting characters is wrong for anything but
+            # Latin - Consolas renders Hangul at 1.82x a Latin glyph, so a
+            # Korean title was being cut a third short of its actual room.
+            $nameTb.TextTrimming = 'CharacterEllipsis'
+            $nameTb.TextWrapping = 'NoWrap'
+            [void]$texts.Children.Add($nameTb)
+
+            # 'Idle', not 'idle'. ConvertFrom-Json matches keys case-insensitively,
+            # so adding a lowercase variant would collide with the existing one
+            # and silently break every language file - which it did once before.
+            $act = if ($busy) { [string]$r.Activity }
+                   elseif ($null -ne $r.IdleSeconds) { (T 'Idle') + ' ' + (Format-Idle ([int]$r.IdleSeconds)) }
+                   else { '' }
+            if ($act) {
+                $actTb = New-Object System.Windows.Controls.TextBlock
+                $actTb.Text = $act
+                $actTb.FontSize = 10.5
+                $actTb.FontFamily = New-Object System.Windows.Media.FontFamily 'Consolas, Cascadia Mono, monospace'
+                $actTb.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($(if ($busy) { $actOn } else { $actOff }))
+                $actTb.Margin = New-Object System.Windows.Thickness 0, 1, 0, 0
+                # The running one gets to wrap onto a second line; a finished one
+                # says "idle 3m" and needs none. Height is the cheap dimension -
+                # the toast is fixed at 380px wide but grows to fit its content.
+                if ($busy) {
+                    $actTb.TextWrapping = 'Wrap'
+                    $actTb.MaxHeight = 30
+                } else {
+                    $actTb.TextWrapping = 'NoWrap'
+                }
+                $actTb.TextTrimming = 'CharacterEllipsis'
+                [void]$texts.Children.Add($actTb)
+            }
+
+            $row = New-Object System.Windows.Controls.DockPanel
+            $row.LastChildFill = $true
+            if (-not $first) { $row.Margin = New-Object System.Windows.Thickness 0, 7, 0, 0 }
+            [System.Windows.Controls.DockPanel]::SetDock($bar, 'Left')
+            [void]$row.Children.Add($bar)
+            [void]$row.Children.Add($texts)
+            [void]$SessionsList.Children.Add($row)
+            $first = $false
+        }
+    }
+    if ($SessionsPanel.Visibility -ne 'Visible') { $SessionsPanel.Visibility = 'Visible' }
+}
+
 function Render-Steps {
-    # Several sessions: one line each, rather than a detailed list belonging to
+    # Several sessions: a row each, rather than a detailed step list belonging to
     # whichever of them happened to move last.
     if ($Sessions.Count -gt 1) {
         $rows = @()
-        # By first appearance, never by activity - a Hashtable's own key order is
+        # Within a group, by first appearance - a Hashtable's own key order is
         # not defined and would reshuffle the list on its own.
         $ordered = @($Sessions.Keys | Sort-Object @{ E = { $Sessions[$_].FirstSeenUtc } }, @{ E = { $_ } })
         foreach ($dir in $ordered) {
             $rec = $Sessions[$dir]
-            $busy = [bool]$rec.TurnActive
+            $idleSec = [int]([datetime]::UtcNow - $rec.LastEventUtc).TotalSeconds
+            # Quiet for long enough is quiet, whatever the step list says. A
+            # session interrupted mid-tool keeps an unfinished step forever, and
+            # taking that at face value left it showing a green "Running:" hours
+            # after it had stopped - the one thing this list must not get wrong.
+            $recent = $idleSec -le [double]$Config.activeWindowSeconds
+            $busy = $recent -and [bool]$rec.TurnActive
             $act = ''
             if ($rec.Steps.Count) {
                 $live = @($rec.Steps | Where-Object { -not $_.Done })
-                if ($live.Count) { $act = $live[-1].Text; $busy = $true }
+                if ($live.Count -and $recent) { $act = $live[-1].Text; $busy = $true }
                 else { $act = $rec.Steps[$rec.Steps.Count - 1].Text }
             }
             # Prefer the chat title, then the last request, and fall back to the
@@ -3649,16 +3719,16 @@ function Render-Steps {
                 Name        = $name
                 Busy        = $busy
                 Activity    = $act
-                IdleSeconds = [int]([datetime]::UtcNow - $rec.LastEventUtc).TotalSeconds
+                IdleSeconds = $idleSec
             }
         }
-        $text = (Format-SessionLines $rows) -join "`n"
-        if ($text -ne $script:StepSignature) {
-            $script:StepSignature = $text
-            $StepsText.Text = $text
-        }
-        if ($StepsPanel.Visibility -ne 'Visible') { $StepsPanel.Visibility = 'Visible' }
+        Render-SessionRows (Group-SessionRows $rows)
+        $StepsPanel.Visibility = 'Collapsed'
         return
+    }
+    if ($SessionsPanel.Visibility -ne 'Collapsed') {
+        $SessionsPanel.Visibility = 'Collapsed'
+        $script:SessionSignature = $null
     }
 
     if ($State.Steps.Count -eq 0) {
