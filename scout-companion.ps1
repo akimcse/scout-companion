@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.6.0'
+$CompanionVersion = '0.6.1'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -3742,6 +3742,26 @@ function Format-Idle([int]$seconds) {
     return ("{0}h" -f [int]($seconds / 3600))
 }
 
+# There are two panels that show what the agent is doing - the step list for a
+# single session, and the per-session rows for several - and exactly one of them
+# may be on screen at a time.
+#
+# This exists because adding the second panel left the prompt paths still hiding
+# only the first. With two sessions and an approval up, the old step list and
+# the new rows were both visible at once, one above the other, showing the same
+# work twice. Anything that clears the body has to clear both, so there is one
+# place that does it.
+function Hide-ActivityPanels {
+    if ($StepsPanel.Visibility -ne 'Collapsed') { $StepsPanel.Visibility = 'Collapsed' }
+    if ($SessionsPanel.Visibility -ne 'Collapsed') {
+        $SessionsPanel.Visibility = 'Collapsed'
+        # Force a rebuild next time: the signature is what suppresses redundant
+        # work, and leaving it set would skip the rebuild after the panel had
+        # been emptied by something else.
+        $script:SessionSignature = $null
+    }
+}
+
 # Build the rows. Real elements, so colour and weight can say what a single
 # monospace block could not: which session is running, and which activity line
 # belongs to which name.
@@ -3867,7 +3887,13 @@ function Render-Steps {
             }
         }
         Render-SessionRows (Group-SessionRows $rows)
-        $StepsPanel.Visibility = 'Collapsed'
+        # Only ever one activity panel on screen. Clear the step signature too,
+        # so returning to a single session rebuilds the list rather than trusting
+        # a signature that was captured before the panel was put away.
+        if ($StepsPanel.Visibility -ne 'Collapsed') {
+            $StepsPanel.Visibility = 'Collapsed'
+            $script:StepSignature = $null
+        }
         return
     }
     if ($SessionsPanel.Visibility -ne 'Collapsed') {
@@ -3999,7 +4025,7 @@ $timer.Add_Tick({
         $Dot.Fill = '#FFB45309'
         # keep the yellow alert focused: hide the step list and narration
         $SayingText.Visibility = 'Collapsed'
-        $StepsPanel.Visibility = 'Collapsed'
+        Hide-ActivityPanels
     }
     elseif ($hasAsk) {
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
@@ -4019,7 +4045,7 @@ $timer.Add_Tick({
         $PermPanel.Visibility = 'Visible'
         $Dot.Fill = '#FF0E7FB8'
         $SayingText.Visibility = 'Collapsed'
-        $StepsPanel.Visibility = 'Collapsed'
+        Hide-ActivityPanels
     }
     else {
         $PermPanel.Visibility = 'Collapsed'

@@ -651,6 +651,30 @@ writes to this same file, merging rather than overwriting, so hand-written keys 
 the code's: **major** when something you rely on changes shape, **minor** for a new
 capability, **patch** for a fix that only makes an existing one behave.
 
+**Which one applies is decided by the change, not by how it feels.** The test is a
+sentence: if the release note is "*now it does X*", that is a minor; if it is "*X now
+works*", that is a patch. Making a shipped feature usable is a patch, however visible the
+difference — the capability was already claimed, and a version number is not a measure of
+effort.
+
+This is written down because it was got wrong. On 2026-08-26 the numbers went 0.1.0 to
+0.6.0 in a day. Only two of those were new capability. `v0.5.0` came from a branch named
+`fix/multi-session-hierarchy` and `v0.6.0` made 0.4.0's update checking reachable; both
+were patches wearing a minor's number. The branch names had it right and the version did
+not.
+
+**Three components, never four.** A build number would be silently invisible: the
+comparison behind the update check reads three, so `0.6.0.1` and `0.6.0` are equal to it
+and nobody would ever be offered the newer one. Worse, every copy already installed has
+that three-part comparison baked in, so moving to four now would strand them — they would
+simply stop seeing updates, with nothing on screen to say why. `Test-SessionMatch.ps1`
+pins this.
+
+**Released numbers are not reused.** A tag that someone may already be running is theirs;
+re-pointing it would leave their copy claiming a version whose contents it does not have,
+and the update check would never correct it because the numbers match. Mistakes get a new
+number, not a corrected old one.
+
 **It is deliberately below 1.0.** Under semver that means the shape of this thing is
 still settling, and while it is, a minor bump can carry a change you have to notice —
 a setting that moves, a behaviour that stops being what it was. That is the honest
