@@ -159,17 +159,48 @@ where English puts it.
 
 ## Install & run
 
-1. Download/clone this repo anywhere.
-2. Double-click **`Start-ScoutCompanion.cmd`**.
+Download **`ScoutCompanion-<version>.zip`** from the
+[latest release](https://github.com/akimcse/scout-companion/releases/latest), unzip it,
+and run:
 
-That's it. The toast stays hidden until the agent is working in the background — apart
-from a brief hello at startup, so you can see it worked.
+```
+powershell -ExecutionPolicy Bypass -File .\Install.ps1 -Run
+```
 
-To pin a particular build rather than tracking `main`, grab a tagged
-[release](https://github.com/akimcse/scout-companion/releases) instead of cloning. There
-is nothing to compile either way; the tag is just a known-good point.
+That copies the app to `%LOCALAPPDATA%\Programs\ScoutCompanion`, adds the Start Menu
+entries, and registers it in **Settings → Apps** so it uninstalls like anything else.
+Per-user throughout: no admin rights, nothing in `Program Files`, nothing in `HKLM`.
+
+Installing over an existing copy keeps your settings — `config.json` and the learned chat
+titles are carried across.
+
+**To remove it:** Settings → Apps → Scout Companion, or
+`Install.ps1 -Uninstall` from the installed folder.
+
+### Or just run it
+
+There is nothing to install, strictly. Unzip anywhere and double-click
+**`Start-ScoutCompanion.cmd`** — the app runs out of whatever folder it is sitting in.
+`Install.ps1` exists to answer "where should this live and how do I get rid of it",
+which the zip on its own does not.
+
+The toast stays hidden until the agent is working in the background, apart from a brief
+hello at startup so you can see it worked.
+
+### Why there is no .exe
+
+It is a PowerShell script; there is nothing to compile. It could be wrapped into an `.exe`,
+but that is a bad trade for this particular tool: it **clicks Allow on security prompts on
+your behalf**, so being readable source is a safety property rather than an inconvenience.
+An unsigned executable would also spend its life arguing with SmartScreen and antivirus.
+
+The release zip carries only what is needed to run — the test suites and documentation
+screenshots in the source archive are most of its size and none of its use.
 
 ### Put it in the Start Menu
+
+`Install.ps1` does this for you. To add the shortcuts without installing — when running
+from a clone, say:
 
 ```
 powershell -ExecutionPolicy Bypass -File .\Add-ToStartMenu.ps1
