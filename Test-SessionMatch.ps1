@@ -21,7 +21,7 @@ $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.
 foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow',
                  'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix',
                  'Get-ShouldShow', 'Select-SessionRowPairs', 'Select-TitleAssignments',
-                 'Format-Idle', 'Format-SessionLines',
+                 'Format-Idle', 'Group-SessionRows',
                  'Compare-CompanionVersion', 'Test-UpdatableInstall')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
@@ -210,46 +210,29 @@ Same 'a minute is minutes'             (Format-Idle 60)   '1m'
 Same 'and not a big number of seconds' (Format-Idle 187)  '3m'
 Same 'an hour is hours'                (Format-Idle 7200) '2h'
 
-Write-Host "`nFormat-SessionLines"
-# One line per session, because handing the whole body to whichever moved last
-# put two unrelated jobs on screen as though they were one list - measured at 21
-# changes of owner in 30 seconds.
+Write-Host "`nGroup-SessionRows"
+# Handing the whole body to whichever session moved last put two unrelated jobs
+# on screen as though they were one list - measured at 21 changes of owner in 30
+# seconds. Rows are grouped instead, running first.
 function Sn($name, $busy, $act, $idle) {
     [pscustomobject]@{ Name = $name; Busy = $busy; Activity = $act; IdleSeconds = $idle }
 }
-$two = @(Format-SessionLines @( (Sn 'alpha' $true 'python merge.py' 0), (Sn 'beta' $false '' 12) ))
-Same 'a line each'                     $two.Count 2
-Same 'the busy one is marked running'  ($two[0].StartsWith([string][char]0x25B8)) $true
-Same 'the quiet one is marked done'    ($two[1].StartsWith([string][char]0x2713)) $true
-Same 'the busy one shows its work'     ($two[0] -match 'python merge\.py') $true
-Same 'the quiet one shows how long'    ($two[1] -match 'idle 12s') $true
+$mixed = @( (Sn 'a' $false '' 5), (Sn 'b' $true 'x' 0), (Sn 'c' $false '' 9), (Sn 'd' $true 'y' 0) )
+$g = @(Group-SessionRows $mixed)
+Same 'nothing is lost'                 $g.Count 4
+Same 'running comes first'             $g[0].Name 'b'
+Same 'and the other running one next'  $g[1].Name 'd'
+Same 'then the quiet ones'             $g[2].Name 'a'
+Same 'in the order they were given'    $g[3].Name 'c'
 
-# Every line the same length keeps the activity column straight; a ragged
-# right-hand edge is the thing that makes a list hard to skim.
-$ragged = @(Format-SessionLines @( (Sn 'a' $true 'x' 0), (Sn 'a-much-longer-name' $true 'y' 0) ))
-Same 'columns line up'                 ($ragged[0].IndexOf('x')) ($ragged[1].IndexOf('y'))
-
-# A session with nothing to say still gets a line - leaving it out would say it
-# is not running.
-$silent = @(Format-SessionLines @( (Sn 'quiet' $true '' 0) ))
-Same 'no activity still gets a line'   $silent.Count 1
-Same 'and does not render as blank'    ($silent[0].Trim().Length -gt 6) $true
-
-# Long names and long commands both have to give way, and neither may push the
-# line past the width it was given.
-$long = @(Format-SessionLines @( (Sn ('n' * 60) $true ('c' * 80) 0) ) 46)
-Same 'a long line is cut to the width' ($long[0].Length -le 46) $true
-Same 'and says it was cut'             ($long[0] -match [string][char]0x2026) $true
-
-Same 'nothing in, nothing out'         (@(Format-SessionLines @())).Count 0
-$noname = @(Format-SessionLines @( (Sn $null $true 'z' 0) ))
-Same 'an unnamed session is labelled'  ($noname[0] -match 'unnamed') $true
-
-# 53 is what a 380px toast actually holds in Consolas 11.5, so the default has
-# to be that and not a round number someone liked the look of.
-$dflt = @(Format-SessionLines @( (Sn ('n' * 90) $true ('c' * 90) 0) ))
-Same 'the default width is the real one' ($dflt[0].Length -le 53) $true
-Same 'and it uses all of it'             ($dflt[0].Length -ge 50) $true
+# Grouping by running/idle is not the churn this was built to avoid: that is a
+# binary which changes only when a session starts or stops, unlike a last-event
+# time that moves every second.
+$stable = @(Group-SessionRows @( (Sn 'a' $true 'x' 0), (Sn 'b' $true 'y' 0) ))
+Same 'all busy keeps the given order'  ($stable.Name -join ',') 'a,b'
+$idle = @(Group-SessionRows @( (Sn 'a' $false '' 1), (Sn 'b' $false '' 2) ))
+Same 'all idle keeps it too'           ($idle.Name -join ',') 'a,b'
+Same 'nothing in, nothing out'         (@(Group-SessionRows @())).Count 0
 
 Write-Host "`nCompare-CompanionVersion"
 Same 'newer is newer'                  (Compare-CompanionVersion '0.4.0' '0.3.0')  1

@@ -45,15 +45,15 @@ place.
 - **Live progress toast** — streams the agent's current activity as readable steps
   (e.g. "Reading config.json", "Running: git commit ...") with a ✓/▸ status list, plus
   the agent's latest narration.
-- **A line per conversation when several are running** — with more than one session
+- **A row per conversation when several are running** — with more than one session
   going, a detailed step list is worse than useless: it belongs to whichever chat moved
   most recently, so what you read is two unrelated jobs interleaved as though they were
   one. Measured with two sessions working at once, the body changed owner twenty-one
-  times in thirty seconds. So past one session the toast switches to a summary: one line
-  each, named, with ▸ for working and ✓ with how long it has been quiet. The lines are
-  ordered by when each session appeared and never by activity — sorting by what moved
-  last would put the lines themselves in motion, which is the churn the summary exists
-  to remove (see [Several conversations at once](#several-conversations-at-once)).
+  times in thirty seconds. So past one session the toast shows a row each — a green
+  accent bar and a bright name for the ones working, dimmed for the ones that have
+  stopped, and the current command tucked inside the bar so it is obvious which
+  conversation it belongs to. Working rows come first
+  (see [Several conversations at once](#several-conversations-at-once)).
 - **A mascot to keep you company** — pick from twelve, including five cats and one
   that is not an animal at all. It types while
   the agent is busy, tilts its head and opens its eyes wide when it needs something from
@@ -494,23 +494,36 @@ running it goes to whichever wrote most recently. Measured with two concurrent s
 that happened **twenty-one times in thirty seconds** — a list that looked coherent and was
 not, because consecutive lines came from different jobs.
 
-So from two sessions upward the toast shows one line each instead:
+So from two sessions upward the toast gives each conversation a row of its own: a name,
+and under it what that conversation is doing right now.
 
-```
-▸  payments-api     Running: git rebase -i main
-▸  design-system    Running: npm run build
-✓  Expense report   idle 4m
-```
+![Several conversations, working ones first](docs/multi-session.png)
 
-`▸` is working, `✓` is finished, and a finished session says how long it has been quiet
-rather than just "idle", which invites the question the line is there to answer. The
-header counts them — `Working hard... (3)`.
+Three things carry the structure, because one was not enough — the first attempt put it
+all in a single monospace block and you could not tell at a glance which session was
+running, or which command belonged to which name:
 
-The order is by when each session first appeared, and deliberately not by activity. Newest-
-first would have looked reasonable and reintroduced exactly the problem: the lines would
-swap places every second or two, and you would lose your place in a list whose whole
-purpose is to be glanceable. A new session joins the bottom; the others stay where they
-were. The glyph carries who is busy, so nothing needs to move to say so.
+- **A coloured accent bar** down the left of each row. Green while the conversation is
+  working, dim otherwise. It also visually brackets the name and its activity together,
+  so the command underneath cannot be read as belonging to the row above.
+- **Weight and brightness on the name.** A working conversation is bright and semi-bold;
+  one that has stopped is grey.
+- **The activity in monospace**, indented inside the bar, wrapping to a second line when
+  a command needs it. A stopped conversation just says how long it has been quiet —
+  "Idle 4m" rather than a bare "idle", which invites the question the row exists to
+  answer.
+
+Working conversations are listed first. That is not the churn this was built to avoid:
+sorting by last-event time would reorder the rows every second or two, but working-versus-
+stopped is a binary that changes only when a session actually starts or finishes, which is
+exactly the event worth reacting to. Within each group the order is by when the session
+appeared, so nothing shuffles under your eye. The header counts them —
+`Working hard... (3)`.
+
+A conversation that was interrupted mid-command keeps an unfinished step in its log
+forever. Taking that at face value showed it as green and "Running:" hours after it had
+stopped, so a row is only treated as working if the session has also written something
+recently.
 
 Approvals and questions are untouched by any of this. They already name the conversation
 that raised them, and they still show one card with a count of whatever else is queued.
