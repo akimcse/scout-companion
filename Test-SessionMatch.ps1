@@ -270,6 +270,20 @@ New-Item -ItemType Directory -Path (Join-Path $tmp '.git') -Force | Out-Null
 Same 'a checkout is refused'           (Test-UpdatableInstall $tmp $tmp) $false
 Remove-Item -Recurse -Force $tmp -EA SilentlyContinue
 
+Write-Host "`nthe version this build declares"
+# A fourth component would be invisible: the comparison reads three, so 0.6.0.1
+# and 0.6.0 are equal to it and the newer one would never be offered. Every copy
+# already installed has that same three-part comparison baked in, so adopting a
+# build number now would strand them silently. Pinned here rather than left to
+# whoever edits the version next.
+$verLine = Select-String -Path $src -Pattern "^\`$CompanionVersion\s*=\s*'([^']+)'" | Select-Object -First 1
+Same 'the version is declared'         ([int][bool]$verLine) 1
+$declared = if ($verLine) { $verLine.Matches[0].Groups[1].Value } else { '' }
+Same 'it is three components'          ([bool]($declared -match '^\d+\.\d+\.\d+$')) $true
+Same 'and not four'                    ([bool]($declared -match '^\d+\.\d+\.\d+\.\d+')) $false
+# The guard is only worth having if a fourth component really does vanish.
+Same 'a build number would be unseen'  (Compare-CompanionVersion "$declared.1" $declared) 0
+
 # Every session picking on its own reaches for the freshest row, and then the
 # one-title-one-session rule refuses the lot. They are pairs, not a race.
 function Sess($d, $age) { [pscustomobject]@{ Dir = $d; Age = [double]$age } }

@@ -132,12 +132,47 @@ try {
         Check "$n does not use Click"      ([int][bool]$usesClick)  0
     }
 
-    # A settings window that names a control the code does not bind is a silent
-    # dead control, so pin the names the handlers rely on.
+    # The controls the update code binds all exist, and the two activity panels
+    # are never on screen together.
     Write-Host "`nthe controls the update code binds all exist"
     foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'CheckUpdateBtn', 'UpdateStatus', 'VerText')) {
         Check "$n is present" ([int][bool]($w.FindName($n))) 1
     }
+
+    # ------------------------------------------------------------------
+    # One activity panel at a time.
+    #
+    # StepsPanel shows a single session's steps; SessionsPanel shows a row per
+    # session when there are several. Adding the second one left the approval
+    # and question paths still hiding only the first, so with two sessions and a
+    # prompt up, both were on screen at once - the same work listed twice, one
+    # block above the other. It looked like the multi-session view had been
+    # reverted.
+    #
+    # Checked against the source: every place that puts the body away must clear
+    # both, which is what Hide-ActivityPanels is for.
+    # ------------------------------------------------------------------
+    Write-Host "`nthe two activity panels are never shown together"
+    $toast = [regex]::Match($text, "(?s)\[xml\]\`$xaml\s*=\s*@'\r?\n(.*?)\r?\n'@")
+    Check 'the toast markup was found' ([int]$toast.Success) 1
+    $tx = [xml]$toast.Groups[1].Value
+    $names = @($tx.SelectNodes('//*') | ForEach-Object { $_.GetAttribute('x:Name') })
+    Check 'StepsPanel exists'    ([int]($names -contains 'StepsPanel')) 1
+    Check 'SessionsPanel exists' ([int]($names -contains 'SessionsPanel')) 1
+
+    # Both start collapsed, or the toast would flash a panel on the first frame.
+    foreach ($p in @('StepsPanel', 'SessionsPanel')) {
+        $vis = @($tx.SelectNodes('//*') | Where-Object { $_.GetAttribute('x:Name') -eq $p } | ForEach-Object { $_.GetAttribute('Visibility') })
+        Check "$p starts collapsed" ([int]($vis -contains 'Collapsed')) 1
+    }
+
+    # The prompt paths must go through the helper rather than collapsing one
+    # panel by hand - that is precisely the bug this pins.
+    $handSet = [regex]::Matches($text, '\$SayingText\.Visibility\s*=\s*''Collapsed''\s*\r?\n\s*\$StepsPanel\.Visibility\s*=\s*''Collapsed''')
+    Check 'no path hides only the step panel' $handSet.Count 0
+    Check 'the shared helper exists'          ([int][bool]($text -match 'function Hide-ActivityPanels')) 1
+    $calls = [regex]::Matches($text, 'Hide-ActivityPanels').Count
+    Check 'and is used by both prompt paths'  ([int]($calls -ge 3)) 1
 } finally {
     try { $w.Close() } catch { }
 }
