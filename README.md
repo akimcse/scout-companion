@@ -68,6 +68,18 @@ place.
   start-with-Scout, switch the mascot, dim the toast, turn the animation off, control
   updates, and see exactly how much memory and CPU the companion is using
   (see [Settings](#settings)).
+- **Tells you when a long turn finishes** — measured over three days of real use: 83 turns
+  ran longer than two minutes and 8 longer than ten. While one of those is going you are
+  looking at another window with no way to know it ended, so the companion raises a tray
+  balloon naming the conversation and how long it took. Only when the toast is not already
+  on screen and the agent is not in front, because otherwise it would be telling you
+  something you are looking at (see [What the agent is doing](#what-the-agent-is-doing)).
+- **How long this turn has been running** — the header carries an elapsed counter once a
+  turn passes twenty seconds. It stays silent below that on purpose: the median turn is
+  eleven seconds, and a counter ticking through every one of them would be motion carrying
+  no information.
+- **What the agent did today** — Settings shows working time, turns and conversations,
+  so the question "how much did this actually do?" does not require reading the event log.
 - **Fifteen languages** — follows your Windows display language, or pin one in
   `config.json` (see [Languages](#languages)).
 - **Tells you when there is a new version** — checks GitHub for a newer release a few
@@ -291,6 +303,8 @@ Right-click the tray icon and choose **Settings**, or click the ⚙ on the toast
 | **Mascot** | Switches between the twelve mascots live, no restart needed. |
 | **Opacity** | Fades the whole toast, from solid down to 35%. Useful if you want it present but not loud. Applies as you drag; the value is saved once you settle. Clicking the track steps one notch at a time. The 35% floor is deliberate — a fully transparent window would still swallow clicks. |
 | **This process** | Live working set, CPU, uptime and the version you are running, so "how much is this costing me?" and "which build is this?" do not require hunting through Task Manager for the right `powershell.exe`. |
+| **Tell me when a long turn finishes** | A tray balloon when a turn runs past `notifyAfterSeconds`. Silent while the toast is up or the agent is in front. |
+| **The agent today** | Working time, turns and conversations — see [What the agent is doing](#what-the-agent-is-doing) for what these count and what they cannot. |
 | **Check for new versions** | Whether to ask GitHub about releases at all. Off makes no network calls of any kind. |
 | **Install them automatically** | Skips the offer and installs as soon as one is found. Off by default, for the reason in [Updates](#updates). Greyed out when checking is off, since it would have nothing to act on. |
 | **Check now** | Asks immediately rather than waiting for the next slot, and says what it found. Works even with checking turned off — an explicit question deserves an answer. |
@@ -490,6 +504,41 @@ Nothing about your sessions, prompts or files is ever sent anywhere: the request
 anonymous GET for the repository's newest tag, and it carries no data of yours. Otherwise
 the companion only reads local files and interacts with the local agent window.
 
+### What the agent is doing
+
+Three days of real use were measured before any of this was built, because the obvious
+guesses were wrong. The headline finding: **3,460 permission requests, every one
+auto-approved, median wait zero seconds.** Clicking Allow — the thing this companion was
+built for — barely happens. What does happen is waiting:
+
+| | |
+|---|---|
+| Agent working time | 1,060 minutes over 3 days |
+| Turns | 2,759 |
+| Median turn | 11s |
+| 90th percentile | 36s |
+| Longest | 10 minutes |
+| Turns over 2 minutes | 83 |
+| Time with 2+ conversations | 11% |
+
+**When a long turn finishes** the companion raises a tray balloon naming the conversation
+and how long it took. Turns shorter than `notifyAfterSeconds` (default 60) pass silently,
+and so does anything you are already watching: nothing is raised while the toast is on
+screen or the agent window is in front, because a notification that repeats what you are
+looking at is just noise. Turn it off in **Settings → The agent today**.
+
+**How long the current turn has been going** appears beside the header once it passes
+twenty seconds. Below that it stays blank — at a median of eleven seconds, a counter
+running on every turn would be movement that never means anything, and the eye learns to
+skip it before the one time it matters.
+
+**Settings → The agent today** carries working time, turns and conversations. Two honest
+limits: it counts from when the companion started rather than from midnight, so one
+launched at lunchtime knows nothing about the morning; and the first turn of a session it
+attaches to mid-flight is not counted at all, because reading begins at the end of the
+event log and that turn's start is already behind it. Guessing a duration for it would be
+inventing a number.
+
 ### Several conversations at once
 
 With one session the toast shows its steps, as it always has. Past one it cannot, and the
@@ -592,6 +641,8 @@ and edit. Common overrides:
 | `language` | `auto` | UI language. `auto` follows the Windows display language; set a tag from `lang/` to pin it |
 | `opacity` | `1.0` | Toast opacity, clamped to 0.35–1.0 on load. Also in the settings window |
 | `startupGreetingSeconds` | `5` | Show the toast briefly at startup so launching the companion has a visible result. `0` starts silently |
+| `notifyOnFinish` | `true` | Tray balloon when a long turn finishes. Silent while the toast is up or the agent is in front. Also in the settings window |
+| `notifyAfterSeconds` | `60` | How long a turn must run before finishing is worth saying. The median turn is 11s, so a low value fires constantly for work you never waited on |
 | `updateCheck` | `true` | Ask GitHub for the newest release now and then. `false` makes no network calls at all |
 | `updateCheckHours` | `6` | How long between checks. The API is rate-limited per IP, so a few times a day is well inside the limit |
 | `updateRepo` | `akimcse/scout-companion` | Which repository to check and install from. Change it for a fork |

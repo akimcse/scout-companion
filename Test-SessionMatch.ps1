@@ -22,7 +22,9 @@ foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-Ch
                  'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix',
                  'Get-ShouldShow', 'Select-SessionRowPairs', 'Select-TitleAssignments',
                  'Format-Idle', 'Group-SessionRows',
-                 'Compare-CompanionVersion', 'Test-UpdatableInstall')) {
+                 'Compare-CompanionVersion', 'Test-UpdatableInstall',
+                 'ConvertTo-EventTime', 'Format-Duration', 'Get-ElapsedLabel',
+                 'Test-ShouldNotifyFinish')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -209,6 +211,86 @@ Same 'seconds stay seconds'            (Format-Idle 42)   '42s'
 Same 'a minute is minutes'             (Format-Idle 60)   '1m'
 Same 'and not a big number of seconds' (Format-Idle 187)  '3m'
 Same 'an hour is hours'                (Format-Idle 7200) '2h'
+# PowerShell's [int] cast rounds rather than truncating, so these read as more
+# time than had actually passed - 90 seconds announced itself as "2m", on a
+# value that sits beside every idle session on screen.
+Same 'ninety seconds is one minute'    (Format-Idle 90)   '1m'
+Same 'and so is 119'                   (Format-Idle 119)  '1m'
+Same 'just under two hours is one'     (Format-Idle 7100) '1h'
+# The finished notice reuses this, so a long turn has to read as minutes. These
+# are the real numbers from three days of use: the median turn, the 90th
+# percentile, and the worst one seen.
+Same 'the median turn measured'        (Format-Idle 11)   '11s'
+Same 'the 90th percentile turn'        (Format-Idle 36)   '36s'
+Same 'the worst turn measured'         (Format-Idle 607)  '10m'
+
+Write-Host "`nFormat-Duration"
+# A total, not an age. Format-Idle shows one unit because it sits at the end of
+# a narrow line, but "17h" for a day's work throws away the part being asked
+# about. The real measured figure was 1,060 minutes - 17.7 hours, which is
+# 17h 40m, and 63,600 seconds is a different number entirely.
+Same 'the measured day total'          (Format-Duration 63600) '17h 40m'
+Same 'minutes keep their seconds'      (Format-Duration 125)   '2m 5s'
+Same 'under a minute is seconds'       (Format-Duration 45)    '45s'
+Same 'exactly an hour'                 (Format-Duration 3600)  '1h 0m'
+# Nothing done yet has to read as nothing, not as "0s", which looks like a
+# measurement that came back zero rather than an absence of one.
+Same 'nothing yet reads as nothing'    (Format-Duration 0)     '-'
+
+Write-Host "`nGet-ElapsedLabel"
+# The single-session view is 89% of the time and said nothing about how long a
+# turn had been running. Measured: the median turn is 11s, the 90th percentile
+# 36s, the worst 10 minutes. So it stays silent through the ordinary ones and
+# appears when a turn is long enough that you would start wondering.
+$n = [datetime]::UtcNow
+Same 'silent for a median turn'        (Get-ElapsedLabel $n.AddSeconds(-11) $n) ''
+Same 'silent just under the threshold' (Get-ElapsedLabel $n.AddSeconds(-19) $n) ''
+Same 'speaks at the threshold'         (Get-ElapsedLabel $n.AddSeconds(-20) $n) '20s'
+Same 'the 90th percentile turn'        (Get-ElapsedLabel $n.AddSeconds(-36) $n) '36s'
+Same 'a long turn reads as minutes'    (Get-ElapsedLabel $n.AddSeconds(-125) $n) '2m'
+Same 'the worst turn measured'         (Get-ElapsedLabel $n.AddSeconds(-607) $n) '10m'
+Same 'the threshold is adjustable'     (Get-ElapsedLabel $n.AddSeconds(-11) $n 5) '11s'
+
+# No turn running means nothing to count.
+Same 'no start, no label'              (Get-ElapsedLabel $null $n) ''
+# A wrong clock should show nothing rather than a negative or a count of days.
+Same 'a future start shows nothing'    (Get-ElapsedLabel $n.AddSeconds(60) $n) ''
+Same 'and neither does a stale one'    (Get-ElapsedLabel $n.AddDays(-2) $n) ''
+
+Write-Host "`nTest-ShouldNotifyFinish"
+# 83 turns ran over two minutes in three days of real use, and while one of
+# those is going you are somewhere else. But a balloon is only worth raising
+# when it says something the screen does not.
+Same 'dismissed and away: notify'      (Test-ShouldNotifyFinish $false $false $false) $true
+Same 'hidden by the rules: notify'     (Test-ShouldNotifyFinish $false $true $false) $true
+Same 'not shown but window up: notify' (Test-ShouldNotifyFinish $false $false $true) $true
+# Already on screen saying the same thing.
+Same 'toast already showing: silent'   (Test-ShouldNotifyFinish $false $true $true) $false
+# You are looking at the agent that just finished.
+Same 'agent in front: silent'          (Test-ShouldNotifyFinish $true $false $false) $false
+Same 'in front, even if hidden'        (Test-ShouldNotifyFinish $true $true $false) $false
+Same 'in front beats everything'       (Test-ShouldNotifyFinish $true $true $true) $false
+
+Write-Host "`nConvertTo-EventTime"
+# Turn timing has to come from the event, never the clock. The companion reads a
+# session's whole backlog on its first pass, so dating those events "now" would
+# report hours of past work as having happened the instant the app started - and
+# would ring the finished notice for every one of them.
+$then = [datetime]::UtcNow.AddHours(-3)
+$e1 = [pscustomobject]@{ timestamp = $then.ToString('o') }
+Same 'the event time is used'          ([int]((ConvertTo-EventTime $e1) - $then).TotalSeconds) 0
+Same 'and it is not now'               ((([datetime]::UtcNow) - (ConvertTo-EventTime $e1)).TotalMinutes -ge 179) $true
+
+# Timestamps arrive with an offset; everything downstream compares in UTC.
+$e2 = [pscustomobject]@{ timestamp = '2026-08-26T09:00:00+09:00' }
+Same 'an offset is converted to UTC'   ((ConvertTo-EventTime $e2).Hour) 0
+Same 'and it is marked UTC'            ((ConvertTo-EventTime $e2).Kind.ToString()) 'Utc'
+
+# A missing or broken stamp must not throw - one bad line would otherwise stop
+# the reader for that whole session.
+$now = [datetime]::UtcNow
+Same 'no stamp falls back to now'      ([int]((ConvertTo-EventTime ([pscustomobject]@{})) - $now).TotalSeconds) 0
+Same 'junk falls back too'             ([int]((ConvertTo-EventTime ([pscustomobject]@{ timestamp = 'not-a-date' })) - $now).TotalSeconds) 0
 
 Write-Host "`nGroup-SessionRows"
 # Handing the whole body to whichever session moved last put two unrelated jobs

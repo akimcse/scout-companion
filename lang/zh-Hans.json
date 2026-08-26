@@ -82,5 +82,13 @@
     "{0} is available.":  "可以安装 {0}。",
     "{0} is available, but this copy runs from a source checkout.":  "{0} 已发布，但此副本从源代码检出运行。",
     "This copy runs from a source checkout, so it will not be replaced automatically.":  "此副本从源代码检出运行，因此不会自动替换。",
-    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "默认关闭是有原因的：此助手会在安全提示中点击“允许”，若新版本一发布就替换，它会在你没有选择的时刻重启。它绝不会动从源代码检出运行的副本。"
+    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "默认关闭是有原因的：此助手会在安全提示中点击“允许”，若新版本一发布就替换，它会在你没有选择的时刻重启。它绝不会动从源代码检出运行的副本。",
+    "Finished":  "已完成",
+    "Ran for":  "运行时长",
+    "THE AGENT TODAY":  "今天的助手",
+    "Working time":  "工作时间",
+    "Turns":  "轮次",
+    "Conversations":  "对话",
+    "Tell me when a long turn finishes":  "长任务完成时通知我",
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "从本程序启动时开始计算，而非整天，因此中午才启动的话不会知道上午的工作。"
 }

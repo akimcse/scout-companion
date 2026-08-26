@@ -82,5 +82,13 @@
     "{0} is available.":  "{0} ist verfügbar.",
     "{0} is available, but this copy runs from a source checkout.":  "{0} ist verfügbar, aber diese Kopie läuft aus einem Quellcode-Checkout.",
     "This copy runs from a source checkout, so it will not be replaced automatically.":  "Diese Kopie läuft aus einem Quellcode-Checkout und wird nicht automatisch ersetzt.",
-    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "Standardmäßig aus, und das mit Absicht: Dieser Begleiter klickt bei Sicherheitsabfragen auf Zulassen. Ihn sofort beim Erscheinen einer Version zu ersetzen, würde ihn zu einem Zeitpunkt neu starten, den Sie nicht gewählt haben. Eine aus einem Quellcode-Checkout laufende Kopie wird nie angerührt."
+    "Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.":  "Standardmäßig aus, und das mit Absicht: Dieser Begleiter klickt bei Sicherheitsabfragen auf Zulassen. Ihn sofort beim Erscheinen einer Version zu ersetzen, würde ihn zu einem Zeitpunkt neu starten, den Sie nicht gewählt haben. Eine aus einem Quellcode-Checkout laufende Kopie wird nie angerührt.",
+    "Finished":  "Fertig",
+    "Ran for":  "Laufzeit",
+    "THE AGENT TODAY":  "DER AGENT HEUTE",
+    "Working time":  "Arbeitszeit",
+    "Turns":  "Durchläufe",
+    "Conversations":  "Unterhaltungen",
+    "Tell me when a long turn finishes":  "Bescheid geben, wenn ein langer Durchlauf endet",
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Gezählt ab dem Start des Begleiters, nicht über den ganzen Tag: mittags gestartet, weiß er nichts vom Vormittag."
 }

@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.6.1'
+$CompanionVersion = '0.7.0'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -179,6 +179,14 @@ $Config = [ordered]@{
     # launched something - and Windows files a new tray icon into the hidden
     # overflow flyout. Set to 0 to start silently.
     startupGreetingSeconds = 5
+    # Say so when a long turn finishes. Measured over three days of real use: 83
+    # turns ran over two minutes and 8 over ten, and while one of those is going
+    # you are looking at something else with no way to know it ended.
+    #
+    # Only when the toast is not on screen and the agent is not in front -
+    # otherwise it is telling you what you are already looking at.
+    notifyOnFinish      = $true
+    notifyAfterSeconds  = 60
     # Check GitHub for a newer release and say so in the tray. The check is
     # cheap and infrequent; installing is a click, not automatic, because
     # replacing a running process mid-approval is not a good surprise.
@@ -382,6 +390,7 @@ function New-SessionRecord([string]$dir, [string]$events) {
         Saying       = $null
         Steps        = New-Object System.Collections.ArrayList
         TurnActive   = $false
+        TurnStartUtc = $null      # when the current turn began, for its duration
         LastEventUtc = [datetime]::UtcNow
         # When this session first appeared. The multi-session list is ordered by
         # this and never by activity: sorting by what moved last would put the
@@ -994,11 +1003,102 @@ function Merge-SessionState {
     }
 }
 
+# An event's own timestamp, falling back to now when it has none or it will not
+# parse. Kept separate because getting this wrong is silent: the companion reads
+# a session's whole backlog on its first pass, so dating those events "now"
+# would collapse hours of history into the instant the app started.
+function ConvertTo-EventTime($evt) {
+    if ($evt.timestamp) {
+        try { return ([datetime]$evt.timestamp).ToUniversalTime() } catch { }
+    }
+    return [datetime]::UtcNow
+}
+
+# A total, as opposed to an age. Format-Idle deliberately shows one unit because
+# it sits at the end of a narrow line - but "17h" for 17 hours 40 minutes throws
+# away the part someone actually wants when reading a day's total, so this keeps
+# two.
+function Format-Duration([double]$seconds) {
+    if ($seconds -lt 1) { return '-' }
+    if ($seconds -lt 60) { return ('{0:N0}s' -f $seconds) }
+    $ts = [TimeSpan]::FromSeconds($seconds)
+    # .Hours and .Minutes, not [int]$ts.TotalHours. PowerShell's [int] cast
+    # rounds rather than truncating, so 17h40m came out as "18h 40m" - an hour
+    # that does not exist alongside a minute count that does.
+    if ($ts.TotalHours -ge 1) { return ('{0}h {1}m' -f ([int][Math]::Floor($ts.TotalHours)), $ts.Minutes) }
+    return ('{0}m {1}s' -f $ts.Minutes, $ts.Seconds)
+}
+
+# One completed turn. Feeds both the day's totals and the "it finished" notice.
+#
+# Turns are kept only for today, and only as a count and a sum: a companion that
+# accumulates a row per turn would grow without bound in a process meant to sit
+# in the tray all day.
+$script:TurnsToday    = 0
+$script:TurnSecsToday = 0.0
+$script:TurnDay       = [datetime]::Now.Date
+$script:LongTurn      = $null    # the one worth mentioning, picked up by the tick
+
+function Add-TurnRecord($sess, [datetime]$startUtc, [datetime]$endUtc, [double]$secs) {
+    # Local date, because "today" is the user's day, not UTC's.
+    $day = $endUtc.ToLocalTime().Date
+    if ($day -ne $script:TurnDay) {
+        $script:TurnDay = $day
+        $script:TurnsToday = 0
+        $script:TurnSecsToday = 0.0
+    }
+    $script:TurnsToday++
+    $script:TurnSecsToday += $secs
+
+    if (-not $Config.notifyOnFinish) { return }
+    if ($secs -lt [double]$Config.notifyAfterSeconds) { return }
+    # Only turns that just happened. On startup the backlog is read in one pass,
+    # and announcing a turn that ended yesterday would be worse than useless.
+    if (([datetime]::UtcNow - $endUtc).TotalSeconds -gt 30) { return }
+
+    # Decided on the tick, not here: whether to show it depends on where the
+    # windows are, and this runs from the file reader.
+    $script:LongTurn = [pscustomobject]@{
+        Name = (Get-SessionSubject $sess)
+        Secs = $secs
+    }
+}
+
 function Handle-Event($sess, $evt) {
     $sess.LastEventUtc = [datetime]::UtcNow
     switch ($evt.type) {
-        'assistant.turn_start' { $sess.TurnActive = $true }
-        'assistant.turn_end'   { $sess.TurnActive = $false }
+        # Turn timing, which two things depend on: the notification when a long
+        # turn finishes, and the day's totals in Settings.
+        #
+        # The time comes from the event, never from the clock. The companion is
+        # often started after a session has been running, and it reads the whole
+        # backlog on first pass - dating those turns "now" would report hours of
+        # work as having happened in the second the app launched.
+        'assistant.turn_start' {
+            $sess.TurnActive = $true
+            $sess.TurnStartUtc = ConvertTo-EventTime $evt
+        }
+        'assistant.turn_end'   {
+            $sess.TurnActive = $false
+            $endUtc = ConvertTo-EventTime $evt
+            # A turn whose start was never seen cannot be timed. This is the
+            # normal case for the first turn of every session the companion
+            # attaches to mid-flight: reading begins at the end of the file, so
+            # that turn_start is already behind the offset. Counting it as
+            # zero-length, or as starting when the companion launched, would
+            # both be inventions - so it is skipped, and the hint under the
+            # totals says they begin when the companion did.
+            if ($sess.TurnStartUtc) {
+                $secs = ($endUtc - $sess.TurnStartUtc).TotalSeconds
+                # A clock change or an out-of-order write can produce nonsense;
+                # a negative or day-long turn is not worth recording or ringing
+                # a bell about.
+                if ($secs -gt 0 -and $secs -lt 86400) {
+                    Add-TurnRecord $sess $sess.TurnStartUtc $endUtc $secs
+                }
+                $sess.TurnStartUtc = $null
+            }
+        }
         'user.message' {
             # Keeps the session's name current as the conversation moves on,
             # without re-reading the file.
@@ -1886,7 +1986,18 @@ function Focus-AgentSession {
         <StackPanel VerticalAlignment="Center">
           <DockPanel LastChildFill="True">
             <Ellipse x:Name="Dot" Width="9" Height="9" Fill="#FF4ADE80" VerticalAlignment="Center" Margin="0,0,7,0" DockPanel.Dock="Left"/>
-            <TextBlock x:Name="HeaderText" Text="Scout is working" Foreground="#FFE6EAF2" FontSize="13.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            <!-- How long the current turn has been going. Measured over three
+                 days of real use: the median turn is 11 seconds, but the 90th
+                 percentile is 36 and the worst was ten minutes. Below about a
+                 minute this is noise, so it only appears once a turn is long
+                 enough that you would start wondering.
+                 Docked Right and declared before HeaderText: DockPanel fills
+                 with its last child, so a header docked last would take the
+                 whole width and leave nothing for this. -->
+            <TextBlock x:Name="ElapsedText" Text="" Foreground="#FF8A93A6" FontSize="11.5"
+                       VerticalAlignment="Center" Margin="8,1,0,0" DockPanel.Dock="Right"
+                       Visibility="Collapsed"/>
+            <TextBlock x:Name="HeaderText" Text="Scout is working" Foreground="#FFE6EAF2" FontSize="13.5" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
           </DockPanel>
           <!-- Which conversation the steps and narration below belong to. Its
                own line, aligned under the header text rather than beside it: a
@@ -1956,6 +2067,7 @@ $Window = [Windows.Markup.XamlReader]::Load($reader)
 $HeaderText   = $Window.FindName('HeaderText')
 $SayingText   = $Window.FindName('SayingText')
 $HeaderFrom   = $Window.FindName('HeaderFrom')
+$ElapsedText  = $Window.FindName('ElapsedText')
 $Dot          = $Window.FindName('Dot')
 $StepsPanel   = $Window.FindName('StepsPanel')
 $StepsText    = $Window.FindName('StepsText')
@@ -2965,6 +3077,36 @@ function Apply-AutoStartFromUI {
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
+    <!-- What the agent did, which is the thing worth knowing. THIS PROCESS
+         below is the companion's own overhead, and putting that first said the
+         wrong thing about which of the two matters.
+         Measured over three days of real use before building this: 1,060
+         minutes of agent time across 2,759 turns. Anyone wanting that number
+         had to parse the event log by hand. -->
+    <TextBlock Style="{StaticResource Section}" Text="THE AGENT TODAY"/>
+    <CheckBox x:Name="NotifyFinishChk" Content="Tell me when a long turn finishes" Margin="0,0,0,10"/>
+    <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="Working time" Width="120" Foreground="#FF9AA6BE"/>
+      <TextBlock Grid.Row="0" Grid.Column="1" x:Name="AgentTimeText" Text="-"/>
+      <TextBlock Grid.Row="1" Grid.Column="0" Text="Turns" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
+      <TextBlock Grid.Row="1" Grid.Column="1" x:Name="AgentTurnsText" Text="-" Margin="0,5,0,0"/>
+      <TextBlock Grid.Row="2" Grid.Column="0" Text="Conversations" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
+      <TextBlock Grid.Row="2" Grid.Column="1" x:Name="AgentSessText" Text="-" Margin="0,5,0,0"/>
+    </Grid>
+    <TextBlock x:Name="AgentStatsHint" Style="{StaticResource Hint}"
+               Text="Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning."/>
+
+    <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
+
     <TextBlock Style="{StaticResource Section}" Text="THIS PROCESS"/>
     <Grid Margin="0,0,0,0">
       <Grid.ColumnDefinitions>
@@ -3029,6 +3171,10 @@ function Show-SettingsWindow {
     $script:SettingsMemText   = $sw.FindName('MemText')
     $script:SettingsCpuText   = $sw.FindName('CpuText')
     $script:SettingsUpText    = $sw.FindName('UpText')
+    $script:SettingsAgentTime = $sw.FindName('AgentTimeText')
+    $script:SettingsAgentTurns = $sw.FindName('AgentTurnsText')
+    $script:SettingsAgentSess = $sw.FindName('AgentSessText')
+    $script:SettingsNotifyChk = $sw.FindName('NotifyFinishChk')
     $script:SettingsMascot    = $sw.FindName('MascotPicker')
     $script:SettingsOpacity   = $sw.FindName('OpacitySlider')
     $script:SettingsOpacityText = $sw.FindName('OpacityValue')
@@ -3058,8 +3204,20 @@ function Show-SettingsWindow {
         $script:SettingsUpdateChk.IsChecked  = [bool]$Config.updateCheck
         $script:SettingsAutoUpdChk.IsChecked = [bool]$Config.autoUpdate
         $script:SettingsAutoUpdChk.IsEnabled = [bool]$Config.updateCheck
+        $script:SettingsNotifyChk.IsChecked  = [bool]$Config.notifyOnFinish
     } finally { $script:SettingsSuppress = $false }
     Sync-UpdateStatusText
+
+    # Checked/Unchecked, matching every other checkbox here - see the note on
+    # the update ones below.
+    $onNotify = {
+        if ($script:SettingsSuppress) { return }
+        $on = [bool]$script:SettingsNotifyChk.IsChecked
+        $Config.notifyOnFinish = $on
+        Save-Setting @{ notifyOnFinish = $on }
+    }
+    $script:SettingsNotifyChk.Add_Checked($onNotify)
+    $script:SettingsNotifyChk.Add_Unchecked($onNotify)
 
     # Checked/Unchecked, not Click. Click fires only for an actual mouse press,
     # so a keyboard toggle or an accessibility tool would flip the box and save
@@ -3170,11 +3328,22 @@ function Show-SettingsWindow {
             $script:SettingsMemText.Text = '{0:N0} MB' -f ($script:SelfProc.WorkingSet64 / 1MB)
             if ($wallMs -gt 0) { $script:SettingsCpuText.Text = '{0:N2} %' -f ($cpuMs / $wallMs * 100) }
             $up = [datetime]::Now - $script:SelfProc.StartTime
+            # Same trap as Format-Duration: [int] rounds, so an uptime of 2h50m
+            # displayed as "3h 50m". Floor it.
             $script:SettingsUpText.Text = if ($up.TotalHours -ge 1) {
-                '{0}h {1}m' -f [int]$up.TotalHours, $up.Minutes
+                '{0}h {1}m' -f ([int][Math]::Floor($up.TotalHours)), $up.Minutes
             } else {
                 '{0}m {1}s' -f $up.Minutes, $up.Seconds
             }
+
+            # What the agent did, as opposed to what this process cost. Read
+            # from the same turn timings the finish notice uses.
+            $script:SettingsAgentTime.Text  = Format-Duration $script:TurnSecsToday
+            $script:SettingsAgentTurns.Text = '{0:N0}' -f $script:TurnsToday
+            # Sessions followed right now, not all day: the companion only keeps
+            # the active set, so a count of "conversations today" would be a
+            # number it cannot honestly produce.
+            $script:SettingsAgentSess.Text  = '{0:N0}' -f $Sessions.Count
         } catch { }
     })
     $script:SettingsResTimer.Start()
@@ -3359,7 +3528,7 @@ function Complete-UpdateCheck {
         if (-not $tag) {
             Write-CompanionLog 'update check failed (offline or rate-limited)'
             $script:UpdateFailed = $true
-            if ($script:UpdateAnnounce) { Show-UpdateBalloon (T 'Update check failed') (T 'Could not reach GitHub.') }
+            if ($script:UpdateAnnounce) { Show-TrayBalloon (T 'Update check failed') (T 'Could not reach GitHub.') }
             return
         }
         $script:UpdateFailed = $false
@@ -3368,7 +3537,7 @@ function Complete-UpdateCheck {
 
         if ((Compare-CompanionVersion $tag $CompanionVersion) -le 0) {
             $script:UpdateAvail = $null
-            if ($script:UpdateAnnounce) { Show-UpdateBalloon (T 'Up to date.') "$CompanionVersion" }
+            if ($script:UpdateAnnounce) { Show-TrayBalloon (T 'Up to date.') "$CompanionVersion" }
             return
         }
         if ($script:UpdateAvail -eq $tag -and -not $script:UpdateAnnounce) { return }   # already told them
@@ -3378,18 +3547,20 @@ function Complete-UpdateCheck {
             # Still worth saying, because a developer wants to know a release went
             # out - but do not offer to install over their checkout.
             Write-CompanionLog "update $tag available; not installable from $PSScriptRoot"
-            if ($script:UpdateAnnounce) { Show-UpdateBalloon (T 'Update available') $tag }
+            if ($script:UpdateAnnounce) { Show-TrayBalloon (T 'Update available') $tag }
             return
         }
         if ($Config.autoUpdate) { Install-CompanionUpdate; return }
-        Show-UpdateBalloon (T 'Update available') "$CompanionVersion -> $($tag.TrimStart('v'))"
+        Show-TrayBalloon (T 'Update available') "$CompanionVersion -> $($tag.TrimStart('v'))"
     } finally {
         $script:UpdateAnnounce = $false
         Sync-UpdateStatusText
     }
 }
 
-function Show-UpdateBalloon([string]$title, [string]$text) {
+# One place that raises a tray balloon. Was Show-UpdateBalloon until the finish
+# notice needed it too - a name that says what it does rather than who calls it.
+function Show-TrayBalloon([string]$title, [string]$text) {
     try {
         $Tray.BalloonTipTitle = $title
         $Tray.BalloonTipText  = $text
@@ -3736,10 +3907,14 @@ function Group-SessionRows($sessions) {
 
 # Short enough to sit at the end of a line, and never a bare number of seconds
 # once it is minutes old - "idle 3m" is the useful shape, "idle 187s" is not.
+#
+# Floor, not [int]: PowerShell's cast rounds, so 90 seconds reported as "2m" and
+# 7,100 as "2h" - both claiming more time had passed than actually had, on a
+# value that sits on screen next to every idle session.
 function Format-Idle([int]$seconds) {
     if ($seconds -lt 60)   { return "${seconds}s" }
-    if ($seconds -lt 3600) { return ("{0}m" -f [int]($seconds / 60)) }
-    return ("{0}h" -f [int]($seconds / 3600))
+    if ($seconds -lt 3600) { return ("{0}m" -f [int][Math]::Floor($seconds / 60)) }
+    return ("{0}h" -f [int][Math]::Floor($seconds / 3600))
 }
 
 # There are two panels that show what the agent is doing - the step list for a
@@ -3760,6 +3935,10 @@ function Hide-ActivityPanels {
         # been emptied by something else.
         $script:SessionSignature = $null
     }
+    # The elapsed counter belongs to a running turn. A prompt means the turn has
+    # stopped and is waiting on you, so leaving the number up would have it
+    # counting time that is now yours rather than the agent's.
+    if ($ElapsedText.Visibility -ne 'Collapsed') { $ElapsedText.Visibility = 'Collapsed' }
 }
 
 # Build the rows. Real elements, so colour and weight can say what a single
@@ -3848,6 +4027,34 @@ function Render-SessionRows($rows) {
         }
     }
     if ($SessionsPanel.Visibility -ne 'Visible') { $SessionsPanel.Visibility = 'Visible' }
+}
+
+# Whether a finished turn is worth a tray balloon.
+#
+# Two ways it is not. The agent is in front, so you are looking at the thing
+# that just finished. Or the toast is on screen already saying so, and a balloon
+# would repeat it. Pulled out as a function because the rule is easy to state
+# and easy to get subtly wrong inside a tick full of other conditions.
+function Test-ShouldNotifyFinish([bool]$isForeground, [bool]$shouldShow, [bool]$isVisible) {
+    if ($isForeground) { return $false }
+    return (-not $shouldShow) -or (-not $isVisible)
+}
+
+# How long the running turn has been going, or nothing when that is not worth
+# saying. Pure, so the threshold behaviour can be tested without a toast.
+#
+# Silent below the threshold on purpose. The median turn is 11 seconds; a
+# counter ticking through every one of those would be motion carrying no
+# information, and would train the eye to ignore the one place that later has
+# something to say.
+function Get-ElapsedLabel($startUtc, [datetime]$nowUtc, [int]$afterSeconds = 20) {
+    if (-not $startUtc) { return '' }
+    $secs = ($nowUtc - $startUtc).TotalSeconds
+    if ($secs -lt $afterSeconds) { return '' }
+    # A wrong clock or an out-of-order write should show nothing rather than a
+    # negative or a number of days.
+    if ($secs -lt 0 -or $secs -ge 86400) { return '' }
+    return Format-Idle ([int]$secs)
 }
 
 function Render-Steps {
@@ -4057,6 +4264,23 @@ $timer.Add_Tick({
         # the list below has no heading and reads as one session's steps.
         if ($many) { $HeaderText.Text = "$($HeaderText.Text)  ($($Sessions.Count))" }
 
+        # How long this turn has been going. Only for a single session: with
+        # several, "how long" has no single answer and each row carries its own
+        # state already.
+        $elapsed = ''
+        if (-not $many -and $script:Busy -and $State.SessionDir) {
+            # SessionDir, not Primary.Dir - Primary is a display shape holding a
+            # label and a title, and has no directory on it.
+            $rec = $Sessions[$State.SessionDir]
+            if ($rec) { $elapsed = Get-ElapsedLabel $rec.TurnStartUtc ([datetime]::UtcNow) }
+        }
+        if ($elapsed) {
+            if ($ElapsedText.Text -ne $elapsed) { $ElapsedText.Text = $elapsed }
+            if ($ElapsedText.Visibility -ne 'Visible') { $ElapsedText.Visibility = 'Visible' }
+        } elseif ($ElapsedText.Visibility -ne 'Collapsed') {
+            $ElapsedText.Visibility = 'Collapsed'
+        }
+
         # Name the conversation whose steps and narration are on screen. Without
         # this the toast reports work in progress and never says whose, which is
         # the ordinary state it spends nearly all of its time in.
@@ -4081,6 +4305,22 @@ $timer.Add_Tick({
         -IsActive $isActive -AgentRunning $agentRunning -IsMinimized $isMinimized `
         -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned `
         -Greeting $greeting
+
+    # A long turn just finished. Worth saying only when it is not already on
+    # screen: a balloon telling you what the visible toast is telling you is
+    # noise, and so is one for a window you are looking at.
+    if ($script:LongTurn) {
+        $t = $script:LongTurn
+        $script:LongTurn = $null
+        if (Test-ShouldNotifyFinish $isForeground $shouldShow $Window.IsVisible) {
+            # Naming the conversation is the whole point when several are
+            # running. Where there is no name yet, say what finished rather than
+            # a bare product name that answers nothing.
+            $body = if ($t.Name) { "{0} - {1}" -f (Truncate $t.Name 60), (Format-Idle ([int]$t.Secs)) }
+                    else { "{0} {1}" -f (T 'Ran for'), (Format-Idle ([int]$t.Secs)) }
+            Show-TrayBalloon (T 'Finished') $body
+        }
+    }
 
     if ($env:SCOUT_COMPANION_DEBUG -or (Test-Path (Join-Path $env:TEMP 'scout-companion-debug.on'))) {
         try {
