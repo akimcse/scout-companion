@@ -10,3 +10,6 @@ rt.err
 *.err
 
 drafts/
+
+# Build output. The zip belongs on a release, not in the history.
+dist/
