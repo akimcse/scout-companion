@@ -45,6 +45,15 @@ place.
 - **Live progress toast** — streams the agent's current activity as readable steps
   (e.g. "Reading config.json", "Running: git commit ...") with a ✓/▸ status list, plus
   the agent's latest narration.
+- **A line per conversation when several are running** — with more than one session
+  going, a detailed step list is worse than useless: it belongs to whichever chat moved
+  most recently, so what you read is two unrelated jobs interleaved as though they were
+  one. Measured with two sessions working at once, the body changed owner twenty-one
+  times in thirty seconds. So past one session the toast switches to a summary: one line
+  each, named, with ▸ for working and ✓ with how long it has been quiet. The lines are
+  ordered by when each session appeared and never by activity — sorting by what moved
+  last would put the lines themselves in motion, which is the churn the summary exists
+  to remove (see [Several conversations at once](#several-conversations-at-once)).
 - **A mascot to keep you company** — pick from twelve, including five cats and one
   that is not an animal at all. It types while
   the agent is busy, tilts its head and opens its eyes wide when it needs something from
@@ -54,12 +63,19 @@ place.
   time, so the tray icon is how you know it is running. Colour carries the state and the
   silhouette carries your chosen mascot, so a glance answers both "is it running?" and
   "is Scout busy?". Right-clicking gives Show/Hide toast, Open Scout, Pause animation,
-  Settings and Exit.
+  Settings and Exit — and **Install update** when a newer release exists.
 - **Settings window** — reachable from the tray or the ⚙ on the toast. Turn on
   start-with-Scout, switch the mascot, dim the toast, turn the animation off, and see
   exactly how much memory and CPU the companion is using (see [Settings](#settings)).
 - **Fifteen languages** — follows your Windows display language, or pin one in
   `config.json` (see [Languages](#languages)).
+- **Tells you when there is a new version** — checks GitHub for a newer release a few
+  times a day and offers it in the tray menu. Notifying rather than installing is
+  deliberate: this thing's job is to click Allow on security prompts, and replacing it
+  the moment a release lands would restart it at an unpredictable time and could drop a
+  prompt already on screen. Set `autoUpdate` if you would rather it just got on with it.
+  Either way it only ever replaces a copy installed by `Install.ps1`, never a source
+  checkout (see [Updates](#updates)).
 - **Color-coded status** — the whole toast shifts color with the agent's state: calm
   **green** while working, dim **navy** when idle, and bright pulsing **yellow** when an
   approval is needed (see [Status at a glance](#status-at-a-glance)).
@@ -465,8 +481,63 @@ The session set and the agent window are both cached — the poll tick normally 
 file stat per followed session and one `IsWindow` call, rather than a walk over every
 session folder and every process on the machine.
 
-No network calls. No data leaves your machine. The companion only reads local files and
-interacts with the local agent window.
+The only network call is the release check described below, and it can be turned off.
+Nothing about your sessions, prompts or files is ever sent anywhere: the request is an
+anonymous GET for the repository's newest tag, and it carries no data of yours. Otherwise
+the companion only reads local files and interacts with the local agent window.
+
+### Several conversations at once
+
+With one session the toast shows its steps, as it always has. Past one it cannot, and the
+reason is worth stating plainly: the step list belongs to a single session, so with two
+running it goes to whichever wrote most recently. Measured with two concurrent sessions,
+that happened **twenty-one times in thirty seconds** — a list that looked coherent and was
+not, because consecutive lines came from different jobs.
+
+So from two sessions upward the toast shows one line each instead:
+
+```
+▸  payments-api     Running: git rebase -i main
+▸  design-system    Running: npm run build
+✓  Expense report   idle 4m
+```
+
+`▸` is working, `✓` is finished, and a finished session says how long it has been quiet
+rather than just "idle", which invites the question the line is there to answer. The
+header counts them — `Working hard... (3)`.
+
+The order is by when each session first appeared, and deliberately not by activity. Newest-
+first would have looked reasonable and reintroduced exactly the problem: the lines would
+swap places every second or two, and you would lose your place in a list whose whole
+purpose is to be glanceable. A new session joins the bottom; the others stay where they
+were. The glyph carries who is busy, so nothing needs to move to say so.
+
+Approvals and questions are untouched by any of this. They already name the conversation
+that raised them, and they still show one card with a count of whatever else is queued.
+
+### Updates
+
+The companion asks GitHub for the newest release tag every six hours, on a background
+runspace so a slow or unreachable GitHub cannot stall the toast. Failure is silent — being
+offline is not something worth interrupting you about. When a newer version exists you get
+a tray balloon once, and an **Install update** item stays in the tray menu until you take
+it.
+
+It notifies rather than installing, by default, because of what this program is. It clicks
+Allow on security prompts. Replacing it the instant a release appears would restart it at a
+moment nobody chose, and a prompt already on screen would be dropped mid-answer. If you
+would rather not be asked, set `autoUpdate: true` and it will install as soon as it finds
+one.
+
+**It will not update a source checkout.** The installer overwrites its target wholesale, so
+pointing it at a working tree would throw away uncommitted work — and a working tree is
+exactly where this gets developed. A copy running from anywhere other than
+`%LOCALAPPDATA%\Programs\ScoutCompanion`, or with a `.git` folder beside it, is told about
+the release and left alone.
+
+Installing hands the job to a detached shell running the same web installer as a fresh
+install. It has to be detached: the installer stops the running companion first, so the
+companion cannot be the thing performing its own replacement.
 
 ## Configuration (optional)
 
@@ -492,6 +563,10 @@ and edit. Common overrides:
 | `language` | `auto` | UI language. `auto` follows the Windows display language; set a tag from `lang/` to pin it |
 | `opacity` | `1.0` | Toast opacity, clamped to 0.35–1.0 on load. Also in the settings window |
 | `startupGreetingSeconds` | `5` | Show the toast briefly at startup so launching the companion has a visible result. `0` starts silently |
+| `updateCheck` | `true` | Ask GitHub for the newest release now and then. `false` makes no network calls at all |
+| `updateCheckHours` | `6` | How long between checks. The API is rate-limited per IP, so a few times a day is well inside the limit |
+| `updateRepo` | `akimcse/scout-companion` | Which repository to check and install from. Change it for a fork |
+| `autoUpdate` | `false` | Install as soon as a release is found instead of offering it in the tray. Never touches a source checkout either way |
 | `exitWhenAgentGone` | `true` | Close the companion shortly after the agent app quits |
 | `exitGraceSeconds` | `30` | How long the agent must stay gone before the companion exits |
 
@@ -554,11 +629,16 @@ position: it is still finding and fixing its own significant faults faster than 
 gaining features. 1.0 is a claim about stability, and this has not earned one yet.
 
 The running version is in **Settings → This process**, and every release is tagged, so a
-bug report can say what it was running.
+bug report can say what it was running. From 0.4.0 onward an installed copy will also
+tell you when a newer one exists (see [Updates](#updates)).
 
 ## Privacy & safety
 
-- Reads only local session files and the local agent window. No telemetry, no network.
+- Reads only local session files and the local agent window. No telemetry.
+- **One network call, and only one:** an anonymous request to GitHub for the newest
+  release tag, a few times a day. It sends nothing about you — no session content, no
+  file names, no identifiers beyond what any HTTP request carries. Set `updateCheck` to
+  `false` and it makes none at all.
 - Clicking **Allow** here is exactly equivalent to clicking Allow in the agent — it does
   not bypass any of the agent's own permission checks; it just forwards your click.
 - Treat approvals with the same care you would in the agent itself.

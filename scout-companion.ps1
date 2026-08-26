@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.3.0'
+$CompanionVersion = '0.4.0'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -179,6 +179,15 @@ $Config = [ordered]@{
     # launched something - and Windows files a new tray icon into the hidden
     # overflow flyout. Set to 0 to start silently.
     startupGreetingSeconds = 5
+    # Check GitHub for a newer release and say so in the tray. The check is
+    # cheap and infrequent; installing is a click, not automatic, because
+    # replacing a running process mid-approval is not a good surprise.
+    updateCheck         = $true
+    updateCheckHours    = 6
+    updateRepo          = 'akimcse/scout-companion'
+    # Set true to install as soon as one is found, without asking. Only takes
+    # effect for an installed copy, never a source checkout.
+    autoUpdate          = $false
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
 }
@@ -374,6 +383,11 @@ function New-SessionRecord([string]$dir, [string]$events) {
         Steps        = New-Object System.Collections.ArrayList
         TurnActive   = $false
         LastEventUtc = [datetime]::UtcNow
+        # When this session first appeared. The multi-session list is ordered by
+        # this and never by activity: sorting by what moved last would put the
+        # lines themselves in motion, which is the churn the list exists to
+        # remove. A new session joins the bottom and the others stay put.
+        FirstSeenUtc = [datetime]::UtcNow
         PendingPerms = [ordered]@{}
         PendingAsks  = [ordered]@{}
     }
@@ -3120,6 +3134,152 @@ function Show-SettingsWindow {
 }
 
 $MenuShow  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Show toast')
+# ---------------------------------------------------------------------------
+# Updates
+#
+# Deliberately notify-first. Silently replacing a running process whose job is
+# to click Allow on security prompts is not a default worth having: the restart
+# would land at an unpredictable moment and could drop an approval that was
+# already on screen. So the check is automatic, the install is a click. Anyone
+# who wants it hands-off sets autoUpdate in config.
+# ---------------------------------------------------------------------------
+
+function Write-CompanionLog([string]$msg) {
+    # Same file the tick's own debug line uses, so update activity lands in
+    # sequence with everything else rather than in a log of its own.
+    try {
+        Add-Content -Path (Join-Path $env:TEMP 'scout-companion-debug.log') `
+            -Value ("{0} {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg)
+    } catch { }
+}
+
+# Compare two dotted versions. Returns -1, 0, 1 like a comparer.
+#
+# [version] alone will not do: it throws on a leading "v", on a pre-release
+# suffix, and on a bare "1", all three of which appear in real release tags.
+function Compare-CompanionVersion([string]$a, [string]$b) {
+    function Split-V([string]$v) {
+        if (-not $v) { return @(0, 0, 0) }
+        $v = ([string]$v).Trim().TrimStart('v', 'V')
+        $v = ($v -split '[-+]')[0]          # drop -beta.1 / +build
+        $parts = @($v -split '\.' | ForEach-Object {
+            $n = 0
+            if ([int]::TryParse(($_ -replace '\D', ''), [ref]$n)) { $n } else { 0 }
+        })
+        while ($parts.Count -lt 3) { $parts += 0 }
+        return $parts
+    }
+    $x = Split-V $a
+    $y = Split-V $b
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($x[$i] -gt $y[$i]) { return 1 }
+        if ($x[$i] -lt $y[$i]) { return -1 }
+    }
+    return 0
+}
+
+# Whether an update may be installed over this copy.
+#
+# The installer overwrites its target wholesale, so pointing it at a git
+# checkout would throw away someone's uncommitted work. A checkout is also
+# exactly where a developer runs from, so this is not a rare case.
+function Test-UpdatableInstall([string]$scriptDir, [string]$installDir) {
+    if (-not $scriptDir -or -not $installDir) { return $false }
+    if ([System.IO.Directory]::Exists([System.IO.Path]::Combine($scriptDir, '.git'))) { return $false }
+    $a = $scriptDir.TrimEnd('\', '/')
+    $b = $installDir.TrimEnd('\', '/')
+    return [string]::Equals($a, $b, [StringComparison]::OrdinalIgnoreCase)
+}
+
+$script:InstallDir     = [System.IO.Path]::Combine($env:LOCALAPPDATA, 'Programs', 'ScoutCompanion')
+$script:UpdateAvail    = $null      # the tag, once one is found
+$script:UpdateCheckUtc = [datetime]::MinValue
+$script:UpdateBusy     = $false
+$script:UpdatePs       = $null
+$script:UpdateHandle   = $null
+
+function Update-CheckForRelease {
+    if (-not $Config.updateCheck) { return }
+    if ($script:UpdateBusy) { return }
+    $due = $script:UpdateCheckUtc.AddHours([double]$Config.updateCheckHours)
+    if ([datetime]::UtcNow -lt $due) { return }
+    $script:UpdateCheckUtc = [datetime]::UtcNow
+
+    # The network call blocks, and this runs on the UI thread, so a slow or
+    # unreachable github would freeze the toast. Do it on a runspace and pick
+    # the answer up on a later tick.
+    $script:UpdateBusy = $true
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript({
+        param($repo)
+        try {
+            $ProgressPreference = 'SilentlyContinue'
+            try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+            $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" `
+                -Headers @{ 'User-Agent' = 'scout-companion' } -TimeoutSec 15
+            if ($r -and $r.tag_name) { return [string]$r.tag_name }
+        } catch { }
+        return $null
+    }).AddArgument([string]$Config.updateRepo)
+    $script:UpdatePs     = $ps
+    $script:UpdateHandle = $ps.BeginInvoke()
+}
+
+function Complete-UpdateCheck {
+    if (-not $script:UpdateBusy -or -not $script:UpdateHandle) { return }
+    if (-not $script:UpdateHandle.IsCompleted) { return }
+    $tag = $null
+    try { $tag = @($script:UpdatePs.EndInvoke($script:UpdateHandle))[0] } catch { }
+    try { $script:UpdatePs.Dispose() } catch { }
+    $script:UpdatePs = $null; $script:UpdateHandle = $null; $script:UpdateBusy = $false
+    if (-not $tag) { return }
+    Write-CompanionLog "update check: latest=$tag running=$CompanionVersion"
+
+    if ((Compare-CompanionVersion $tag $CompanionVersion) -le 0) { $script:UpdateAvail = $null; return }
+    if ($script:UpdateAvail -eq $tag) { return }     # already told them
+    $script:UpdateAvail = $tag
+
+    if (-not (Test-UpdatableInstall $PSScriptRoot $script:InstallDir)) {
+        # Still worth saying, because a developer wants to know a release went
+        # out - but do not offer to install over their checkout.
+        Write-CompanionLog "update $tag available; not installable from $PSScriptRoot"
+        return
+    }
+    if ($Config.autoUpdate) { Install-CompanionUpdate; return }
+    try {
+        $Tray.BalloonTipTitle = (T 'Update available')
+        $Tray.BalloonTipText  = "$CompanionVersion -> $($tag.TrimStart('v'))"
+        $Tray.ShowBalloonTip(8000)
+    } catch { }
+}
+
+function Install-CompanionUpdate {
+    if (-not (Test-UpdatableInstall $PSScriptRoot $script:InstallDir)) {
+        try {
+            [System.Windows.Forms.MessageBox]::Show(
+                (T 'This copy runs from a source checkout, so it will not be replaced automatically.'),
+                'Scout Companion') | Out-Null
+        } catch { }
+        return
+    }
+    # The installer stops the running companion, so the companion cannot be the
+    # thing that runs it. Hand it to a detached shell and get out of the way.
+    #
+    # No tag is passed: web-install defaults to the latest release, which is
+    # exactly what was detected. Setting $Tag beforehand would not work anyway -
+    # the downloaded script opens with param(), so iex binds nothing and the
+    # parameter's own empty default would win.
+    $cmd = "`$ProgressPreference='SilentlyContinue'; " +
+           "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; " +
+           "iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/$($Config.updateRepo)/main/web-install.ps1'))"
+    try {
+        Write-CompanionLog "installing update $($script:UpdateAvail)"
+        Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $cmd
+    } catch {
+        Write-CompanionLog "update launch failed: $_"
+    }
+}
+
 $MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Open Scout')
 $MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Pause animation')
 $MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Settings...')
@@ -3149,6 +3309,10 @@ $MenuPause.Add_Click({
 $MenuSet.Add_Click({ Show-SettingsWindow })
 $MenuExit.Add_Click({ Stop-Companion })
 
+$MenuUpdate = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Install update')
+$MenuUpdate.Available = $false
+$MenuUpdate.Add_Click({ Install-CompanionUpdate })
+
 $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$TrayMenu.Items.Add($MenuShow)
 [void]$TrayMenu.Items.Add($MenuOpen)
@@ -3156,6 +3320,7 @@ $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$TrayMenu.Items.Add($MenuPause)
 [void]$TrayMenu.Items.Add($MenuSet)
 [void]$TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$TrayMenu.Items.Add($MenuUpdate)
 [void]$TrayMenu.Items.Add($MenuExit)
 $Tray.ContextMenuStrip = $TrayMenu
 
@@ -3389,7 +3554,113 @@ function Get-QueueSuffix([int]$total) {
     return ''
 }
 
+# One line per session, for when more than one is running.
+#
+# The toast hands its whole body to whichever session moved most recently,
+# which is fine for one and useless for several: measured with two working at
+# once, the body changed owner 21 times in 30 seconds. What was on screen was
+# two unrelated jobs interleaved - not merely uninformative, but untrustworthy,
+# because it reads as one coherent list.
+#
+# So each session gets its own line and keeps it. Deliberately not sorted by
+# recency: reordering the lines under the reader's eye would reintroduce the
+# same churn one level down. The glyph says who is busy; position stays put.
+#
+# Takes and returns plain data so the layout can be tested without a toast.
+#   $sessions : objects with .Name, .Busy, .Activity, .IdleSeconds
+#   $width    : characters available on a line. 53 is measured, not guessed:
+#               a 380px toast less 2x14 card padding and 2x10 panel padding
+#               leaves 332px, and Consolas at 11.5 advances 6.323px per glyph.
+function Format-SessionLines($sessions, [int]$width = 53) {
+    $out = New-Object System.Collections.ArrayList
+    $items = @($sessions)
+    if ($items.Count -eq 0) { return @() }
+
+    # Resolve the names first, fallback included. Sizing the column from the raw
+    # names left an unnamed session with a zero-width column, and its label was
+    # then truncated to a single character.
+    $names = @()
+    foreach ($s in $items) {
+        $n = if ($s.Name) { [string]$s.Name } else { '(unnamed)' }
+        $names += $n
+    }
+
+    # Give the name up to half the line, but no more than the longest one needs,
+    # so two short names do not sit either side of a gulf of whitespace.
+    $longest = 0
+    foreach ($n in $names) { if ($n.Length -gt $longest) { $longest = $n.Length } }
+    $nameCol = [Math]::Min($longest, [Math]::Max(12, [int]($width / 2)))
+
+    # mark + gap + name + gap  =  1 + 2 + nameCol + 2
+    $room = $width - $nameCol - 5
+    if ($room -lt 6) { $room = 6 }
+
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $s = $items[$i]
+        $mark = if ($s.Busy) { [char]0x25B8 } else { [char]0x2713 }   # triangle / check
+        $name = $names[$i]
+        if ($name.Length -gt $nameCol) { $name = $name.Substring(0, [Math]::Max(1, $nameCol - 1)) + [char]0x2026 }
+
+        # What it is doing, or how long since it stopped. "idle" on its own
+        # invites the question this is meant to answer.
+        $act = if ($s.Busy) { [string]$s.Activity }
+               elseif ($null -ne $s.IdleSeconds) { 'idle ' + (Format-Idle ([int]$s.IdleSeconds)) }
+               else { '' }
+        if (-not $act) { $act = '-' }
+        if ($act.Length -gt $room) { $act = $act.Substring(0, [Math]::Max(1, $room - 1)) + [char]0x2026 }
+
+        [void]$out.Add(("{0}  {1}  {2}" -f $mark, $name.PadRight($nameCol), $act))
+    }
+    return @($out)
+}
+
+# Short enough to sit at the end of a line, and never a bare number of seconds
+# once it is minutes old - "idle 3m" is the useful shape, "idle 187s" is not.
+function Format-Idle([int]$seconds) {
+    if ($seconds -lt 60)   { return "${seconds}s" }
+    if ($seconds -lt 3600) { return ("{0}m" -f [int]($seconds / 60)) }
+    return ("{0}h" -f [int]($seconds / 3600))
+}
+
 function Render-Steps {
+    # Several sessions: one line each, rather than a detailed list belonging to
+    # whichever of them happened to move last.
+    if ($Sessions.Count -gt 1) {
+        $rows = @()
+        # By first appearance, never by activity - a Hashtable's own key order is
+        # not defined and would reshuffle the list on its own.
+        $ordered = @($Sessions.Keys | Sort-Object @{ E = { $Sessions[$_].FirstSeenUtc } }, @{ E = { $_ } })
+        foreach ($dir in $ordered) {
+            $rec = $Sessions[$dir]
+            $busy = [bool]$rec.TurnActive
+            $act = ''
+            if ($rec.Steps.Count) {
+                $live = @($rec.Steps | Where-Object { -not $_.Done })
+                if ($live.Count) { $act = $live[-1].Text; $busy = $true }
+                else { $act = $rec.Steps[$rec.Steps.Count - 1].Text }
+            }
+            # Prefer the chat title, then the last request, and fall back to the
+            # working-directory label. Only a session that has neither shows as
+            # unnamed, which in practice means one that has not been asked
+            # anything yet.
+            $name = Get-SessionSubject $rec
+            if (-not $name) { $name = $rec.Label }
+            $rows += [pscustomobject]@{
+                Name        = $name
+                Busy        = $busy
+                Activity    = $act
+                IdleSeconds = [int]([datetime]::UtcNow - $rec.LastEventUtc).TotalSeconds
+            }
+        }
+        $text = (Format-SessionLines $rows) -join "`n"
+        if ($text -ne $script:StepSignature) {
+            $script:StepSignature = $text
+            $StepsText.Text = $text
+        }
+        if ($StepsPanel.Visibility -ne 'Visible') { $StepsPanel.Visibility = 'Visible' }
+        return
+    }
+
     if ($State.Steps.Count -eq 0) {
         if ($null -ne $script:StepSignature) { $script:StepSignature = $null; $StepsPanel.Visibility = 'Collapsed' }
         return
@@ -3418,6 +3689,21 @@ $timer.Interval = [TimeSpan]::FromMilliseconds([int]$Config.pollIntervalMs)
 $timer.Add_Tick({
     try { Read-NewEvents } catch { }
     try { Merge-SessionState } catch { }
+    # Both are cheap no-ops nearly every tick: the check is rate-limited to
+    # hours, and completion only touches a handle that is usually null.
+    try { Update-CheckForRelease } catch { }
+    try { Complete-UpdateCheck } catch { }
+    try {
+        $showUpd = [bool]$script:UpdateAvail -and (Test-UpdatableInstall $PSScriptRoot $script:InstallDir)
+        # Available, not Visible. A ToolStripItem's Visible getter reports false
+        # whenever its menu is closed - which is nearly always - so comparing
+        # against it would re-set the property on every single tick.
+        if ($MenuUpdate.Available -ne $showUpd) { $MenuUpdate.Available = $showUpd }
+        if ($showUpd) {
+            $want = (T 'Install update') + " $($script:UpdateAvail)"
+            if ($MenuUpdate.Text -ne $want) { $MenuUpdate.Text = $want }
+        }
+    } catch { }
 
     $win = Get-AgentWindow
     $agentRunning = $null -ne $win
@@ -3523,16 +3809,27 @@ $timer.Add_Tick({
     }
     else {
         $PermPanel.Visibility = 'Collapsed'
+        $many = $Sessions.Count -gt 1
         if (-not $agentRunning) { $HeaderText.Text = T 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
         elseif ($script:Busy)   { $HeaderText.Text = T 'Working hard...';    $Dot.Fill = '#FF4ADE80' }
         else                    { $HeaderText.Text = T 'Idle';               $Dot.Fill = '#FF8A93A6' }
+        # How many are being followed, once that is more than one. Without it
+        # the list below has no heading and reads as one session's steps.
+        if ($many) { $HeaderText.Text = "$($HeaderText.Text)  ($($Sessions.Count))" }
 
         # Name the conversation whose steps and narration are on screen. Without
         # this the toast reports work in progress and never says whose, which is
         # the ordinary state it spends nearly all of its time in.
-        Set-FromLine $HeaderFrom $State.Primary
+        #
+        # With several sessions the list names every one of them, so naming one
+        # here as well would be both redundant and the very thing that churns -
+        # it is whichever moved last.
+        if ($many) { $HeaderFrom.Visibility = 'Collapsed' }
+        else { Set-FromLine $HeaderFrom $State.Primary }
 
-        if ($State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
+        # Narration belongs to one session, so with several on screen it would
+        # be a sentence with no owner sitting above a list that has owners.
+        if (-not $many -and $State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
         else { $SayingText.Visibility = 'Collapsed' }
 
         Render-Steps

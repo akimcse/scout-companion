@@ -56,6 +56,18 @@
   "startupGreetingSeconds": 5,
   "_startupGreetingSeconds": "Show the toast for this many seconds at startup, whatever the visibility rules would otherwise say. Without it, launching the companion has no visible result: the toast hides while Scout has focus, which it does because you just launched something, and Windows files a brand-new tray icon into the hidden overflow flyout. Set to 0 to start silently.",
 
+  "updateCheck": true,
+  "_updateCheck": "Ask GitHub every so often whether there is a newer release, and say so in the tray. The check runs off the UI thread so a slow or unreachable GitHub never stalls the toast, and it fails silently - being offline is not an error worth reporting. Set to false to never look.",
+
+  "updateCheckHours": 6,
+  "_updateCheckHours": "How long to wait between checks. The API call is unauthenticated and therefore rate-limited per IP address; a few times a day is comfortably inside the limit even on a shared connection.",
+
+  "updateRepo": "akimcse/scout-companion",
+  "_updateRepo": "Which repository to check for releases, and to install from. Change it if you run your own fork.",
+
+  "autoUpdate": false,
+  "_autoUpdate": "Install a new release as soon as one is found, instead of offering it in the tray menu. Off by default on purpose: this companion's job is to click Allow on security prompts, and replacing it mid-approval would restart it at an unpredictable moment and could drop a prompt that was already on screen. Either way it only ever updates a copy installed by Install.ps1 - a source checkout is left alone, because the installer overwrites its target wholesale and would throw away uncommitted work.",
+
   "exitWhenAgentGone": true,
   "_exitWhenAgentGone": "Automatically close the companion shortly after the agent app quits. Pair with Watch-Scout.ps1 (in the Startup folder) to tie the companion's lifetime to Scout: it opens when Scout starts and closes when Scout exits.",
 
