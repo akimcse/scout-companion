@@ -460,6 +460,34 @@ $mix2 = Select-TitleAssignments @( (Pair 'C:\s\b' 'Scout Companion'), (Pair 'C:\
 Same 'the clean one still lands'          $mix2.Assign['C:\s\c'] 'Expense'
 Same 'the contested one does not'         $mix2.Assign.ContainsKey('C:\s\b') $false
 
+Write-Host "`nwhen the chat search is worth typing into"
+# Learning a chat's name means typing into Scout's search box, because the
+# sidebar only stamps rows with times once a query has been typed - and a time
+# is the only thing that can match a chat to a session folder. That is
+# intrusive, so it has to be earned.
+$appSrc = Get-Content $src -Raw
+# 0.8.0 made showChatTitle default to off and this was not revisited, so the
+# companion kept typing into the search box to learn a name it did not display.
+Same 'the scan is gated on the setting' ([bool]($appSrc -match '\$base = if \(\$Config\.showChatTitle\)')) $true
+Same 'and off means never'              ([bool]($appSrc -match 'showChatTitle\) \{ \[double\]\$Config\.chatTitleScanMs \} else \{ 0 \}')) $true
+Same 'the default is off'               ([bool]($appSrc -match 'showChatTitle\s+= \$false')) $true
+
+# Some conversations can never be named - two started inside the same minute
+# cannot be told apart by whole-minute rows - and were retried forever.
+Same 'attempts are counted'             ([bool]($appSrc -match '\$script:ChatScanTries\[\$_\] -lt \[int\]\$Config\.chatTitleScanTries')) $true
+Same 'and there is a limit'             ([bool]($appSrc -match 'chatTitleScanTries\s+= \d')) $true
+# Giving up must not make it scan more often, which comparing the whole set did.
+Same 'backoff resets only on new work'  ([bool]($appSrc -match '\$fresh = @\(\$unnamed \| Where-Object \{ \$_ -notin \$script:ChatScanKnown \}\)')) $true
+# And a new message earns one more look, not a clean slate.
+Same 'a new request decays the count'   ([bool]($appSrc -match 'if \(\$n -gt 0\) \{ \$script:ChatScanTries\[\$sess\.Dir\] = \$n - 1 \}')) $true
+
+# Open must still learn the name as a side effect, or turning the setting on
+# would have nothing to bootstrap from.
+Same 'opening a chat still learns it'   ([bool]($appSrc -match 'Set-LearnedTitle \$rec\.Dir \$pick\.Title')) $true
+# And the setting's tooltip has to admit what turning it on does, since being
+# surprised by the typing is exactly what prompted this.
+Same 'the tooltip says it will type'    ([bool]($appSrc -match "type into Scout's chat search")) $true
+
 Write-Host ("`n{0} passed, {1} failed" -f $script:Pass, $script:Fail)
 if ($script:Fail -gt 0) { exit 1 }
 

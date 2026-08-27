@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.8.1'
+$CompanionVersion = '0.8.2'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -153,6 +153,12 @@ $Config = [ordered]@{
     # interval doubles on every fruitless look up to this ceiling. It drops
     # back to chatTitleScanMs as soon as a conversation turns up without a name.
     chatTitleScanMaxMs  = 300000
+    # How many fruitless looks a conversation gets before it is left alone.
+    # Two sessions started inside the same minute cannot be told apart by
+    # whole-minute sidebar rows, so some are unnameable and were being retried
+    # for as long as the companion ran. A new request resets the count, since
+    # that is the one thing that can change the answer.
+    chatTitleScanTries  = 3
     # Mascot frame interval. 80 ms (12.5 fps) is smooth enough for a bob and a
     # typing paw, and costs roughly half of the old 50 ms (20 fps).
     animIntervalMs      = 80
@@ -442,6 +448,8 @@ $script:StepSignature     = $null                  # last rendered step list
 $script:ChatScanUtc       = [datetime]::MinValue   # throttle for the sidebar read
 $script:ChatScanEvery     = 0                      # current backoff interval, ms
 $script:ChatScanSig       = $null                  # which sessions were still unnamed
+$script:ChatScanKnown     = @()                    # ...and which had already been seen
+$script:ChatScanTries     = @{}                    # fruitless looks, per session
 $script:ChatScanLooked    = $false                 # did the last scan get as far as searching
 $script:AutomationCache   = @{}                    # dir -> is this a scheduled-automation run (never changes)
 
@@ -994,14 +1002,41 @@ function Read-NewEvents {
     # open too. Measured at half again the companion's whole CPU cost when run
     # flat out, so a fruitless look backs off and an unnamed conversation
     # turning up brings it straight back.
-    $base = [double]$Config.chatTitleScanMs
+    # Learning what Scout calls a chat means typing into its search box, because
+    # the sidebar only puts timestamps on rows once a query has been typed - and
+    # a timestamp is the only thing that can match a chat to a session folder,
+    # the two being different namespaces joined by an encrypted index.
+    #
+    # That is intrusive, so it only happens when the answer is actually wanted.
+    # showChatTitle defaulted to off in 0.8.0 and this was not revisited, so the
+    # companion went on typing into the search box every fifteen seconds to
+    # learn a name it then did not display. Nothing else needs it either: Open
+    # finds the chat by topic overlap and learns the title as a side effect, and
+    # session labels fall back to the working directory plus topic.
+    $base = if ($Config.showChatTitle) { [double]$Config.chatTitleScanMs } else { 0 }
     if ($base -gt 0) {
-        $unnamed = @($Sessions.Keys | Where-Object { -not $Sessions[$_].ChatTitle } | Sort-Object)
+        # A session that cannot be named stays unnamed forever - two sessions
+        # started within the same minute cannot be told apart by whole-minute
+        # rows, by design - and without a limit it is retried for as long as the
+        # companion runs. Attempts are per session and reset when that session
+        # is asked something new, which is the one thing that can change the
+        # answer.
+        $unnamed = @($Sessions.Keys | Where-Object {
+            -not $Sessions[$_].ChatTitle -and
+            [int]$script:ChatScanTries[$_] -lt [int]$Config.chatTitleScanTries
+        } | Sort-Object)
         $sig = ($unnamed -join '|')
-        if ($sig -ne $script:ChatScanSig) {
-            $script:ChatScanSig   = $sig
+        # Reset the backoff only when the set gains a session, never when it
+        # loses one. Comparing the whole set meant that giving up on a session,
+        # or naming one, shrank the set and so reset the interval to its
+        # shortest - measured going straight back to 15s the moment a session
+        # was set aside, which is the opposite of what giving up should do.
+        $fresh = @($unnamed | Where-Object { $_ -notin $script:ChatScanKnown })
+        if ($fresh.Count) {
             $script:ChatScanEvery = $base
         }
+        $script:ChatScanKnown = $unnamed
+        $script:ChatScanSig   = $sig
         if ($script:ChatScanEvery -le 0) { $script:ChatScanEvery = $base }
         if ($sig -and ([datetime]::UtcNow - $script:ChatScanUtc).TotalMilliseconds -ge $script:ChatScanEvery) {
             $script:ChatScanUtc = [datetime]::UtcNow
@@ -1009,7 +1044,10 @@ function Read-NewEvents {
             try { $got = Update-SessionTitles } catch { }
             if ($got) { $script:ChatScanEvery = $base }
             elseif ($script:ChatScanLooked) {
-                # Looked and found nothing: worth trying less often.
+                # Looked and found nothing: worth trying less often, and worth
+                # counting against the sessions that were looked for so they are
+                # not retried forever.
+                foreach ($d in $unnamed) { $script:ChatScanTries[$d] = [int]$script:ChatScanTries[$d] + 1 }
                 $cap = [double]$Config.chatTitleScanMaxMs
                 $script:ChatScanEvery = [Math]::Min($script:ChatScanEvery * 2, $cap)
             }
@@ -1171,7 +1209,19 @@ function Handle-Event($sess, $evt) {
             # Keeps the session's name current as the conversation moves on,
             # without re-reading the file.
             $txt = $evt.data.content
-            if ($txt) { $sess.Subject = Truncate $txt 40 }
+            if ($txt) {
+                $sess.Subject = Truncate $txt 40
+                # A new request can change what the chat search returns, so it
+                # is worth one more look - but only one. Clearing the count
+                # outright meant that in an active conversation the scan reset
+                # to its shortest interval on every message you sent, so a
+                # session that could never be named was retried indefinitely.
+                # Decaying instead lets repeated failure still converge.
+                if (-not $sess.ChatTitle) {
+                    $n = [int]$script:ChatScanTries[$sess.Dir]
+                    if ($n -gt 0) { $script:ChatScanTries[$sess.Dir] = $n - 1 }
+                }
+            }
         }
         'assistant.message' {
             $txt = $evt.data.content; if (-not $txt) { $txt = $evt.data.text }
@@ -2894,6 +2944,15 @@ function Set-ShowChatTitle([bool]$on) {
     [void](Save-Setting @{ showChatTitle = $on })
     $script:SessionSignature = $null
     $script:StepSignature = $null
+    # Asking for the names is a reason to go and get them now, rather than at
+    # whatever point the backoff had reached while the setting was off. Clear
+    # the attempt counts too: a session given up on earlier deserves another
+    # look now that the answer is wanted.
+    if ($on) {
+        $script:ChatScanUtc   = [datetime]::MinValue
+        $script:ChatScanEvery = [double]$Config.chatTitleScanMs
+        $script:ChatScanTries = @{}
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -3341,7 +3400,7 @@ function Apply-AutoStartFromUI {
     <DockPanel LastChildFill="False" Margin="0,10,0,0">
       <CheckBox x:Name="ChatTitleCheck" Content="Show the chat-list name" DockPanel.Dock="Left" VerticalAlignment="Center"/>
       <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
-        <Border.ToolTip><ToolTip>Off shows what you asked; on shows the name defined in Scout's chat list. Either way, clicking a session still switches to the right conversation.</ToolTip></Border.ToolTip>
+        <Border.ToolTip><ToolTip>Off shows what you asked; on shows the name defined in Scout's chat list. Turning this on lets the companion type into Scout's chat search now and then - that is the only way the sidebar reveals the timestamps needed to tell which chat is which, and it only does it while no Scout window is in front. Either way, clicking a session still switches to the right conversation.</ToolTip></Border.ToolTip>
         <TextBlock Style="{StaticResource InfoGlyph}"/>
       </Border>
     </DockPanel>

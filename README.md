@@ -245,11 +245,22 @@ prefer Scout's own sidebar title once learned; otherwise the prompt text is kept
 something you just sent isn't replaced by a summarised title the moment it's worked out.
 
 **Where the real title comes from:** Scout's sidebar, via the timestamp match above.
-Clicking a row learns it as a side effect; otherwise the companion types each unnamed
-session's topic into the chat search, matches the row, and clears the box — no chat is
-clicked, so nothing navigates. **It only ever looks while no Scout window is in front**, so
-it never types into a search box you're watching. Learned titles are written to
-`titles.json` and survive a restart.
+Clicking a row learns it as a side effect, and that costs nothing extra — the search was
+already open to find the chat.
+
+**Everything else is off unless you ask for it.** With **Show the chat-list name** turned
+on, the companion also goes looking on its own: it types each unnamed session's topic into
+the chat search, matches the row, and clears the box. No chat is clicked, so nothing
+navigates, and **it only ever looks while no Scout window is in front** — it will not type
+into a search box you are watching. With the setting off, which is the default, it never
+touches the search box at all. Until 0.8.2 it did this regardless, so it was typing to
+learn a name it then did not display.
+
+A conversation gets three fruitless looks before it is left alone, and a new message to it
+buys one more. Some genuinely cannot be named — see below — and without that limit they
+were retried for as long as the companion ran.
+
+Learned titles are written to `titles.json` and survive a restart.
 
 A title belongs to exactly one session: where two sessions could equally be the same row
 (their timestamps within a minute), neither is named, because a wrong name is worse than
@@ -360,9 +371,10 @@ Everything works out of the box; Settings covers the day-to-day knobs. To go fur
 | `pollIntervalMs` | `700` | Event/focus polling interval |
 | `maxSessions` | `6` | How many concurrent sessions to follow |
 | `sessionRescanMs` | `5000` | How often to re-resolve which session is active |
-| `chatTitleScanMs` | `15000` | How often to look up chat titles. Only while no Scout window is in front. `0` never looks |
+| `chatTitleScanMs` | `15000` | How often to look up chat titles, **and only when `showChatTitle` is on**. Only while no Scout window is in front. `0` never looks |
 | `chatTitleScanMaxMs` | `300000` | Ceiling the above backs off to after a fruitless look |
-| `showChatTitle` | `false` | Row name: `false` what you asked, `true` Scout's sidebar title. Also in Settings |
+| `chatTitleScanTries` | `3` | Fruitless looks a conversation gets before being left alone. Some cannot be named at all; a new message to one buys it another look |
+| `showChatTitle` | `false` | Row name: `false` what you asked, `true` Scout's sidebar title. **`true` is also what permits the companion to type into Scout's chat search.** Also in Settings |
 | `openMatchingSession` | `true` | Make clicking a row land Scout on that chat. `false` only focuses the window |
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps) |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in Settings |
