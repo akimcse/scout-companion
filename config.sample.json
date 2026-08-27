@@ -35,6 +35,9 @@
   "animationEnabled": true,
   "_animationEnabled": "Whether the mascot animates at all. Also toggleable at runtime from the tray menu or the settings window, which write the change back to this file.",
 
+  "showChatTitle": false,
+  "_showChatTitle": "Which name the toast shows for a conversation. false (default) shows what you asked - the session's own first message or latest request. true shows Scout's own sidebar title for the chat. The chat title is learned and used to switch to the right conversation either way; this only controls the label you read. Also toggleable from the settings window.",
+
   "mascot": "quokka",
   "_mascot": "Which mascot the toast shows. One of: quokka, cat-white, cat-siamese, cat-calico, cat-black, cat-russian, tuna, shiba, fox, bunny, penguin, ribbon. Also selectable from the settings window, which writes the change back to this file. 'ribbon' is the odd one out: a turning band of light with no face and no laptop.",
 

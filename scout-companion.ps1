@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.7.0'
+$CompanionVersion = '0.8.0'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -158,6 +158,12 @@ $Config = [ordered]@{
     animIntervalMs      = 80
     # Mascot animation can be switched off entirely from the tray or settings.
     animationEnabled    = $true
+    # Which name to show for a conversation on the toast: $false shows what you
+    # actually asked (the session's own first message / latest request), $true
+    # shows Scout's own sidebar title for the chat. The chat title is still
+    # learned either way and always used to switch to the right conversation -
+    # this only controls the label you read.
+    showChatTitle       = $false
     # Toast opacity, 0.35 to 1.0. Floored deliberately: a toast faded to nothing
     # is one you cannot find again to turn back up.
     opacity             = 1.0
@@ -293,6 +299,17 @@ function Convert-XamlText([xml]$doc) {
             if ($t) { $node.SetAttribute($a, $t) }
         }
     }
+    # Explicit <ToolTip> elements carry their text as inner content rather than a
+    # ToolTip="..." attribute, so translate that too. They exist because a tooltip
+    # placed reliably (Placement set on the ToolTip itself) needs to be a real
+    # element, not the string form WPF turns into one with its own defaults.
+    foreach ($tt in $doc.SelectNodes('//*[local-name()="ToolTip"]')) {
+        $v = $tt.InnerText
+        if (-not $v) { continue }
+        if ($v -match '^\s*$') { continue }
+        $t = $script:Strings[$v.Trim()]
+        if ($t) { $tt.InnerText = $t }
+    }
     return $doc
 }
 
@@ -426,6 +443,7 @@ $script:ChatScanUtc       = [datetime]::MinValue   # throttle for the sidebar re
 $script:ChatScanEvery     = 0                      # current backoff interval, ms
 $script:ChatScanSig       = $null                  # which sessions were still unnamed
 $script:ChatScanLooked    = $false                 # did the last scan get as far as searching
+$script:AutomationCache   = @{}                    # dir -> is this a scheduled-automation run (never changes)
 
 # ---------------------------------------------------------------------------
 # Learned chat titles.
@@ -666,6 +684,42 @@ function Test-AgentProcess {
     return $false
 }
 
+function Test-AutomationSession([string]$dir, [string]$events) {
+    # A scheduled automation run, not a conversation you can open. Scout injects
+    # a fixed runner reminder into the first user turn of an automation - "in a
+    # scheduled automation. The step instruction is provided as the user
+    # message" - and nothing like it appears in a chat you typed yourself. So the
+    # test reads only as far as the first user.message and looks for that phrase.
+    #
+    # Deliberately not a bare substring over the whole file: a chat that merely
+    # talks about automations (this project's own does) carries the phrase deep
+    # in its history, so matching anywhere would wrongly hide it. The first user
+    # turn is where a real automation run - and only a real one - has it.
+    #
+    # Cached because a session's nature never changes, and the scan runs on every
+    # candidate every rescan otherwise.
+    if ($script:AutomationCache.ContainsKey($dir)) { return $script:AutomationCache[$dir] }
+    $marker = 'in a scheduled automation. The step instruction is provided as the user message'
+    $isAuto = $false
+    try {
+        $fs = [System.IO.File]::Open($events, 'Open', 'Read', 'ReadWrite')
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            for ($i = 0; $i -lt 400; $i++) {
+                $line = $sr.ReadLine()
+                if ($null -eq $line) { break }
+                if ($line -notmatch '"type":"user\.message"') { continue }
+                # The first user turn: an automation declares itself here, an
+                # interactive chat does not. Either way the search is over.
+                $isAuto = $line.Contains($marker)
+                break
+            }
+        } finally { $fs.Dispose() }
+    } catch { }
+    $script:AutomationCache[$dir] = $isAuto
+    return $isAuto
+}
+
 function Find-ActiveSessions {
     # Sessions that have actually been written to recently, newest first.
     #
@@ -686,6 +740,11 @@ function Find-ActiveSessions {
         $ev = [System.IO.Path]::Combine($dir, 'events.jsonl')
         $fi = New-Object System.IO.FileInfo $ev
         if (-not $fi.Exists) { continue }
+        # Scheduled automations run headless and cannot be opened - clicking a row
+        # for one would search the sidebar with its giant injected instruction and
+        # land nowhere. They are not conversations you are having, so they are left
+        # off the toast entirely.
+        if (Test-AutomationSession $dir $ev) { continue }
         [void]$candidates.Add([pscustomobject]@{ Dir = $dir; Events = $ev; Mtime = $fi.LastWriteTimeUtc })
     }
     if ($candidates.Count -eq 0) { return @() }
@@ -794,8 +853,17 @@ function Get-LastUserMessage([string]$events) {
 # request. Returns nothing when neither exists, so the caller falls back to the
 # older folder-name rule rather than presenting a folder as a title.
 function Get-SessionSubject($rec) {
-    if ($rec.ChatTitle) { return $rec.ChatTitle }
-    if ($rec.Subject)   { return $rec.Subject }
+    # The chat title is learned for matching regardless, but which name is shown
+    # is the user's choice: by default the toast shows what you actually asked,
+    # not Scout's summarised sidebar title, so a prompt you just sent is not
+    # replaced by a title the moment it is learned.
+    if ($Config.showChatTitle) {
+        if ($rec.ChatTitle) { return $rec.ChatTitle }
+        if ($rec.Subject)   { return $rec.Subject }
+    } else {
+        if ($rec.Subject)   { return $rec.Subject }
+        if ($rec.ChatTitle) { return $rec.ChatTitle }
+    }
     return $null
 }
 
@@ -1305,6 +1373,60 @@ function Invoke-UiaElement($el) {
     catch { return $false }
 }
 
+# Expand or collapse an element that carries the ExpandCollapse pattern, e.g. the
+# chat-search toggle in newer Scout builds where "Search chats" is a button that
+# reveals the field rather than the field itself.
+function Set-UiaExpand($el, [bool]$expand) {
+    if (-not $el) { return $false }
+    try {
+        $p = $el.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+        if ($expand) { $p.Expand() } else { $p.Collapse() }
+        return $true
+    } catch { return $false }
+}
+
+# Bring up the chat-search field and return it, coping with both shapes Scout has
+# shipped: an older one where "Search chats" is the Edit directly (optionally
+# behind a "Show chat search" button), and a newer one where "Search chats" is a
+# button carrying ExpandCollapse that reveals the Edit. Returns the Edit element
+# and whether this call was the one that opened it, so the caller can put it back.
+function Show-ChatSearchBox($root, [IntPtr]$hwnd) {
+    # Already open?
+    $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+    if ($box) { return [pscustomobject]@{ Box = $box; Opened = $false; Root = $root } }
+
+    $opened = $false
+    # Newer UI: a "Search chats" *button* that expands to reveal the field.
+    $btn = Find-UiaByName $root 'Search chats' $UiaType::Button
+    if ($btn) {
+        if (Set-UiaExpand $btn $true) { $opened = $true }
+        else { [void](Invoke-UiaElement $btn); $opened = $true }
+    } else {
+        # Older UI: a "Show chat search" button next to the field.
+        if (Invoke-UiaElement (Find-UiaByName $root 'Show chat search' $UiaType::Button)) { $opened = $true }
+    }
+    if (-not $opened) { return $null }
+
+    # The field is created asynchronously; poll briefly for it.
+    for ($i = 0; $i -lt 8; $i++) {
+        Start-Sleep -Milliseconds 120
+        $root = $UiaEl::FromHandle($hwnd)
+        $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
+        if ($box) { return [pscustomobject]@{ Box = $box; Opened = $true; Root = $root } }
+    }
+    return $null
+}
+
+# Put the chat search away again, whichever shape opened it.
+function Hide-ChatSearchBox([IntPtr]$hwnd) {
+    $root = $UiaEl::FromHandle($hwnd)
+    # Newer UI: collapse the toggle button.
+    $btn = Find-UiaByName $root 'Search chats' $UiaType::Button
+    if ($btn) { if (Set-UiaExpand $btn $false) { return } }
+    # Older UI: a dedicated hide button.
+    [void](Invoke-UiaElement (Find-UiaByName $root 'Hide chat search' $UiaType::Button))
+}
+
 # A row reads "Pinned: <title> <when> More actions", with an optional
 # " Automation run" badge in between. Only <when> is load-bearing.
 function Split-ChatRow([string]$raw) {
@@ -1347,10 +1469,17 @@ function Get-ChatRows($root) {
         # An element that was never laid out reports an infinite rect, which
         # would blow up the cast to int further down.
         if ([double]::IsInfinity($r.X) -or [double]::IsInfinity($r.Y)) { continue }
-        if ($r.X -gt ($win.X + 340)) { continue }
-        if ($r.Width -lt 260 -or $r.Width -gt 330) { continue }
-        if ($r.Height -lt 40 -or $r.Height -gt 96) { continue }
+        # A chat row is a wide button near the left edge. Newer Scout builds
+        # widened the sidebar (rows measured at 403px where they were ~300), so
+        # the width band is generous - the real discriminator is that it is much
+        # wider than the little 43px "More actions" overflow button that shares
+        # the same name suffix, and that it carries a title, not just the suffix.
+        if ($r.X -gt ($win.X + 520)) { continue }
+        if ($r.Width -lt 200 -or $r.Width -gt 900) { continue }
+        if ($r.Height -lt 36 -or $r.Height -gt 140) { continue }
         if (-not $c.Name -or $c.Name -notmatch 'More actions$') { continue }
+        # The bare overflow button is named exactly "More actions" with no title.
+        if ($c.Name -eq 'More actions') { continue }
         $p = Split-ChatRow $c.Name
         [void]$out.Add([pscustomobject]@{ Y = [int]$r.Y; Title = $p.Title; When = $p.When; El = $b })
     }
@@ -1409,6 +1538,52 @@ function Get-LastMessageUtc([string]$events) {
     } catch { return $null }
 }
 
+# How much of a chat title is accounted for by words the session has used. Word
+# overlap, not similarity of meaning: the sidebar title is Scout's own summary of
+# the conversation, so it usually shares concrete words with what was asked -
+# "KT Summit deck" against a session about "KT-MS Tech Summit". Scored as the
+# fraction of the title's words that appear in the topic, so a short exact-ish
+# title scores high and a long unrelated one scores zero.
+function Get-TitleTopicOverlap([string]$topic, [string]$title) {
+    if (-not $topic -or -not $title) { return 0.0 }
+    $split = { param($s) ($s.ToLower() -replace '[^\p{L}\p{Nd}]', ' ') -split '\s+' | Where-Object { $_.Length -ge 2 } }
+    $tt = @(& $split $topic)
+    $ct = @(& $split $title)
+    if ($ct.Count -eq 0) { return 0.0 }
+    $common = @($ct | Where-Object { $tt -contains $_ }).Count
+    return [double]$common / $ct.Count
+}
+
+# Picks the chat row for a specific session, using two signals in order:
+# word overlap between the session's topic and each title first, and how recently
+# each row moved as the tiebreak. Overlap is what lets two equally-fresh sessions
+# be told apart - the reason timestamp alone opened whichever was freshest - while
+# the timestamp still decides when no title shares words with the topic (a title
+# summarised into something the topic never literally said). Returns nothing when
+# no row is even plausibly this session, so the caller can leave the sidebar be.
+function Select-ChatRowForSession($rows, [string]$topic, [double]$age) {
+    $rows = @($rows)
+    if ($rows.Count -eq 0) { return $null }
+    if ($age -lt 0) { $age = 0 }
+    # A generous window: timestamps only ever lag, so allow a lot above and a
+    # little below. Its job is to rule out the clearly-unrelated, not to choose.
+    $lo = [Math]::Max(0.0, $age * 0.5 - 2.0)
+    $hi = $age + [Math]::Max(30.0, $age)
+
+    $cands = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $m = ConvertTo-AgeMinutes $rows[$i].When
+        if ($null -eq $m) { continue }
+        if ($m -lt $lo -or $m -gt $hi) { continue }
+        $ov = Get-TitleTopicOverlap $topic $rows[$i].Title
+        [void]$cands.Add([pscustomobject]@{ Row = $rows[$i]; Age = $m; Overlap = [Math]::Round($ov, 3); Rank = $i })
+    }
+    if ($cands.Count -eq 0) { return $null }
+    # Best overlap first; among equal overlap the freshest, and the search's own
+    # order breaks any remaining tie.
+    return (@($cands | Sort-Object @{ E = 'Overlap'; D = $true }, @{ E = 'Age'; D = $false }, @{ E = 'Rank'; D = $false }))[0].Row
+}
+
 # Picks the chat that belongs to a session last heard from $age minutes ago,
 # or nothing at all when the list holds no plausible candidate.
 #
@@ -1419,6 +1594,8 @@ function Get-LastMessageUtc([string]$events) {
 # and within it the freshest row wins, since the chat that raised the prompt is
 # the one that moved most recently.
 function Select-ChatRow($rows, [double]$age) {
+    $rows = @($rows)
+    if ($rows.Count -eq 0) { return $null }
     if ($age -lt 0) { $age = 0 }
     $lo = [Math]::Max(0.0, $age * 0.5 - 2.0)
     $hi = $age + [Math]::Max(20.0, $age * 0.5)
@@ -1488,16 +1665,11 @@ function Invoke-ChatSearch([IntPtr]$hwnd, [string[]]$queries) {
             $root = $UiaEl::FromHandle($hwnd)
         }
 
-        $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
-        if (-not $box) {
-            if (Invoke-UiaElement (Find-UiaByName $root 'Show chat search' $UiaType::Button)) {
-                $openedSearch = $true
-                Start-Sleep -Milliseconds 400
-                $root = $UiaEl::FromHandle($hwnd)
-                $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
-            }
-        }
-        if (-not $box) { return @() }
+        $opened = Show-ChatSearchBox $root $hwnd
+        if (-not $opened) { return @() }
+        $box = $opened.Box
+        $root = $opened.Root
+        if ($opened.Opened) { $openedSearch = $true }
 
         # A query the user typed themselves is theirs; note it so it can go back.
         try { $original = $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value } catch { }
@@ -1542,9 +1714,7 @@ function Invoke-ChatSearch([IntPtr]$hwnd, [string[]]$queries) {
                 try { $b2.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($back) } catch { }
             }
             Start-Sleep -Milliseconds 250
-            if ($openedSearch) {
-                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($hwnd)) 'Hide chat search' $UiaType::Button))
-            }
+            if ($openedSearch) { Hide-ChatSearchBox $hwnd }
             if ($openedSidebar) {
                 [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($hwnd)) 'Hide sidebar' $UiaType::Button))
             }
@@ -1806,11 +1976,15 @@ function Get-RaisingSession {
     return $best
 }
 
-function Open-AgentSession($rec) {
+function Open-AgentSession($rec, [switch]$Exact) {
     # Returns $true only when the sidebar was actually driven to this session.
     if (-not $rec) { return $false }
     if (-not $Config.openMatchingSession) { return $false }
-    $query = Get-SessionQuery $rec
+    # Search Scout's own name for the chat when it is already known - the one
+    # signal that tells two equally-fresh sessions apart. Otherwise search the
+    # session's topic, which both finds the chat and teaches us its name for
+    # next time (the same learn-on-open the Open button has always done).
+    $query = if ($rec.ChatTitle) { Truncate $rec.ChatTitle 40 } else { Get-SessionQuery $rec }
     if (-not $query) { return $false }
 
     $win = Get-AgentWindow
@@ -1837,16 +2011,11 @@ function Open-AgentSession($rec) {
             }
         }
 
-        $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
-        if (-not $box) {
-            if (Invoke-UiaElement (Find-UiaByName $root 'Show chat search' $UiaType::Button)) {
-                $openedSearch = $true
-                Start-Sleep -Milliseconds 400
-                $root = $UiaEl::FromHandle($win.Hwnd)
-                $box = Find-UiaByName $root 'Search chats' $UiaType::Edit
-            }
-        }
-        if (-not $box) { return $false }
+        $opened = Show-ChatSearchBox $root $win.Hwnd
+        if (-not $opened) { return $false }
+        $box = $opened.Box
+        $root = $opened.Root
+        if ($opened.Opened) { $openedSearch = $true }
 
         # No SetFocus. The field takes a value without the caret, and taking the
         # caret would pull it out of whatever the user was typing in.
@@ -1862,14 +2031,26 @@ function Open-AgentSession($rec) {
             $rows = Get-ChatRows ($UiaEl::FromHandle($win.Hwnd))
             if (@($rows | Where-Object { $_.When }).Count -gt 0) { break }
         }
+        $rows = @($rows)
 
-        # Measured from the last message, because that is the kind of thing the
-        # sidebar's own "when" is measuring - a session grinding through tools
-        # for ten minutes has not "just" done anything as far as Scout's chat
-        # list is concerned.
-        $stamp = Get-LastMessageUtc $rec.Events
-        if (-not $stamp) { $stamp = $rec.LastEventUtc }
-        $pick = Select-ChatRow $rows ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+        # Two ways to choose the row. When the chat's name is known the query was
+        # that exact name, so the row carrying it is this session and no other -
+        # which is what tells two equally-fresh sessions apart, and stops a
+        # hand-picked row opening whichever chat happened to be freshest. When the
+        # name is not known yet the query was the topic, so choose by how much each
+        # title's words overlap that topic, with recency only as a tiebreak, and
+        # learn the name below.
+        $pick = $null
+        if ($rec.ChatTitle) {
+            $pick = @($rows | Where-Object { $_.Title -eq $rec.ChatTitle })[0]
+        }
+        if (-not $pick -and -not $Exact) {
+            $stamp = Get-LastMessageUtc $rec.Events
+            if (-not $stamp) { $stamp = $rec.LastEventUtc }
+            $topicText = $rec.Topic
+            if (-not $topicText) { $topicText = $query }
+            $pick = Select-ChatRowForSession $rows $topicText ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+        }
         if (-not $pick) { return $false }
 
         # Now that the chat has been identified, remember what Scout calls it so
@@ -1897,9 +2078,7 @@ function Open-AgentSession($rec) {
                 }
                 Start-Sleep -Milliseconds 250
             }
-            if ($openedSearch) {
-                [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Hide chat search' $UiaType::Button))
-            }
+            if ($openedSearch) { Hide-ChatSearchBox $win.Hwnd }
             if ($openedSidebar) {
                 [void](Invoke-UiaElement (Find-UiaByName ($UiaEl::FromHandle($win.Hwnd)) 'Hide sidebar' $UiaType::Button))
             }
@@ -1916,6 +2095,17 @@ function Focus-AgentSession {
     try { $rec = Get-RaisingSession } catch { }
     if (-not $rec) { return }
     try { [void](Open-AgentSession $rec) } catch { }
+}
+
+# A conversation picked by hand from the multi-session list. The window comes
+# forward first and never fails. The chat switch prefers the chat's known name
+# and matches it exactly; the first time a session is opened its name is not
+# known yet, so it is found by the session's own topic and its name learned from
+# the row - so every click after the first is an exact, unambiguous match.
+function Focus-AgentSessionByDir([string]$dir) {
+    Focus-Agent
+    if (-not $dir -or -not $Sessions.Contains($dir)) { return }
+    try { [void](Open-AgentSession $Sessions[$dir]) } catch { }
 }
 # ---------------------------------------------------------------------------
 # WPF overlay UI (with animated quokka mascot).
@@ -1942,8 +2132,13 @@ function Focus-AgentSession {
         <!-- Mascot. The head is swapped in at runtime (see Set-Mascot); the
              laptop and paws are shared by every mascot and carry the animated
              transforms, so switching mascot never has to rebind them. -->
-        <Canvas x:Name="MascotHost" Width="58" Height="60" DockPanel.Dock="Left" Margin="0,0,12,0"
+        <Canvas x:Name="MascotHost" Width="58" Height="60" DockPanel.Dock="Left" Margin="8,0,14,0"
                 RenderTransformOrigin="0.5,0.6" VerticalAlignment="Center">
+          <!-- Shrinks the mascot's reserved layout box (LayoutTransform, unlike the
+               RenderTransform below, actually shortens the space it takes) so the
+               header row is no taller than its text needs, killing the empty band
+               above and below the title. -->
+          <Canvas.LayoutTransform><ScaleTransform ScaleX="0.85" ScaleY="0.85"/></Canvas.LayoutTransform>
           <Canvas.RenderTransform>
             <TransformGroup>
               <ScaleTransform x:Name="BodyS" ScaleX="1" ScaleY="1"/>
@@ -1973,17 +2168,31 @@ function Focus-AgentSession {
           </Canvas>
         </Canvas>
 
-        <Button x:Name="CloseBtn" Content="&#x2715;" DockPanel.Dock="Right" Width="22" Height="22"
+        <Button x:Name="CloseBtn" Content="&#x2715;" DockPanel.Dock="Right" Width="24" Height="24"
                 Background="Transparent" Foreground="#FF8A93A6" BorderThickness="0" FontSize="12"
-                VerticalAlignment="Top" Cursor="Hand"/>
-        <Button x:Name="SettingsBtn" Content="&#x2699;" DockPanel.Dock="Right" Width="22" Height="22"
-                Background="Transparent" Foreground="#FF8A93A6" BorderThickness="0" FontSize="13"
-                VerticalAlignment="Top" Cursor="Hand" ToolTip="Settings"/>
-        <Button x:Name="OpenBtn" Content="Open" DockPanel.Dock="Right" Height="22" Margin="0,0,6,0"
-                Background="#FF2A3142" Foreground="#FFB9C2D6" BorderThickness="0" Padding="8,0" FontSize="11"
-                VerticalAlignment="Top" Cursor="Hand"/>
+                VerticalAlignment="Top" Cursor="Hand" ToolTip="Close"/>
+        <Button x:Name="SettingsBtn" DockPanel.Dock="Right" Width="28" Height="24"
+                Background="Transparent" BorderThickness="0"
+                VerticalAlignment="Top" Cursor="Hand" ToolTip="Settings">
+          <!-- A drawn gear rather than the U+2699 glyph, which renders as a
+               flower in some font fallbacks. Twelve teeth around a ring with a
+               hollow centre; Fill follows the same grey the other header icons
+               use, brightening on hover. -->
+          <Path Width="15" Height="15" Stretch="Uniform" Fill="#FF9AA6BE"
+                Data="M8,5.2 A2.8,2.8 0 1 0 8,10.8 A2.8,2.8 0 1 0 8,5.2 Z M7,0 L9,0 L9.4,2.1 A6,6 0 0 1 11,2.75 L12.8,1.55 L14.2,2.95 L13,4.75 A6,6 0 0 1 13.65,6.35 L15.75,6.75 L15.75,8.75 L13.65,9.15 A6,6 0 0 1 13,10.75 L14.2,12.55 L12.8,13.95 L11,12.75 A6,6 0 0 1 9.4,13.4 L9,15.5 L7,15.5 L6.6,13.4 A6,6 0 0 1 5,12.75 L3.2,13.95 L1.8,12.55 L3,10.75 A6,6 0 0 1 2.35,9.15 L0.25,8.75 L0.25,6.75 L2.35,6.35 A6,6 0 0 1 3,4.75 L1.8,2.95 L3.2,1.55 L5,2.75 A6,6 0 0 1 6.6,2.1 Z">
+            <Path.Style>
+              <Style TargetType="Path">
+                <Style.Triggers>
+                  <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True">
+                    <Setter Property="Fill" Value="#FFE6EAF2"/>
+                  </DataTrigger>
+                </Style.Triggers>
+              </Style>
+            </Path.Style>
+          </Path>
+        </Button>
 
-        <StackPanel VerticalAlignment="Center">
+        <StackPanel x:Name="HeaderArea" VerticalAlignment="Center" Background="Transparent" Cursor="Hand" ToolTip="Open">
           <DockPanel LastChildFill="True">
             <Ellipse x:Name="Dot" Width="9" Height="9" Fill="#FF4ADE80" VerticalAlignment="Center" Margin="0,0,7,0" DockPanel.Dock="Left"/>
             <!-- How long the current turn has been going. Measured over three
@@ -2009,21 +2218,20 @@ function Focus-AgentSession {
         </StackPanel>
       </DockPanel>
 
-      <!-- live step list -->
-      <Border x:Name="StepsPanel" Margin="0,10,0,0" Padding="10,8" CornerRadius="9" Background="#FF232838" Visibility="Collapsed">
-        <TextBlock x:Name="StepsText" Text="" Foreground="#FFC7D0E2" FontSize="11.5" FontFamily="Consolas, Cascadia Mono, monospace"
-                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
-      </Border>
-
-      <!-- Several sessions at once. Built from real elements rather than the
-           monospace block above, for two reasons. One, a single TextBlock has
-           one colour and one weight, so every session looked equally important
-           and nothing said which was running. Two, character counting is wrong
-           for anything but Latin: Consolas renders Hangul at 1.82x the width of
-           a Latin glyph, so a Korean chat title was cut a third short of the
-           space it had. Letting WPF measure removes that whole class of bug. -->
+      <!-- The session row(s): one per active conversation, or just one when a
+           single session is running. Always on top, so single and multi share the
+           same top-line language - a green accent bar, the conversation's name,
+           and a chevron that opens it. -->
       <Border x:Name="SessionsPanel" Margin="0,10,0,0" Padding="10,8" CornerRadius="9" Background="#FF232838" Visibility="Collapsed">
         <StackPanel x:Name="SessionsList"/>
+      </Border>
+
+      <!-- The detailed step list, shown under the single-session row. It carries
+           the fuller ✓/▸ trace that a one-line row cannot; several sessions show
+           a row each instead of this. -->
+      <Border x:Name="StepsPanel" Margin="0,6,0,0" Padding="10,8" CornerRadius="9" Background="#FF1E2431" Visibility="Collapsed">
+        <TextBlock x:Name="StepsText" Text="" Foreground="#FFC7D0E2" FontSize="11.5" FontFamily="Consolas, Cascadia Mono, monospace"
+                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
       </Border>
 
       <!-- permission prompt -->
@@ -2040,8 +2248,8 @@ function Focus-AgentSession {
           <TextBlock x:Name="PermText" Margin="0,5,0,0" Foreground="#FFD6CFC2" FontSize="11.5"
                      TextWrapping="Wrap" MaxHeight="90" TextTrimming="CharacterEllipsis"/>
           <!-- MinWidth, not Width. Fixed widths were fine in English and clipped
-               the moment the captions were translated: "Отклонить" and
-               "Odmítnout" both overrun a 74 px Deny button. MinWidth keeps the
+               the moment the captions were translated: "??克剋棘戟龜??" and
+               "Odm챠tnout" both overrun a 74 px Deny button. MinWidth keeps the
                English layout identical while letting a longer caption push the
                button out instead of truncating it. -->
           <StackPanel Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
@@ -2079,7 +2287,7 @@ $PermFrom     = $Window.FindName('PermFrom')
 $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
 $AnswerBtn    = $Window.FindName('AnswerBtn')
-$OpenBtn      = $Window.FindName('OpenBtn')
+$HeaderArea   = $Window.FindName('HeaderArea')
 $CloseBtn     = $Window.FindName('CloseBtn')
 $SettingsBtn  = $Window.FindName('SettingsBtn')
 $BodyT        = $Window.FindName('BodyT')
@@ -2245,7 +2453,7 @@ $DenyBtn.Add_Click({
         foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
     } else { Focus-Agent }
 })
-$OpenBtn.Add_Click({ Focus-AgentSession })
+$HeaderArea.Add_MouseLeftButtonDown({ $args[1].Handled = $true; Focus-AgentSession })
 $AnswerBtn.Add_Click({ Focus-AgentSession })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $script:Pinned = $false; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
@@ -2678,6 +2886,16 @@ function Sync-AnimationEnabled([bool]$on, [switch]$Persist) {
     } finally { $script:SyncingAnim = $false }
 }
 
+# Toggle which name the toast shows for a conversation, persist it, and force the
+# session rows to rebuild so the change is visible at once rather than on the next
+# time the list happens to change.
+function Set-ShowChatTitle([bool]$on) {
+    $Config.showChatTitle = $on
+    [void](Save-Setting @{ showChatTitle = $on })
+    $script:SessionSignature = $null
+    $script:StepSignature = $null
+}
+
 # ---------------------------------------------------------------------------
 # Tray icon.
 #
@@ -2930,6 +3148,7 @@ function Set-AutoStart([bool]$on) {
 # ---------------------------------------------------------------------------
 $script:SettingsWindow    = $null
 $script:SettingsAnimCheck = $null
+$script:SettingsChatTitleCheck = $null
 $script:SettingsSuppress  = $false
 $script:OpacitySaveTimer  = $null
 $script:OpacityPendingValue = 1.0
@@ -2946,12 +3165,13 @@ function Apply-AutoStartFromUI {
     try { $script:SettingsAutoCheck.IsChecked = Test-AutoStart }
     finally { $script:SettingsSuppress = $false }
     $script:SettingsAutoHint.Text = T 'Could not update the Startup folder. Check that you can write to it.'
+    $script:SettingsAutoHint.Visibility = 'Visible'
 }
 
 [xml]$settingsXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Scout Companion settings" Width="410" SizeToContent="Height"
+        Title="Scout Companion settings" Width="440" SizeToContent="Height"
         ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
         Background="#FF1B1F2A" Foreground="#FFE6EAF2" ShowInTaskbar="True">
   <Window.Resources>
@@ -3040,35 +3260,103 @@ function Apply-AutoStartFromUI {
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Margin" Value="0,0,0,8"/>
     </Style>
+    <!-- Every tooltip in the window: capped width with wrapping so a sentence
+         becomes a small block instead of a screen-wide strip, themed to match
+         the dark surface. -->
+    <Style TargetType="ToolTip">
+      <Setter Property="Background" Value="#FF232838"/>
+      <Setter Property="Foreground" Value="#FFDDE3EE"/>
+      <Setter Property="BorderBrush" Value="#FF3A4358"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="9,6"/>
+      <Setter Property="HasDropShadow" Value="True"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToolTip">
+            <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6"
+                    Padding="{TemplateBinding Padding}" MaxWidth="260">
+              <TextBlock Text="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}"
+                         FontSize="11.5" TextWrapping="Wrap"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <!-- A small round "i" that shows its explanation on hover. Replaces the grey
+         hint lines under each control, so the same information is one hover away
+         without the height six paragraphs of it cost. ToolTipService opens it on
+         hover with no delay and keeps it up long enough to read. -->
+    <Style x:Key="Info" TargetType="Border">
+      <Setter Property="Width" Value="15"/>
+      <Setter Property="Height" Value="15"/>
+      <Setter Property="CornerRadius" Value="7.5"/>
+      <Setter Property="Background" Value="#FF2E3648"/>
+      <Setter Property="Margin" Value="7,0,0,0"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="ToolTipService.InitialShowDelay" Value="200"/>
+      <Setter Property="ToolTipService.ShowDuration" Value="20000"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#FF3D4964"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="InfoGlyph" TargetType="TextBlock">
+      <Setter Property="Text" Value="i"/>
+      <Setter Property="Foreground" Value="#FFB9C2D6"/>
+      <Setter Property="FontSize" Value="10"/>
+      <Setter Property="FontWeight" Value="Bold"/>
+      <Setter Property="FontStyle" Value="Italic"/>
+      <Setter Property="HorizontalAlignment" Value="Center"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
   </Window.Resources>
 
   <StackPanel Margin="18,16,18,14">
 
     <TextBlock Style="{StaticResource Section}" Text="STARTUP"/>
-    <CheckBox x:Name="AutoStartCheck" Content="Start automatically with Scout"/>
-    <TextBlock x:Name="AutoStartHint" Style="{StaticResource Hint}"
-               Text="Adds a shortcut to your Startup folder. The watcher launches the companion when Scout starts, and the companion closes itself shortly after Scout quits."/>
+    <DockPanel LastChildFill="False">
+      <CheckBox x:Name="AutoStartCheck" Content="Start automatically with Scout" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Adds a shortcut to your Startup folder. The watcher launches the companion when Scout starts, and the companion closes itself shortly after Scout quits.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
+    <!-- Kept as a named element because the code swaps its text to explain when
+         the watcher is missing; it just carries no standing hint line now. -->
+    <TextBlock x:Name="AutoStartHint" Style="{StaticResource Hint}" Visibility="Collapsed"/>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
     <TextBlock Style="{StaticResource Section}" Text="APPEARANCE"/>
-    <CheckBox x:Name="AnimCheck" Content="Animate the mascot"/>
-    <TextBlock Style="{StaticResource Hint}"
-               Text="Turning this off leaves the mascot in a resting pose and stops its timer entirely."/>
+    <DockPanel LastChildFill="False">
+      <CheckBox x:Name="AnimCheck" Content="Animate the mascot" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Turning this off leaves the mascot in a resting pose and stops its timer entirely.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
+    <DockPanel LastChildFill="False" Margin="0,10,0,0">
+      <CheckBox x:Name="ChatTitleCheck" Content="Show the chat-list name" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Off shows what you asked; on shows the name defined in Scout's chat list. Either way, clicking a session still switches to the right conversation.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
     <DockPanel Margin="0,12,0,0" LastChildFill="True">
       <TextBlock Text="Mascot" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
       <ComboBox x:Name="MascotPicker" Height="26" Cursor="Hand"/>
     </DockPanel>
-    <DockPanel Margin="0,12,0,0" LastChildFill="True">
+    <DockPanel Margin="0,10,0,0" LastChildFill="True">
       <TextBlock Text="Opacity" Width="120" Foreground="#FF9AA6BE" VerticalAlignment="Center" DockPanel.Dock="Left"/>
       <TextBlock x:Name="OpacityValue" Text="100%" Width="46" Foreground="#FFE6EAF2" VerticalAlignment="Center"
                  TextAlignment="Right" DockPanel.Dock="Right"/>
       <!-- SmallChange and LargeChange are set explicitly because the defaults
            are wrong for a range this narrow: LargeChange defaults to 1.0, which
            is larger than the whole 0.35-1.0 range, so a click on the track
-           slammed the value to whichever end was clicked instead of stepping.
-           Both are one tick now, so a click and an arrow key each move by the
-           interval the ticks are drawn at. -->
+           slammed the value to whichever end was clicked instead of stepping. -->
       <Slider x:Name="OpacitySlider" Minimum="0.35" Maximum="1.0" Value="1.0"
               TickFrequency="0.05" IsSnapToTickEnabled="True"
               SmallChange="0.05" LargeChange="0.05"
@@ -3077,69 +3365,91 @@ function Apply-AutoStartFromUI {
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
-    <!-- What the agent did, which is the thing worth knowing. THIS PROCESS
-         below is the companion's own overhead, and putting that first said the
-         wrong thing about which of the two matters.
-         Measured over three days of real use before building this: 1,060
-         minutes of agent time across 2,759 turns. Anyone wanting that number
-         had to parse the event log by hand. -->
-    <TextBlock Style="{StaticResource Section}" Text="THE AGENT TODAY"/>
-    <CheckBox x:Name="NotifyFinishChk" Content="Tell me when a long turn finishes" Margin="0,0,0,10"/>
+    <!-- The agent's activity and the companion's own overhead sit side by side:
+         two labelled columns, each keeping its own heading, so the section is
+         short without either losing what it is. -->
     <Grid>
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="20"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
-      <Grid.RowDefinitions>
-        <RowDefinition Height="Auto"/>
-        <RowDefinition Height="Auto"/>
-        <RowDefinition Height="Auto"/>
-      </Grid.RowDefinitions>
-      <TextBlock Grid.Row="0" Grid.Column="0" Text="Working time" Width="120" Foreground="#FF9AA6BE"/>
-      <TextBlock Grid.Row="0" Grid.Column="1" x:Name="AgentTimeText" Text="-"/>
-      <TextBlock Grid.Row="1" Grid.Column="0" Text="Turns" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
-      <TextBlock Grid.Row="1" Grid.Column="1" x:Name="AgentTurnsText" Text="-" Margin="0,5,0,0"/>
-      <TextBlock Grid.Row="2" Grid.Column="0" Text="Conversations" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
-      <TextBlock Grid.Row="2" Grid.Column="1" x:Name="AgentSessText" Text="-" Margin="0,5,0,0"/>
+
+      <!-- Left: the agent today -->
+      <StackPanel Grid.Column="0">
+        <DockPanel LastChildFill="False" Margin="0,0,0,8">
+          <TextBlock Style="{StaticResource Section}" Text="THE AGENT TODAY" Margin="0" DockPanel.Dock="Left"/>
+          <Border Style="{StaticResource Info}" DockPanel.Dock="Left" Margin="6,0,0,8">
+            <Border.ToolTip><ToolTip>Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.</ToolTip></Border.ToolTip>
+            <TextBlock Style="{StaticResource InfoGlyph}"/>
+          </Border>
+        </DockPanel>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" Grid.Column="0" Text="Working time" Foreground="#FF9AA6BE" Margin="0,0,10,0"/>
+          <TextBlock Grid.Row="0" Grid.Column="1" x:Name="AgentTimeText" Text="-" TextAlignment="Right"/>
+          <TextBlock Grid.Row="1" Grid.Column="0" Text="Turns" Foreground="#FF9AA6BE" Margin="0,5,10,0"/>
+          <TextBlock Grid.Row="1" Grid.Column="1" x:Name="AgentTurnsText" Text="-" TextAlignment="Right" Margin="0,5,0,0"/>
+          <TextBlock Grid.Row="2" Grid.Column="0" Text="Conversations" Foreground="#FF9AA6BE" Margin="0,5,10,0"/>
+          <TextBlock Grid.Row="2" Grid.Column="1" x:Name="AgentSessText" Text="-" TextAlignment="Right" Margin="0,5,0,0"/>
+        </Grid>
+      </StackPanel>
+
+      <!-- Right: this process -->
+      <StackPanel Grid.Column="2">
+        <TextBlock Style="{StaticResource Section}" Text="THIS PROCESS"/>
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <TextBlock Grid.Row="0" Grid.Column="0" Text="Memory" Foreground="#FF9AA6BE" Margin="0,0,10,0"/>
+          <TextBlock Grid.Row="0" Grid.Column="1" x:Name="MemText" Text="-" TextAlignment="Right"/>
+          <TextBlock Grid.Row="1" Grid.Column="0" Text="CPU (of one core)" Foreground="#FF9AA6BE" Margin="0,5,10,0"/>
+          <TextBlock Grid.Row="1" Grid.Column="1" x:Name="CpuText" Text="-" TextAlignment="Right" Margin="0,5,0,0"/>
+          <TextBlock Grid.Row="2" Grid.Column="0" Text="Uptime" Foreground="#FF9AA6BE" Margin="0,5,10,0"/>
+          <TextBlock Grid.Row="2" Grid.Column="1" x:Name="UpText" Text="-" TextAlignment="Right" Margin="0,5,0,0"/>
+        </Grid>
+      </StackPanel>
     </Grid>
-    <TextBlock x:Name="AgentStatsHint" Style="{StaticResource Hint}"
-               Text="Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning."/>
+    <!-- Long-turn notification lives with the agent stats it belongs to, on its
+         own row under the two columns so it can span the full width. -->
+    <DockPanel LastChildFill="False" Margin="0,12,0,0">
+      <CheckBox x:Name="NotifyFinishChk" Content="Tell me when a long turn finishes" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+    </DockPanel>
+    <!-- Kept named for the code path that referenced it; hint is a tooltip now. -->
+    <TextBlock x:Name="AgentStatsHint" Style="{StaticResource Hint}" Visibility="Collapsed"/>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
-    <TextBlock Style="{StaticResource Section}" Text="THIS PROCESS"/>
-    <Grid Margin="0,0,0,0">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="Auto"/>
-        <ColumnDefinition Width="*"/>
-      </Grid.ColumnDefinitions>
-      <Grid.RowDefinitions>
-        <RowDefinition Height="Auto"/>
-        <RowDefinition Height="Auto"/>
-        <RowDefinition Height="Auto"/>
-        <RowDefinition Height="Auto"/>
-      </Grid.RowDefinitions>
-      <TextBlock Grid.Row="0" Grid.Column="0" Text="Memory" Width="120" Foreground="#FF9AA6BE"/>
-      <TextBlock Grid.Row="0" Grid.Column="1" x:Name="MemText" Text="-"/>
-      <TextBlock Grid.Row="1" Grid.Column="0" Text="CPU (of one core)" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
-      <TextBlock Grid.Row="1" Grid.Column="1" x:Name="CpuText" Text="-" Margin="0,5,0,0"/>
-      <TextBlock Grid.Row="2" Grid.Column="0" Text="Uptime" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
-      <TextBlock Grid.Row="2" Grid.Column="1" x:Name="UpText" Text="-" Margin="0,5,0,0"/>
-      <!-- Which build this is. Worth having somewhere reachable: a bug report
-           that cannot say what it was running is most of the way to useless. -->
-      <TextBlock Grid.Row="3" Grid.Column="0" Text="Version" Width="120" Foreground="#FF9AA6BE" Margin="0,5,0,0"/>
-      <TextBlock Grid.Row="3" Grid.Column="1" x:Name="VerText" Text="-" Margin="0,5,0,0"/>
-    </Grid>
-
-    <!-- Updates. These were config-only at first, which meant the feature
-         existed but nobody could see whether it was on, or make it check
-         without waiting six hours. -->
     <TextBlock Style="{StaticResource Section}" Text="UPDATES"/>
-    <CheckBox x:Name="UpdateCheckChk" Content="Check for new versions"/>
-    <CheckBox x:Name="AutoUpdateChk" Content="Install them automatically" Margin="0,6,0,0"/>
-    <TextBlock x:Name="AutoUpdateHint" Style="{StaticResource Hint}"
-               Text="Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout."/>
-    <DockPanel Margin="0,8,0,0">
+    <DockPanel Margin="0,0,0,10">
+      <TextBlock Text="Current version" Width="120" Foreground="#FF9AA6BE" DockPanel.Dock="Left"/>
+      <TextBlock x:Name="VerText" Text="-"/>
+    </DockPanel>
+    <DockPanel LastChildFill="False">
+      <CheckBox x:Name="UpdateCheckChk" Content="Check for new versions automatically" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Whether to check GitHub for a newer release on a timer, a few times a day. Off makes no network calls. The 'Check now' button below always works regardless.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
+    <DockPanel LastChildFill="False" Margin="0,6,0,0">
+      <CheckBox x:Name="AutoUpdateChk" Content="Install them automatically" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Off by default on purpose: this companion clicks Allow on security prompts, and replacing it the moment a release lands would restart it at a moment you did not choose. It never touches a copy running from a source checkout.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
+    <TextBlock x:Name="AutoUpdateHint" Style="{StaticResource Hint}" Visibility="Collapsed"/>
+    <DockPanel Margin="0,10,0,0">
       <Button x:Name="CheckUpdateBtn" Content="Check now" Width="96" Height="26" DockPanel.Dock="Left"
               Background="#FF2A3142" Foreground="#FFE6EAF2" BorderThickness="0" Cursor="Hand"/>
       <TextBlock x:Name="UpdateStatus" Text="" Foreground="#FF9AA6BE" Margin="10,0,0,0"
@@ -3168,6 +3478,7 @@ function Show-SettingsWindow {
     $script:SettingsAutoCheck = $sw.FindName('AutoStartCheck')
     $script:SettingsAutoHint  = $sw.FindName('AutoStartHint')
     $script:SettingsAnimCheck = $sw.FindName('AnimCheck')
+    $script:SettingsChatTitleCheck = $sw.FindName('ChatTitleCheck')
     $script:SettingsMemText   = $sw.FindName('MemText')
     $script:SettingsCpuText   = $sw.FindName('CpuText')
     $script:SettingsUpText    = $sw.FindName('UpText')
@@ -3192,8 +3503,10 @@ function Show-SettingsWindow {
     if (-not (Test-Path $WatcherPath)) {
         $script:SettingsAutoCheck.IsEnabled = $false
         $script:SettingsAutoHint.Text = T 'Watch-Scout.ps1 is missing from {0}, so this cannot be turned on.' $ScriptDir
+        $script:SettingsAutoHint.Visibility = 'Visible'
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
+    $script:SettingsChatTitleCheck.IsChecked = [bool]$Config.showChatTitle
 
     # Updates. Primed under suppression: with Checked/Unchecked handlers, simply
     # setting IsChecked fires them, and opening the window would write config.
@@ -3310,6 +3623,12 @@ function Show-SettingsWindow {
     $script:SettingsAnimCheck.Add_Unchecked({
         if (-not $script:SettingsSuppress) { Sync-AnimationEnabled $false -Persist }
     })
+    $script:SettingsChatTitleCheck.Add_Checked({
+        if (-not $script:SettingsSuppress) { Set-ShowChatTitle $true }
+    })
+    $script:SettingsChatTitleCheck.Add_Unchecked({
+        if (-not $script:SettingsSuppress) { Set-ShowChatTitle $false }
+    })
 
     # Live resource readout, refreshed only while this window is open.
     $script:SettingsLastCpu = $script:SelfProc.TotalProcessorTime
@@ -3356,6 +3675,7 @@ function Show-SettingsWindow {
         try { $script:SettingsResTimer.Stop() } catch { }
         $script:SettingsWindow    = $null
         $script:SettingsAnimCheck = $null
+        $script:SettingsChatTitleCheck = $null
     })
 
     # Match the dark body with a dark title bar instead of leaving a bright
@@ -3953,10 +4273,17 @@ $script:SessionSignature = $null
 function Render-SessionRows($rows) {
     # Rebuilding a StackPanel is far more expensive than setting a string, and
     # this runs every poll, so skip it entirely when nothing has changed.
-    $sig = ($rows | ForEach-Object { "$($_.Busy)|$($_.Name)|$($_.Activity)|$(Format-Idle ([int]$_.IdleSeconds))" }) -join "`n"
+    $sig = ($rows | ForEach-Object { "$($_.Dir)|$($_.Busy)|$($_.Name)|$($_.Activity)|$($_.HideActivity)|$(Format-Idle ([int]$_.IdleSeconds))" }) -join "`n"
     if ($sig -ne $script:SessionSignature) {
         $script:SessionSignature = $sig
         $SessionsList.Children.Clear()
+
+        # A faint wash behind a row the pointer is over, so an openable row reads
+        # as clickable. Built once and kept at script scope so the hover handlers
+        # can see it.
+        if (-not $script:RowHoverBrush) {
+            $script:RowHoverBrush = (New-Object System.Windows.Media.BrushConverter).ConvertFromString('#22FFFFFF')
+        }
 
         $accentOn   = '#FF4ADE80'   # same green the header dot uses while working
         $accentOff  = '#FF39415A'
@@ -3980,7 +4307,7 @@ function Render-SessionRows($rows) {
 
             $nameTb = New-Object System.Windows.Controls.TextBlock
             $nameTb.Text = if ($r.Name) { [string]$r.Name } else { '(unnamed)' }
-            $nameTb.FontSize = 11.5
+            $nameTb.FontSize = 12.5
             $nameTb.FontWeight = if ($busy) { 'SemiBold' } else { 'Normal' }
             $nameTb.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($(if ($busy) { $nameOn } else { $nameOff }))
             # Let WPF measure. Counting characters is wrong for anything but
@@ -3990,26 +4317,33 @@ function Render-SessionRows($rows) {
             $nameTb.TextWrapping = 'NoWrap'
             [void]$texts.Children.Add($nameTb)
 
-            # 'Idle', not 'idle'. ConvertFrom-Json matches keys case-insensitively,
-            # so adding a lowercase variant would collide with the existing one
-            # and silently break every language file - which it did once before.
-            $act = if ($busy) { [string]$r.Activity }
+            # A single session hides its busy one-liner here because the step list
+            # below repeats it; an idle one still shows how long it has been quiet,
+            # which the step list does not say.
+            $act = if ($busy) { if ($r.HideActivity) { '' } else { [string]$r.Activity } }
                    elseif ($null -ne $r.IdleSeconds) { (T 'Idle') + ' ' + (Format-Idle ([int]$r.IdleSeconds)) }
                    else { '' }
             if ($act) {
                 $actTb = New-Object System.Windows.Controls.TextBlock
-                $actTb.Text = $act
                 $actTb.FontSize = 10.5
                 $actTb.FontFamily = New-Object System.Windows.Media.FontFamily 'Consolas, Cascadia Mono, monospace'
-                $actTb.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($(if ($busy) { $actOn } else { $actOff }))
-                $actTb.Margin = New-Object System.Windows.Thickness 0, 1, 0, 0
-                # The running one gets to wrap onto a second line; a finished one
-                # says "idle 3m" and needs none. Height is the cheap dimension -
-                # the toast is fixed at 380px wide but grows to fit its content.
+                $actTb.Margin = New-Object System.Windows.Thickness 0, 5, 0, 0
+                # Same visual language as the step list below: a small ▸ marker
+                # carries the "in progress" sense so the verb label ("Running:")
+                # no longer has to shout it. Running rows get the marker; an idle
+                # "idle 3m" line is a status, not a step, so it stays plain.
                 if ($busy) {
+                    $mk = New-Object System.Windows.Documents.Run ([string][char]0x25B8 + '  ')
+                    $mk.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($accentOn)
+                    [void]$actTb.Inlines.Add($mk)
+                    $tx = New-Object System.Windows.Documents.Run ([string]$act)
+                    $tx.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($actOn)
+                    [void]$actTb.Inlines.Add($tx)
                     $actTb.TextWrapping = 'Wrap'
                     $actTb.MaxHeight = 30
                 } else {
+                    $actTb.Text = $act
+                    $actTb.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($actOff)
                     $actTb.TextWrapping = 'NoWrap'
                 }
                 $actTb.TextTrimming = 'CharacterEllipsis'
@@ -4018,11 +4352,47 @@ function Render-SessionRows($rows) {
 
             $row = New-Object System.Windows.Controls.DockPanel
             $row.LastChildFill = $true
-            if (-not $first) { $row.Margin = New-Object System.Windows.Thickness 0, 7, 0, 0 }
             [System.Windows.Controls.DockPanel]::SetDock($bar, 'Left')
+
+            # Every row is a place you can go: a chevron marks it, and the whole
+            # row - not a small button - is the click target so a glance-and-click
+            # lands. Clicking opens that conversation; the first open of a session
+            # also teaches the companion Scout's name for it, so it is exact from
+            # then on.
+            $chev = New-Object System.Windows.Controls.TextBlock
+            $chev.Text = [string][char]0x203A   # >
+            $chev.FontSize = 13
+            $chev.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($(if ($busy) { $actOn } else { $actOff }))
+            $chev.VerticalAlignment = 'Center'
+            $chev.Margin = New-Object System.Windows.Thickness 6, 0, 2, 0
+            $chev.Opacity = 0.55
+            [System.Windows.Controls.DockPanel]::SetDock($chev, 'Right')
+            [void]$row.Children.Add($chev)
             [void]$row.Children.Add($bar)
             [void]$row.Children.Add($texts)
-            [void]$SessionsList.Children.Add($row)
+
+            $rowHost = New-Object System.Windows.Controls.Border
+            $rowHost.CornerRadius = New-Object System.Windows.CornerRadius 6
+            $rowHost.Padding = New-Object System.Windows.Thickness 4, 3, 4, 3
+            $rowHost.Background = [System.Windows.Media.Brushes]::Transparent
+            $rowHost.Cursor = [System.Windows.Input.Cursors]::Hand
+            $rowHost.ToolTip = (T 'Open')
+            # The session's folder rides on Tag, not a captured loop variable, so
+            # the handler reads it off the row it actually fired on.
+            $rowHost.Tag = [string]$r.Dir
+            $rowHost.Child = $row
+            if (-not $first) { $rowHost.Margin = New-Object System.Windows.Thickness 0, 4, 0, 0 }
+            $rowHost.Add_MouseEnter({ $args[0].Background = $script:RowHoverBrush })
+            $rowHost.Add_MouseLeave({ $args[0].Background = [System.Windows.Media.Brushes]::Transparent })
+            # Handled on the way down so it never reaches the window's DragMove,
+            # which would otherwise swallow the click.
+            $rowHost.Add_MouseLeftButtonDown({
+                $args[1].Handled = $true
+                $d = [string]$args[0].Tag
+                if ($d) { try { Focus-AgentSessionByDir $d } catch { } }
+            })
+
+            [void]$SessionsList.Children.Add($rowHost)
             $first = $false
         }
     }
@@ -4058,54 +4428,61 @@ function Get-ElapsedLabel($startUtc, [datetime]$nowUtc, [int]$afterSeconds = 20)
 }
 
 function Render-Steps {
-    # Several sessions: a row each, rather than a detailed step list belonging to
-    # whichever of them happened to move last.
-    if ($Sessions.Count -gt 1) {
-        $rows = @()
-        # Within a group, by first appearance - a Hashtable's own key order is
-        # not defined and would reshuffle the list on its own.
-        $ordered = @($Sessions.Keys | Sort-Object @{ E = { $Sessions[$_].FirstSeenUtc } }, @{ E = { $_ } })
-        foreach ($dir in $ordered) {
-            $rec = $Sessions[$dir]
-            $idleSec = [int]([datetime]::UtcNow - $rec.LastEventUtc).TotalSeconds
-            # Quiet for long enough is quiet, whatever the step list says. A
-            # session interrupted mid-tool keeps an unfinished step forever, and
-            # taking that at face value left it showing a green "Running:" hours
-            # after it had stopped - the one thing this list must not get wrong.
-            $recent = $idleSec -le [double]$Config.activeWindowSeconds
-            $busy = $recent -and [bool]$rec.TurnActive
-            $act = ''
-            if ($rec.Steps.Count) {
-                $live = @($rec.Steps | Where-Object { -not $_.Done })
-                if ($live.Count -and $recent) { $act = $live[-1].Text; $busy = $true }
-                else { $act = $rec.Steps[$rec.Steps.Count - 1].Text }
-            }
-            # Prefer the chat title, then the last request, and fall back to the
-            # working-directory label. Only a session that has neither shows as
-            # unnamed, which in practice means one that has not been asked
-            # anything yet.
-            $name = Get-SessionSubject $rec
-            if (-not $name) { $name = $rec.Label }
-            $rows += [pscustomobject]@{
-                Name        = $name
-                Busy        = $busy
-                Activity    = $act
-                IdleSeconds = $idleSec
-            }
+    # One visual language for one session or many: always draw the session
+    # row(s) - a green bar, the conversation name, a chevron that opens it - and,
+    # when only one session is running, add its fuller step list underneath. The
+    # header line above carries the state ("Working hard...") and no longer the
+    # conversation name, which now lives on its own row.
+    $single = $Sessions.Count -le 1
+
+    # Build a row per session (usually one). Same shape Render-SessionRows expects.
+    $rows = @()
+    $ordered = @($Sessions.Keys | Sort-Object @{ E = { $Sessions[$_].FirstSeenUtc } }, @{ E = { $_ } })
+    foreach ($dir in $ordered) {
+        $rec = $Sessions[$dir]
+        $idleSec = [int]([datetime]::UtcNow - $rec.LastEventUtc).TotalSeconds
+        # Quiet for long enough is quiet, whatever the step list says. A session
+        # interrupted mid-tool keeps an unfinished step forever, and taking that
+        # at face value left it showing a green "Running:" hours after it stopped.
+        $recent = $idleSec -le [double]$Config.activeWindowSeconds
+        $busy = $recent -and [bool]$rec.TurnActive
+        $act = ''
+        if ($rec.Steps.Count) {
+            $live = @($rec.Steps | Where-Object { -not $_.Done })
+            if ($live.Count -and $recent) { $act = $live[-1].Text; $busy = $true }
+            else { $act = $rec.Steps[$rec.Steps.Count - 1].Text }
         }
+        $name = Get-SessionSubject $rec
+        if (-not $name) { $name = $rec.Label }
+        $rows += [pscustomobject]@{
+            Dir         = $dir
+            Name        = $name
+            Busy        = $busy
+            Activity    = $act
+            IdleSeconds = $idleSec
+            # A single session hides its one-line activity here: the detailed
+            # step list below carries it, so repeating it on the row would say
+            # the same thing twice.
+            HideActivity = $single
+        }
+    }
+
+    if ($rows.Count -gt 0) {
         Render-SessionRows (Group-SessionRows $rows)
-        # Only ever one activity panel on screen. Clear the step signature too,
-        # so returning to a single session rebuilds the list rather than trusting
-        # a signature that was captured before the panel was put away.
+    } else {
+        if ($SessionsPanel.Visibility -ne 'Collapsed') {
+            $SessionsPanel.Visibility = 'Collapsed'
+            $script:SessionSignature = $null
+        }
+    }
+
+    # The detailed step list belongs to the single-session case only.
+    if (-not $single) {
         if ($StepsPanel.Visibility -ne 'Collapsed') {
             $StepsPanel.Visibility = 'Collapsed'
             $script:StepSignature = $null
         }
         return
-    }
-    if ($SessionsPanel.Visibility -ne 'Collapsed') {
-        $SessionsPanel.Visibility = 'Collapsed'
-        $script:SessionSignature = $null
     }
 
     if ($State.Steps.Count -eq 0) {
@@ -4121,8 +4498,6 @@ function Render-Steps {
     }
     $text = $sb.ToString().TrimEnd()
     if ($text -eq $script:StepSignature) {
-        # The panel is force-collapsed while an approval is showing, so make sure
-        # it comes back even when the step text itself has not moved on.
         if ($StepsPanel.Visibility -ne 'Visible') { $StepsPanel.Visibility = 'Visible' }
         return
     }
@@ -4183,7 +4558,7 @@ $timer.Add_Tick({
     $script:Pending = $hasPending
     $script:Asking  = $hasAsk
 
-    # The ✕ button only dismisses the CURRENT burst. Re-show automatically when a
+    # The ??button only dismisses the CURRENT burst. Re-show automatically when a
     # new approval or question arrives, or when a fresh working turn begins
     # (idle -> busy edge), so closing it once doesn't mute the companion forever.
     if ($script:Hidden -and ($hasPending -or $hasAsk)) { $script:Hidden = $false }
@@ -4281,20 +4656,16 @@ $timer.Add_Tick({
             $ElapsedText.Visibility = 'Collapsed'
         }
 
-        # Name the conversation whose steps and narration are on screen. Without
-        # this the toast reports work in progress and never says whose, which is
-        # the ordinary state it spends nearly all of its time in.
-        #
-        # With several sessions the list names every one of them, so naming one
-        # here as well would be both redundant and the very thing that churns -
-        # it is whichever moved last.
-        if ($many) { $HeaderFrom.Visibility = 'Collapsed' }
-        else { Set-FromLine $HeaderFrom $State.Primary }
+        # The conversation's name now lives on its own session row (single and
+        # multi alike), so the header no longer repeats it - the header line is
+        # the state, the row is the name.
+        $HeaderFrom.Visibility = 'Collapsed'
 
-        # Narration belongs to one session, so with several on screen it would
-        # be a sentence with no owner sitting above a list that has owners.
-        if (-not $many -and $State.Saying) { $SayingText.Text = $State.Saying; $SayingText.Visibility = 'Visible' }
-        else { $SayingText.Visibility = 'Collapsed' }
+        # Narration is folded away for both single and multi now: the session row
+        # names the conversation and the step list (single) or activity line
+        # (multi) says what it is doing, so a separate italic sentence above them
+        # was the one thing that made a single session look unlike several.
+        $SayingText.Visibility = 'Collapsed'
 
         Render-Steps
     }
@@ -4393,3 +4764,5 @@ $app = New-Object System.Windows.Application
 # the tray is free to come and go without taking the companion down with it.
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnMainWindowClose
 $app.Run($Window) | Out-Null
+
+
