@@ -160,7 +160,17 @@ Write-Host "`nGet-SessionSubject / Where-From"
 $withTitle   = [pscustomobject]@{ ChatTitle = 'Scout Companion'; Subject = 'fix the retry loop'; BaseLabel = 'payments-api' }
 $withSubject = [pscustomobject]@{ ChatTitle = $null;             Subject = 'fix the retry loop'; BaseLabel = 'payments-api' }
 $bare        = [pscustomobject]@{ ChatTitle = $null;             Subject = $null;                BaseLabel = 'payments-api' }
-Same "Scout's own title wins"      (Get-SessionSubject $withTitle)   'Scout Companion'
+# Which name is shown is a setting, so the test has to say which one it is
+# asking about. Default off: the toast shows what you actually asked, so a
+# prompt you just sent is not replaced by a summarised title the moment it is
+# learned. This assertion still read the other way after that change shipped.
+$Config = @{ showChatTitle = $false }
+Same 'your own words win by default' (Get-SessionSubject $withTitle)   'fix the retry loop'
+Same 'the title fills a gap'         (Get-SessionSubject ([pscustomobject]@{ ChatTitle = 'Scout Companion'; Subject = $null })) 'Scout Companion'
+$Config = @{ showChatTitle = $true }
+Same "Scout's own title wins"        (Get-SessionSubject $withTitle)   'Scout Companion'
+Same 'and your words fill a gap'     (Get-SessionSubject $withSubject) 'fix the retry loop'
+$Config = @{ showChatTitle = $false }
 Same 'latest request when no title' (Get-SessionSubject $withSubject) 'fix the retry loop'
 Same 'folder name is not a title'   (Get-SessionSubject $bare)        $null
 

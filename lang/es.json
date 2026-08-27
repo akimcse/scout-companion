@@ -90,5 +90,9 @@
     "Turns":  "Turnos",
     "Conversations":  "Conversaciones",
     "Tell me when a long turn finishes":  "Avisarme cuando termine un turno largo",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Se cuenta desde que arrancó el acompañante, no todo el día: iniciado a mediodía, no sabrá nada de la mañana."
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Se cuenta desde que arrancó el acompañante, no todo el día: iniciado a mediodía, no sabrá nada de la mañana.",
+    "Install":  "Instalar",
+    "Installing...":  "Instalando...",
+    "Update failed":  "Error al actualizar",
+    "Update failed:":  "Error al actualizar:"
 }

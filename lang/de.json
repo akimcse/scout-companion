@@ -90,5 +90,9 @@
     "Turns":  "Durchläufe",
     "Conversations":  "Unterhaltungen",
     "Tell me when a long turn finishes":  "Bescheid geben, wenn ein langer Durchlauf endet",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Gezählt ab dem Start des Begleiters, nicht über den ganzen Tag: mittags gestartet, weiß er nichts vom Vormittag."
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Gezählt ab dem Start des Begleiters, nicht über den ganzen Tag: mittags gestartet, weiß er nichts vom Vormittag.",
+    "Install":  "Installieren",
+    "Installing...":  "Wird installiert...",
+    "Update failed":  "Update fehlgeschlagen",
+    "Update failed:":  "Update fehlgeschlagen:"
 }

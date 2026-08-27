@@ -90,5 +90,9 @@
     "Turns":  "Ходы",
     "Conversations":  "Разговоры",
     "Tell me when a long turn finishes":  "Сообщать, когда длинный ход завершится",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Отсчёт ведётся с момента запуска приложения, а не за весь день: запущенное в обед, оно не знает про утро."
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Отсчёт ведётся с момента запуска приложения, а не за весь день: запущенное в обед, оно не знает про утро.",
+    "Install":  "Установить",
+    "Installing...":  "Установка...",
+    "Update failed":  "Не удалось обновить",
+    "Update failed:":  "Не удалось обновить:"
 }

@@ -90,5 +90,9 @@
     "Turns":  "Körök",
     "Conversations":  "Beszélgetések",
     "Tell me when a long turn finishes":  "Szóljon, ha egy hosszú kör véget ér",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "A program indulásától számolva, nem az egész napra: délben indítva nem tud a délelőttről."
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "A program indulásától számolva, nem az egész napra: délben indítva nem tud a délelőttről.",
+    "Install":  "Telepítés",
+    "Installing...":  "Telepítés...",
+    "Update failed":  "A frissítés nem sikerült",
+    "Update failed:":  "A frissítés nem sikerült:"
 }

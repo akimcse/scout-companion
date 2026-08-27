@@ -90,5 +90,9 @@
     "Turns":  "輪次",
     "Conversations":  "對話",
     "Tell me when a long turn finishes":  "長工作完成時通知我",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "從本程式啟動時開始計算，而非整天，因此中午才啟動的話不會知道上午的工作。"
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "從本程式啟動時開始計算，而非整天，因此中午才啟動的話不會知道上午的工作。",
+    "Install":  "安裝",
+    "Installing...":  "正在安裝...",
+    "Update failed":  "更新失敗",
+    "Update failed:":  "更新失敗："
 }

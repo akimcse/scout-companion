@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.8.0'
+$CompanionVersion = '0.8.1'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
@@ -3452,6 +3452,13 @@ function Apply-AutoStartFromUI {
     <DockPanel Margin="0,10,0,0">
       <Button x:Name="CheckUpdateBtn" Content="Check now" Width="96" Height="26" DockPanel.Dock="Left"
               Background="#FF2A3142" Foreground="#FFE6EAF2" BorderThickness="0" Cursor="Hand"/>
+      <!-- The answer to "and now what?". Checking happened here, so installing
+           has to be possible here too - it was only in the tray menu, which
+           meant finding out an update existed and then having to go somewhere
+           else to act on it. Hidden until there is something to install. -->
+      <Button x:Name="InstallUpdateBtn" Content="Install" Width="96" Height="26" DockPanel.Dock="Left"
+              Margin="8,0,0,0" Background="#FF2F6FBF" Foreground="#FFFFFFFF" BorderThickness="0"
+              Cursor="Hand" Visibility="Collapsed"/>
       <TextBlock x:Name="UpdateStatus" Text="" Foreground="#FF9AA6BE" Margin="10,0,0,0"
                  VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
     </DockPanel>
@@ -3492,6 +3499,7 @@ function Show-SettingsWindow {
     $script:SettingsUpdateChk   = $sw.FindName('UpdateCheckChk')
     $script:SettingsAutoUpdChk  = $sw.FindName('AutoUpdateChk')
     $script:SettingsUpdStatus   = $sw.FindName('UpdateStatus')
+    $script:SettingsInstallBtn  = $sw.FindName('InstallUpdateBtn')
     $checkUpdBtn                = $sw.FindName('CheckUpdateBtn')
     $verText                    = $sw.FindName('VerText')
     if ($verText) { $verText.Text = $CompanionVersion }
@@ -3559,12 +3567,18 @@ function Show-SettingsWindow {
     }
     $script:SettingsAutoUpdChk.Add_Checked($onAutoUpdate)
     $script:SettingsAutoUpdChk.Add_Unchecked($onAutoUpdate)
+    if ($script:SettingsInstallBtn) {
+        $script:SettingsInstallBtn.Add_Click({
+            Install-CompanionUpdate
+        })
+    }
     if ($checkUpdBtn) {
         $checkUpdBtn.Add_Click({
             Write-CompanionLog 'update check requested from settings'
             $script:UpdateCheckUtc = [datetime]::MinValue
             $script:UpdateAvail = $null      # so an already-known one is re-announced
             $script:UpdateAnnounce = $true   # and so it looks even if checking is off
+            $script:UpdateError = $null      # a fresh attempt, not last time's failure
             $script:SettingsUpdStatus.Text = T 'Checking...'
             Update-CheckForRelease
         })
@@ -3768,6 +3782,8 @@ $script:UpdateCheckUtc = [datetime]::MinValue
 $script:UpdateBusy     = $false
 $script:UpdateFailed   = $false
 $script:UpdateChecked  = $false   # a check has completed at least once
+$script:UpdateInstalling = $false # an install was launched and has not failed
+$script:UpdateError    = $null    # why the last install attempt did not start
 $script:UpdateAnnounce = $false   # set for a check the user asked for explicitly
 $script:UpdatePs       = $null
 $script:UpdateHandle   = $null
@@ -3783,7 +3799,9 @@ $script:UpdateHandle   = $null
 function Sync-UpdateStatusText {
     if (-not $script:SettingsUpdStatus) { return }
     try {
-        $t = if ($script:UpdateBusy) { T 'Checking...' }
+        $t = if ($script:UpdateInstalling) { T 'Installing...' }
+             elseif ($script:UpdateError)  { (T 'Update failed:') + ' ' + $script:UpdateError }
+             elseif ($script:UpdateBusy)   { T 'Checking...' }
              elseif ($script:UpdateAvail) {
                  if (Test-UpdatableInstall $PSScriptRoot $script:InstallDir) {
                      (T '{0} is available.' $script:UpdateAvail)
@@ -3797,6 +3815,16 @@ function Sync-UpdateStatusText {
              elseif (-not $Config.updateCheck) { T 'Not checking.' }
              else { '' }
         $script:SettingsUpdStatus.Text = $t
+
+        # The Install button appears exactly when installing is possible: an
+        # update found, this copy replaceable, and nothing already under way.
+        if ($script:SettingsInstallBtn) {
+            $can = [bool]$script:UpdateAvail -and
+                   (Test-UpdatableInstall $PSScriptRoot $script:InstallDir) -and
+                   -not $script:UpdateInstalling
+            $want = if ($can) { 'Visible' } else { 'Collapsed' }
+            if ($script:SettingsInstallBtn.Visibility -ne $want) { $script:SettingsInstallBtn.Visibility = $want }
+        }
     } catch { }
 }
 
@@ -3870,7 +3898,11 @@ function Complete-UpdateCheck {
             if ($script:UpdateAnnounce) { Show-TrayBalloon (T 'Update available') $tag }
             return
         }
-        if ($Config.autoUpdate) { Install-CompanionUpdate; return }
+        # Unattended install is for the background check, not for a button the
+        # user just pressed. "Check for updates" asks a question; answering it
+        # by silently replacing the running program is not what was asked, and
+        # when that install then failed there was nothing on screen to say so.
+        if ($Config.autoUpdate -and -not $script:UpdateAnnounce) { Install-CompanionUpdate; return }
         Show-TrayBalloon (T 'Update available') "$CompanionVersion -> $($tag.TrimStart('v'))"
     } finally {
         $script:UpdateAnnounce = $false
@@ -3909,9 +3941,19 @@ function Install-CompanionUpdate {
            "iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/$($Config.updateRepo)/main/web-install.ps1'))"
     try {
         Write-CompanionLog "installing update $($script:UpdateAvail)"
-        Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $cmd
+        $script:UpdateInstalling = $true
+        Sync-UpdateStatusText
+        Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $cmd -ErrorAction Stop
     } catch {
+        # Silence here was the whole problem. An update that could not start
+        # left the tray item sitting there, the status saying an update was
+        # available, and nothing anywhere saying the attempt had failed - so
+        # pressing the button appeared to do nothing at all.
         Write-CompanionLog "update launch failed: $_"
+        $script:UpdateInstalling = $false
+        $script:UpdateError = $_.Exception.Message
+        Sync-UpdateStatusText
+        Show-TrayBalloon (T 'Update failed') ("{0}" -f $_.Exception.Message)
     }
 }
 

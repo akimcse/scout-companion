@@ -95,5 +95,9 @@
     "Turns":  "턴",
     "Conversations":  "대화",
     "Tell me when a long turn finishes":  "긴 작업이 끝나면 알려주기",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "이 프로그램이 시작된 시점부터 셉니다. 하루 전체가 아니므로, 점심때 켰다면 오전 작업은 알지 못합니다."
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "이 프로그램이 시작된 시점부터 셉니다. 하루 전체가 아니므로, 점심때 켰다면 오전 작업은 알지 못합니다.",
+    "Install":  "설치",
+    "Installing...":  "설치 중...",
+    "Update failed":  "업데이트 실패",
+    "Update failed:":  "업데이트 실패:"
 }
