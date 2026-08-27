@@ -90,5 +90,9 @@
     "Turns":  "Tur",
     "Conversations":  "Konuşmalar",
     "Tell me when a long turn finishes":  "Uzun bir tur bittiğinde haber ver",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Uygulamanın başladığı andan itibaren sayılır, gün boyu değil: öğlen başlatıldıysa sabahı bilmez."
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Uygulamanın başladığı andan itibaren sayılır, gün boyu değil: öğlen başlatıldıysa sabahı bilmez.",
+    "Install":  "Yükle",
+    "Installing...":  "Yükleniyor...",
+    "Update failed":  "Güncelleme başarısız",
+    "Update failed:":  "Güncelleme başarısız:"
 }

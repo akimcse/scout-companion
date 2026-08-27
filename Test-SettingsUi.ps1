@@ -136,9 +136,51 @@ try {
     # are never on screen together.
     Write-Host "`nthe controls the update code binds all exist"
     foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'CheckUpdateBtn', 'UpdateStatus', 'VerText',
-                     'NotifyFinishChk', 'AgentTimeText', 'AgentTurnsText', 'AgentSessText')) {
+                     'NotifyFinishChk', 'AgentTimeText', 'AgentTurnsText', 'AgentSessText',
+                     'InstallUpdateBtn')) {
         Check "$n is present" ([int][bool]($w.FindName($n))) 1
     }
+
+    # ------------------------------------------------------------------
+    # Finding out an update exists has to be actionable where you found out.
+    #
+    # Install was only in the tray menu, so Settings could tell you a new
+    # version was available and then offer nothing to do about it - which is
+    # exactly how it was reported: "there is a Check now, but I don't know what
+    # comes next".
+    # ------------------------------------------------------------------
+    Write-Host "`nSettings can act on what it just told you"
+    $ib = $w.FindName('InstallUpdateBtn')
+    Check 'the install button exists'    ([int][bool]$ib) 1
+    # Hidden until there is something to install, or it is a button that lies.
+    Check 'and starts hidden'            ([int]($ib.Visibility -eq 'Collapsed')) 1
+    Check 'it sits beside Check now'     ([int]([System.Windows.Controls.DockPanel]::GetDock($ib) -eq 'Left')) 1
+    # Wired, and to the same function the tray item uses.
+    Check 'the handler is wired'         ([int][bool]($text -match 'SettingsInstallBtn\.Add_Click')) 1
+    Check 'to the shared installer'      ([int][bool]($text -match 'SettingsInstallBtn\.Add_Click\(\{\s*\r?\n\s*Install-CompanionUpdate')) 1
+
+    # ------------------------------------------------------------------
+    # An install that cannot start has to say so. It used to swallow the error,
+    # leaving the status claiming an update was available and the button still
+    # sitting there - pressing it appeared to do nothing at all.
+    # ------------------------------------------------------------------
+    Write-Host "`na failed install is reported"
+    Check 'the failure is recorded'      ([int][bool]($text -match '\$script:UpdateError = \$_\.Exception\.Message')) 1
+    Check 'and raised to the tray'       ([int][bool]($text -match "Show-TrayBalloon \(T 'Update failed'\)")) 1
+    Check 'and shown in settings'        ([int][bool]($text -match "\`$script:UpdateError\s*\)\s*\{ \(T 'Update failed:'\)")) 1
+    # Without -ErrorAction Stop the launch failure never reaches the catch, so
+    # the reporting above would be unreachable code.
+    Check 'Start-Process can throw'      ([int][bool]($text -match "'-Command', \`$cmd -ErrorAction Stop")) 1
+
+    # ------------------------------------------------------------------
+    # Pressing "check" is not the same as saying "install". Unattended
+    # installing belongs to the background check; when Check now triggered it,
+    # the running program was replaced without being asked - and when that
+    # failed, silently.
+    # ------------------------------------------------------------------
+    Write-Host "`nchecking on demand does not install on its own"
+    Check 'autoUpdate defers to the user' ([int][bool]($text -match '\$Config\.autoUpdate -and -not \$script:UpdateAnnounce')) 1
+
     # ElapsedText lives on the toast, not here; checked with the toast markup
     # further down.
 

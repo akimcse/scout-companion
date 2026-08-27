@@ -90,5 +90,9 @@
     "Turns":  "ターン",
     "Conversations":  "会話",
     "Tell me when a long turn finishes":  "長い処理が終わったら知らせる",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "このアプリを起動した時点から数えます。一日全体ではないため、昼に起動した場合は午前中の作業を把握できません。"
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "このアプリを起動した時点から数えます。一日全体ではないため、昼に起動した場合は午前中の作業を把握できません。",
+    "Install":  "インストール",
+    "Installing...":  "インストール中...",
+    "Update failed":  "更新に失敗しました",
+    "Update failed:":  "更新に失敗しました:"
 }

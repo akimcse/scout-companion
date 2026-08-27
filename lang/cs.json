@@ -90,5 +90,9 @@
     "Turns":  "Tahy",
     "Conversations":  "Konverzace",
     "Tell me when a long turn finishes":  "Dát vědět, když skončí dlouhý tah",
-    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Počítá se od spuštění aplikace, ne za celý den: spuštěná v poledne nebude vědět o dopoledni."
+    "Counted from when the companion started, not from the whole day, so a companion launched at lunchtime will not know about the morning.":  "Počítá se od spuštění aplikace, ne za celý den: spuštěná v poledne nebude vědět o dopoledni.",
+    "Install":  "Nainstalovat",
+    "Installing...":  "Instaluje se...",
+    "Update failed":  "Aktualizace selhala",
+    "Update failed:":  "Aktualizace selhala:"
 }
