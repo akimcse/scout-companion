@@ -36,7 +36,7 @@
   "_animationEnabled": "Whether the mascot animates at all. Also toggleable at runtime from the tray menu or the settings window, which write the change back to this file.",
 
   "showChatTitle": false,
-  "_showChatTitle": "Which name the toast shows for a conversation. false (default) shows what you asked - the session's own first message or latest request. true shows Scout's own sidebar title for the chat. The chat title is learned and used to switch to the right conversation either way; this only controls the label you read. Also toggleable from the settings window.",
+  "_showChatTitle": "Which name the toast shows for a conversation. false (default) shows what you asked - the session's own first message or latest request. true shows Scout's own sidebar title for the chat. IMPORTANT: this also decides whether the companion goes looking for those titles on its own, by typing into Scout's chat search - see chatTitleScanMs. With this off it never touches the search box; clicking a session still opens the right chat, and learns the title as a free side effect. Also toggleable from the settings window.",
 
   "mascot": "quokka",
   "_mascot": "Which mascot the toast shows. One of: quokka, cat-white, cat-siamese, cat-calico, cat-black, cat-russian, tuna, shiba, fox, bunny, penguin, ribbon. Also selectable from the settings window, which writes the change back to this file. 'ribbon' is the odd one out: a turning band of light with no face and no laptop.",
@@ -51,10 +51,13 @@
   "_openMatchingSession": "Make Open, Answer and the tray land on the chat that raised the prompt, not just whatever Scout was last showing. Scout's chat ids are a different namespace from the session folders on disk and the index that would join them is encrypted, so the chat is found through the sidebar instead: the companion types something the session talked about into the chat search field and takes the freshest row whose timestamp could plausibly be that session. If no row fits, or the window is too narrow for Scout to show a sidebar at all, it just brings the window forward. The sidebar is always put back the way it was found. Set to false to skip all of that and only focus the window.",
 
   "chatTitleScanMs": 15000,
-  "_chatTitleScanMs": "How often to look up Scout's own chat titles, so the toast can call a conversation what you call it. It types each unnamed session's topic into the chat search, reads the row that matches, and clears the box again - no chat is clicked, so nothing navigates. It only ever does this while no Scout window is in front, so you never see it, and it stops entirely once every session has a name. Set to 0 to never look.",
+  "_chatTitleScanMs": "How often to look up Scout's own chat titles, so the toast can call a conversation what you call it. ONLY RUNS WHEN showChatTitle IS TRUE - until 0.8.2 it ran regardless, which meant typing into your chat search to learn a name the toast then did not display. It types each unnamed session's topic into the chat search, reads the row that matches, and clears the box again - no chat is clicked, so nothing navigates. It only ever does this while no Scout window is in front, so you never see it, and it stops entirely once every session has a name or has run out of attempts. Set to 0 to never look.",
 
   "chatTitleScanMaxMs": 300000,
-  "_chatTitleScanMaxMs": "A look that finds nothing doubles the interval, up to this ceiling, dropping back to chatTitleScanMs as soon as a conversation appears without a name. Not being able to look because Scout is in front does not count as a fruitless look.",
+  "_chatTitleScanMaxMs": "A look that finds nothing doubles the interval, up to this ceiling, dropping back to chatTitleScanMs only when a conversation appears that has not been looked for yet. Losing one - because it was named, or gave up - does not reset it, which it used to: giving up on a session made the scan run more often, the opposite of what giving up should do. Not being able to look because Scout is in front does not count as a fruitless look.",
+
+  "chatTitleScanTries": 3,
+  "_chatTitleScanTries": "How many fruitless looks a conversation gets before it is left alone. Some can never be named: two sessions started inside the same minute cannot be told apart by whole-minute sidebar rows, and without a limit those were retried for as long as the companion ran. A new message to a session buys it one more look rather than a clean slate, so repeated failure still settles.",
 
   "startupGreetingSeconds": 5,
   "_startupGreetingSeconds": "Show the toast for this many seconds at startup, whatever the visibility rules would otherwise say. Without it, launching the companion has no visible result: the toast hides while Scout has focus, which it does because you just launched something, and Windows files a brand-new tray icon into the hidden overflow flyout. Set to 0 to start silently.",
