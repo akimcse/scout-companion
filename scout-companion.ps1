@@ -34,7 +34,7 @@
 # still settling, which is the honest position: it is finding and fixing its
 # own significant faults faster than it is gaining features. 1.0 is a claim
 # about stability, and it has not earned one yet.
-$CompanionVersion = '0.8.3'
+$CompanionVersion = '0.8.4'
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName PresentationCore
