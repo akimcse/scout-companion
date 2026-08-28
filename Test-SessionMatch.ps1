@@ -376,6 +376,57 @@ Same 'and not four'                    ([bool]($declared -match '^\d+\.\d+\.\d+\
 # The guard is only worth having if a fourth component really does vanish.
 Same 'a build number would be unseen'  (Compare-CompanionVersion "$declared.1" $declared) 0
 
+Write-Host "`nbumping the version on merge"
+# Releasing by hand meant the version and the work drifted apart: two pull
+# requests landed on main while the declared version stayed at 0.8.2, so what
+# was released and what was on main were different things. The workflow does it
+# now, and this is the logic it uses - lifted from the same file it runs, so it
+# cannot drift from what actually ships.
+. (Join-Path $PSScriptRoot 'Bump-Version.ps1')
+
+# The branch prefix is the signal because it is already the convention here, and
+# it was the thing that was right when the version was wrong: v0.5.0 came from a
+# branch named fix/ and should have been a patch.
+Same 'feat earns a minor'        (Get-BumpKind 'Merge pull request #20 from akimcse/feat/turn-timing') 'minor'
+Same 'fix earns a patch'         (Get-BumpKind 'Merge pull request #19 from akimcse/fix/one-activity-panel') 'patch'
+Same 'chore earns a patch'       (Get-BumpKind 'Merge pull request #12 from akimcse/chore/start-at-0-1-0') 'patch'
+Same 'docs earns a patch'        (Get-BumpKind 'Merge pull request #11 from akimcse/docs/version-and-readme') 'patch'
+# Pull requests here come from forks, so the owner is somebody else and the
+# branch still has to be found after it.
+Same 'a fork is read the same'   (Get-BumpKind 'Merge pull request #29 from ltnalsxl/fix/one-companion-at-a-time') 'patch'
+# A branch with slashes in its name must not lose them to the owner split.
+Same 'a deep branch name works'  (Get-BumpKind 'Merge pull request #7 from someone/feat/a/b/c') 'minor'
+# An unprefixed branch is not a reason to guess, but publishing nothing is worse
+# than publishing conservatively.
+Same 'no prefix is still a patch' (Get-BumpKind 'Merge pull request #3 from someone/just-a-branch') 'patch'
+
+# A direct push to main releases nothing. Everything here goes through a pull
+# request, so a bare push is an accident or work in progress, and neither should
+# reach people running the auto-updater.
+Same 'a direct push releases nothing' (Get-BumpKind 'Fix a typo in the readme') ''
+Same 'and neither does nothing'       (Get-BumpKind '') ''
+Same 'nor a near-miss subject'        (Get-BumpKind 'Merge branch main into feat/x') ''
+
+Same 'a patch moves the last part'   (Get-NextVersion '0.8.2' 'patch') '0.8.3'
+Same 'a minor moves the middle'      (Get-NextVersion '0.8.2' 'minor') '0.9.0'
+Same 'and resets the patch'          (Get-NextVersion '0.8.9' 'minor') '0.9.0'
+# Numbers, not text - 9 -> 10, not 9 -> 91 or a reset.
+Same 'minors count past nine'        (Get-NextVersion '0.9.0' 'minor') '0.10.0'
+Same 'patches count past nine'       (Get-NextVersion '0.8.9' 'patch') '0.8.10'
+# major is never automated: it claims something people rely on changed shape,
+# and no branch name can establish that. Even a branch that asks for one gets a
+# patch.
+Same 'a major is never inferred'     (Get-BumpKind 'Merge pull request #1 from x/major/rewrite') 'patch'
+$majorThrew = $false
+try { Get-NextVersion '0.8.2' 'major' } catch { $majorThrew = $true }
+Same 'and cannot be asked for'       $majorThrew $true
+
+# The three-component rule is enforced where the bump happens too, not only
+# where the version is read.
+$threw = $false
+try { Get-NextVersion '0.8.2.1' 'patch' } catch { $threw = $true }
+Same 'four components are refused'   $threw $true
+
 # Every session picking on its own reaches for the freshest row, and then the
 # one-title-one-session rule refuses the lot. They are pairs, not a race.
 function Sess($d, $age) { [pscustomobject]@{ Dir = $d; Age = [double]$age } }

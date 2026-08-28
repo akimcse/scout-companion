@@ -431,6 +431,27 @@ three). Released numbers are never reused. Deliberately **below 1.0** — the sh
 thing is still settling. The running version is in **Settings → This process**, and every
 release is tagged.
 
+**Merging a pull request releases it.** `.github/workflows/release.yml` reads the branch the
+merge came from, bumps the version, runs the tests, and publishes a tagged release with the
+zip attached — so an installed copy is offered it in the tray without anyone remembering to
+cut one. The branch prefix decides which digit moves:
+
+| branch | bump | example |
+|---|---|---|
+| `feat/…` | minor | 0.8.2 → 0.9.0 |
+| `fix/` `chore/` `docs/` `perf/` `refactor/` `test/` `build/` `ci/` | patch | 0.8.2 → 0.8.3 |
+| anything else | patch | conservative rather than silent |
+
+That prefix is used because it was already the convention here, and because it was the thing
+that was *right* when the version was wrong: `v0.5.0` came from a branch named `fix/` and
+should have been a patch. **major is never automated** — it is a claim that something you
+rely on has changed shape, and no branch name can establish that; it takes a deliberate edit.
+
+A push straight to main releases nothing. Everything here goes through a pull request, so a
+bare push is an accident or work in progress, and neither should reach people on the
+auto-updater. The version logic lives in `Bump-Version.ps1` rather than inline in the YAML,
+because YAML is not testable and this is — see `Test-SessionMatch.ps1`.
+
 ## Privacy & safety
 
 - Reads only local session files and the local agent window. **No telemetry.**

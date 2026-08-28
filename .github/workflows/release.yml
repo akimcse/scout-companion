@@ -1,0 +1,130 @@
+# Version and release, on merge.
+#
+# Triggered by a push to main rather than by the pull_request event, and that is
+# not a stylistic choice: pull requests here come from forks, and a workflow run
+# for a fork's pull_request gets a read-only token. It could not push a version
+# bump. A push to main runs in this repository's own context with a token that
+# can write.
+#
+# The branch prefix decides the bump - feat/ moves the minor, everything else
+# moves the patch - because that convention is already how intent is expressed
+# here, across every merge so far. major is never automated: it claims that
+# something people rely on has changed shape, and no branch name can establish
+# that.
+name: Release on merge
+
+on:
+  push:
+    branches: [main]
+
+# Two merges in quick succession would otherwise race to push the version
+# commit. Queue them rather than cancelling: every merge deserves its release.
+concurrency:
+  group: release-on-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # The bump commit is itself a push to main. GitHub honours [skip ci] in a
+    # commit message, and this repeats the condition so the loop cannot come
+    # back if that behaviour ever changes.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # tags, so a release can be created
+
+      - name: Work out the next version
+        id: bump
+        shell: pwsh
+        run: |
+          # Read the message out of the checked-out repository rather than
+          # interpolating ${{ }} into this script. Pull requests here come from
+          # forks, so the branch name and title are untrusted input, and pasting
+          # untrusted text into a shell script running with contents:write is a
+          # script-injection hole. git gives the same string with no such path.
+          $subject = git log -1 --pretty=%s
+          ./Bump-Version.ps1 -Subject $subject
+
+      - name: Run the tests
+        if: steps.bump.outputs.bumped == 'true'
+        shell: pwsh
+        run: |
+          $fail = 0
+          foreach ($t in 'Test-SessionMatch.ps1', 'Test-TitleLearning.ps1') {
+            Write-Host "== $t"
+            powershell -NoProfile -File ".\$t"
+            if ($LASTEXITCODE -ne 0) { $fail++ }
+          }
+          # These build real windows, so they need -STA and somewhere to put a
+          # window. If a hosted runner cannot do that, they say so and this
+          # fails loudly rather than releasing untested.
+          foreach ($t in 'Test-ButtonSearch.ps1', 'Test-SettingsUi.ps1') {
+            Write-Host "== $t"
+            powershell -NoProfile -STA -File ".\$t"
+            if ($LASTEXITCODE -ne 0) { $fail++ }
+          }
+          if ($fail) { throw "$fail test suite(s) failed - not releasing" }
+
+      - name: Commit the version
+        if: steps.bump.outputs.bumped == 'true'
+        shell: pwsh
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add scout-companion.ps1
+          $prev = '${{ steps.bump.outputs.previous }}'
+          $next = '${{ steps.bump.outputs.version }}'
+          git commit -m "$prev -> $next [skip ci]"
+          # Another merge may have landed while the tests ran.
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Build the zip
+        if: steps.bump.outputs.bumped == 'true'
+        shell: pwsh
+        run: ./Build-Release.ps1
+
+      - name: Publish the release
+        if: steps.bump.outputs.bumped == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.bump.outputs.version }}'
+          $prev = '${{ steps.bump.outputs.previous }}'
+          $zip = ".\dist\ScoutCompanion-$v.zip"
+          if (-not (Test-Path $zip)) { throw "no zip at $zip" }
+
+          # The notes are the merge commit's body, which is the prose written
+          # when the work was done. Anything better has to be written by hand,
+          # and notes nobody edits beat notes nobody writes.
+          #
+          # Read with git for the same reason as the subject above: it is text a
+          # fork controls, and it must not become part of this script.
+          $body = (git log -1 --pretty=%b | Out-String).Trim()
+          $install = 'irm https://raw.githubusercontent.com/${{ github.repository }}/main/web-install.ps1 | iex'
+          $fence = '```'
+          $notes = @"
+          $body
+
+          ---
+
+          $prev -> $v. Installed copies on 0.4.0 or later are offered this in the tray.
+
+          ${fence}powershell
+          $install
+          ${fence}
+          "@
+          $notes | Set-Content notes.md -Encoding UTF8
+
+          # Tag the commit carrying this version, not whatever main is by the
+          # time this runs - a release must never ship contents newer than its
+          # own tag.
+          $sha = git rev-parse HEAD
+          gh release create "v$v" $zip --title "v$v" --notes-file notes.md --target $sha
