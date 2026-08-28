@@ -1,4 +1,4 @@
-# Tests for the sidebar row picker - the one piece of "Open goes to the right
+﻿# Tests for the sidebar row picker - the one piece of "Open goes to the right
 # chat" that has to make a judgement call, and the only place a wrong answer
 # would drop someone into the wrong conversation.
 #
@@ -454,6 +454,25 @@ Same 'and the guard is written too'  ([bool]($wfText -match "git commit -m .*\[s
 
 # A release must never carry contents newer than its own tag.
 Same 'the tag pins the commit'       ([bool]($wfText -match '--target \$sha')) $true
+
+Write-Host "`nscripts survive a machine that is not this one"
+# Windows PowerShell reads a script in the system ANSI codepage unless a BOM
+# says otherwise. On this machine that happens to be compatible; on a US-locale
+# runner the Korean test data came back as mojibake and the file would not
+# parse - "Unexpected token '¬'". Reproduced by decoding the bytes as CP1252,
+# and fixed by the BOM.
+#
+# Watch-Scout.ps1 matters more than the tests do: it ships, and it is what
+# starts the companion at login.
+$offenders = @()
+foreach ($f in (Get-ChildItem $PSScriptRoot -Filter *.ps1)) {
+    $bytes = [System.IO.File]::ReadAllBytes($f.FullName)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $nonAscii = $false
+    foreach ($b in $bytes) { if ($b -gt 127) { $nonAscii = $true; break } }
+    if ($nonAscii -and -not $hasBom) { $offenders += $f.Name }
+}
+Same 'non-ASCII scripts carry a BOM' ($offenders -join ',') ''
 
 # The three-component rule is enforced where the bump happens too, not only
 # where the version is read.

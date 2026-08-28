@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Tiny supervisor that ties Scout Companion to the agent's lifecycle.
 
