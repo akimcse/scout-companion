@@ -23,6 +23,30 @@ foreach ($name in 'VoiceCommandCheck', 'VoiceReplyCheck', 'VoiceSensitivitySlide
 
 Write-Host 'current conversation bridge'
 Assert-True ($Text -match 'SendUnicodeText\(\$request\.Command\)') 'types into Scout'
+Assert-True ($Text -match 'function Set-AgentMessageFocus') 'focus acquisition is guarded'
+Assert-True ($Text -match 'AttachThreadInput') 'foreground focus locks are handled'
+Assert-True ($Text -match '\$attempt -lt 3') 'focus acquisition is retried'
+Assert-True ($Text -match 'Set-AgentMessageFocus \$previous \$null') 'previous app focus is restored safely'
+Assert-True ($Text -match '(?s)IsIconic\(\$hwnd\).*?ShowWindow\(\$hwnd, 9\)') 'maximized windows are not restored'
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile(
+    $App, [ref]$tokens, [ref]$parseErrors)
+$focusFunction = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Set-AgentMessageFocus'
+}, $true)
+$insideFunction = $false
+$parent = $focusFunction.Parent
+while ($parent) {
+    if ($parent -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+        $insideFunction = $true
+        break
+    }
+    $parent = $parent.Parent
+}
+Assert-True (-not $insideFunction) 'focus helper is script-scoped'
 Assert-True ($Text -match '\$request\.SawTurnEnd') 'waits for the turn boundary'
 Assert-True ($Text -match 'assistant\.turn_end') 'reads the authoritative end event'
 Assert-True ($Text -match 'AgentRunning -and \$IsMinimized') 'stays visible when minimized'

@@ -132,6 +132,15 @@ if (-not ('ScoutNative' -as [type])) {
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint pid);
 
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        public static extern bool BringWindowToTop(System.IntPtr hWnd);
+
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
         public struct INPUT {
             public uint type;
@@ -1664,6 +1673,58 @@ function Get-VoiceEventSnapshot {
     return $offsets
 }
 
+function Set-AgentMessageFocus([IntPtr]$hwnd, $box) {
+    if ($hwnd -eq [IntPtr]::Zero -or -not [ScoutNative]::IsWindow($hwnd)) {
+        return $false
+    }
+    $foreground = [ScoutNative]::GetForegroundWindow()
+    [uint32]$foregroundPid = 0
+    [uint32]$targetPid = 0
+    $foregroundThread = if ($foreground -ne [IntPtr]::Zero) {
+        [ScoutNative]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid)
+    } else { 0 }
+    $targetThread = [ScoutNative]::GetWindowThreadProcessId($hwnd, [ref]$targetPid)
+    $currentThread = [ScoutNative]::GetCurrentThreadId()
+    $attachedForeground = $false
+    $attachedTarget = $false
+    try {
+        if ($foregroundThread -and $foregroundThread -ne $currentThread) {
+            $attachedForeground = [ScoutNative]::AttachThreadInput(
+                $currentThread, $foregroundThread, $true)
+        }
+        if ($targetThread -and $targetThread -ne $currentThread -and
+                $targetThread -ne $foregroundThread) {
+            $attachedTarget = [ScoutNative]::AttachThreadInput(
+                $currentThread, $targetThread, $true)
+        }
+        if ([ScoutNative]::IsIconic($hwnd)) {
+            [void][ScoutNative]::ShowWindow($hwnd, 9)
+        }
+        [void][ScoutNative]::BringWindowToTop($hwnd)
+        [void][ScoutNative]::SetForegroundWindow($hwnd)
+        if (-not $box) {
+            return [ScoutNative]::GetForegroundWindow() -eq $hwnd
+        }
+        $box.SetFocus()
+        Start-Sleep -Milliseconds 100
+        if ($box.Current.HasKeyboardFocus) { return $true }
+        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        return $focused -and
+            (($focused.GetRuntimeId() -join ',') -eq ($box.GetRuntimeId() -join ','))
+    } catch {
+        return $false
+    } finally {
+        if ($attachedTarget) {
+            [void][ScoutNative]::AttachThreadInput(
+                $currentThread, $targetThread, $false)
+        }
+        if ($attachedForeground) {
+            [void][ScoutNative]::AttachThreadInput(
+                $currentThread, $foregroundThread, $false)
+        }
+    }
+}
+
 function Read-VoiceEventChunk([string]$path, [long]$offset) {
     $fi = New-Object System.IO.FileInfo $path
     if (-not $fi.Exists -or $fi.Length -le $offset) {
@@ -1748,13 +1809,13 @@ function Submit-VoiceUiRequest {
     $request.Offsets = Get-VoiceEventSnapshot
     $previous = [ScoutNative]::GetForegroundWindow()
     try {
-        [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
-        [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
-        $box.SetFocus()
-        Start-Sleep -Milliseconds 75
-        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        if (-not $focused -or
-                (($focused.GetRuntimeId() -join ',') -ne ($box.GetRuntimeId() -join ','))) {
+        $focused = $false
+        for ($attempt = 0; $attempt -lt 3 -and -not $focused; $attempt++) {
+            $box = Get-AgentMessageBox $win.Hwnd
+            $focused = Set-AgentMessageFocus $win.Hwnd $box
+            if (-not $focused) { Start-Sleep -Milliseconds 150 }
+        }
+        if (-not $focused) {
             throw 'Scout did not accept keyboard focus.'
         }
         [ScoutNative]::SendUnicodeText($request.Command)
@@ -1772,7 +1833,7 @@ function Submit-VoiceUiRequest {
     } finally {
         Start-Sleep -Milliseconds 100
         if ($previous -ne [IntPtr]::Zero -and $previous -ne $win.Hwnd) {
-            [void][ScoutNative]::SetForegroundWindow($previous)
+            [void](Set-AgentMessageFocus $previous $null)
         }
     }
 }
