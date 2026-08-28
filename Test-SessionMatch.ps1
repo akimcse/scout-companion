@@ -474,6 +474,32 @@ foreach ($f in (Get-ChildItem $PSScriptRoot -Filter *.ps1)) {
 }
 Same 'non-ASCII scripts carry a BOM' ($offenders -join ',') ''
 
+# ...and the release process must not undo that.
+#
+# Set-Content -Encoding UTF8 means "with a BOM" in Windows PowerShell and
+# "without one" in PowerShell 7, and the workflow runs under 7. So the bump step
+# stripped the BOM from scout-companion.ps1, which contains non-ASCII, and every
+# automated release would have shipped an app that will not parse outside a
+# codepage that happens to tolerate those bytes.
+#
+# Both directions are checked, so this fails under either host: the old code
+# would strip a BOM under 7 and add one under 5.1, and neither is preserving.
+$bomFile = Join-Path $env:TEMP ('_bom_' + [guid]::NewGuid().ToString('N').Substring(0,8) + '.ps1')
+try {
+    $body = "`$CompanionVersion = '1.2.3'`r`n# ok`r`n"
+    [System.IO.File]::WriteAllText($bomFile, $body, (New-Object System.Text.UTF8Encoding($true)))
+    Set-DeclaredVersion $bomFile '1.2.4'
+    $b = [System.IO.File]::ReadAllBytes($bomFile)
+    Same 'a BOM survives a bump'      ([bool]($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)) $true
+    Same 'and the version changed'    (Get-DeclaredVersion $bomFile) '1.2.4'
+
+    [System.IO.File]::WriteAllText($bomFile, $body, (New-Object System.Text.UTF8Encoding($false)))
+    Set-DeclaredVersion $bomFile '1.2.5'
+    $b2 = [System.IO.File]::ReadAllBytes($bomFile)
+    Same 'and no BOM is not invented' ([bool]($b2[0] -eq 0xEF)) $false
+    Same 'with the version changed'   (Get-DeclaredVersion $bomFile) '1.2.5'
+} finally { Remove-Item $bomFile -Force -ErrorAction SilentlyContinue }
+
 # The three-component rule is enforced where the bump happens too, not only
 # where the version is read.
 $threw = $false
