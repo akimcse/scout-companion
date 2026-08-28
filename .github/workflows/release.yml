@@ -44,10 +44,16 @@ jobs:
         shell: pwsh
         run: |
           # Read the message out of the checked-out repository rather than
-          # interpolating ${{ }} into this script. Pull requests here come from
-          # forks, so the branch name and title are untrusted input, and pasting
-          # untrusted text into a shell script running with contents:write is a
-          # script-injection hole. git gives the same string with no such path.
+          # interpolating an Actions expression into this script. Pull requests
+          # here come from forks, so the branch name and title are untrusted
+          # input, and pasting untrusted text into a shell script running with
+          # contents:write is a script-injection hole. git gives the same string
+          # with no such path.
+          #
+          # (The comment says "an Actions expression" rather than writing one,
+          # because an empty one written literally is a syntax error - GitHub
+          # evaluates the run block's text before pwsh ever sees it, so a
+          # PowerShell comment is no shelter. That is what broke the first run.)
           $subject = git log -1 --pretty=%s
           ./Bump-Version.ps1 -Subject $subject
 

@@ -421,6 +421,40 @@ $majorThrew = $false
 try { Get-NextVersion '0.8.2' 'major' } catch { $majorThrew = $true }
 Same 'and cannot be asked for'       $majorThrew $true
 
+Write-Host "`nthe release workflow"
+# The workflow cannot be run from here, so what can be checked is checked: the
+# things that made it fail, and the things that would make it dangerous.
+$wf = Join-Path $PSScriptRoot '.github\workflows\release.yml'
+Same 'the workflow exists'           ([int](Test-Path $wf)) 1
+$wfText = if (Test-Path $wf) { Get-Content $wf -Raw } else { '' }
+
+# GitHub evaluates every ${{ }} in a run block before pwsh ever sees it, so a
+# PowerShell comment is no shelter - and an empty one is a syntax error that
+# fails the run in zero seconds with only "workflow file issue" to go on. That
+# is exactly how the first version of this broke, from a comment explaining
+# why untrusted text is not interpolated.
+$empties = @([regex]::Matches($wfText, '\$\{\{\s*\}\}'))
+Same 'no empty expressions'          $empties.Count 0
+
+# Pull requests here come from forks, so branch names and titles are written by
+# people outside this repository. Interpolating them into a shell script that
+# holds contents:write is a script-injection hole; git reads the same strings
+# with no such path.
+Same 'no untrusted text in a script' ([bool]($wfText -match 'run:[\s\S]*?\$\{\{\s*github\.event\.(head_commit|pull_request)')) $false
+
+# It has to trigger on push. A fork's pull_request run gets a read-only token
+# and could not push the version commit at all.
+Same 'it triggers on a push'         ([bool]($wfText -match '(?m)^on:\s*$')) $true
+Same 'to main'                       ([bool]($wfText -match '(?m)^\s*push:\s*\r?\n\s*branches:\s*\[main\]')) $true
+
+# The bump is itself a push to main, so without a guard it would trigger itself
+# forever.
+Same 'the loop is guarded'           ([bool]($wfText -match '\[skip ci\]')) $true
+Same 'and the guard is written too'  ([bool]($wfText -match "git commit -m .*\[skip ci\]")) $true
+
+# A release must never carry contents newer than its own tag.
+Same 'the tag pins the commit'       ([bool]($wfText -match '--target \$sha')) $true
+
 # The three-component rule is enforced where the bump happens too, not only
 # where the version is read.
 $threw = $false
