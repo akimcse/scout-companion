@@ -4139,6 +4139,7 @@ function Set-AutoStart([bool]$on) {
 $script:SettingsWindow    = $null
 $script:SettingsAnimCheck = $null
 $script:SettingsChatTitleCheck = $null
+$script:SettingsLanguage = $null
 $script:SettingsSuppress  = $false
 $script:OpacitySaveTimer  = $null
 $script:OpacityPendingValue = 1.0
@@ -4369,6 +4370,23 @@ function Apply-AutoStartFromUI {
     $script:SettingsAutoHint.Visibility = 'Visible'
 }
 
+function Restart-CompanionForLanguage([string]$language) {
+    if (-not $language -or $Config.language -eq $language) { return }
+    if (-not (Save-Setting @{ language = $language })) { return }
+    $launcher = Join-Path $ScriptDir 'Start-ScoutCompanion.cmd'
+    if (-not (Test-Path $launcher)) { return }
+    $escapedLauncher = $launcher.Replace("'", "''")
+    $escapedWorking = $ScriptDir.Replace("'", "''")
+    $command = "Wait-Process -Id $PID -ErrorAction SilentlyContinue; " +
+        "Start-Process -FilePath '$escapedLauncher' " +
+        "-WorkingDirectory '$escapedWorking' -WindowStyle Hidden"
+    Start-Process powershell.exe -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass',
+        '-WindowStyle', 'Hidden', '-Command', $command
+    ) -WindowStyle Hidden | Out-Null
+    Stop-Companion
+}
+
 [xml]$settingsXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -4518,13 +4536,24 @@ function Apply-AutoStartFromUI {
   <StackPanel Margin="18,16,18,14">
 
     <TextBlock Style="{StaticResource Section}" Text="STARTUP"/>
-    <DockPanel LastChildFill="False">
-      <CheckBox x:Name="AutoStartCheck" Content="Start automatically with Scout" DockPanel.Dock="Left" VerticalAlignment="Center"/>
-      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
-        <Border.ToolTip><ToolTip>Adds a shortcut to your Startup folder. The watcher launches the companion when Scout starts, and the companion closes itself shortly after Scout quits.</ToolTip></Border.ToolTip>
-        <TextBlock Style="{StaticResource InfoGlyph}"/>
-      </Border>
-    </DockPanel>
+    <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <DockPanel Grid.Column="0" LastChildFill="False">
+        <CheckBox x:Name="AutoStartCheck" Content="Start automatically with Scout" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+        <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+          <Border.ToolTip><ToolTip>Adds a shortcut to your Startup folder. The watcher launches the companion when Scout starts, and the companion closes itself shortly after Scout quits.</ToolTip></Border.ToolTip>
+          <TextBlock Style="{StaticResource InfoGlyph}"/>
+        </Border>
+      </DockPanel>
+      <DockPanel Grid.Column="1" LastChildFill="False" Margin="12,0,0,0">
+        <TextBlock Text="Language" Foreground="#FF9AA6BE"
+                   VerticalAlignment="Center" Margin="0,0,8,0"/>
+        <ComboBox x:Name="LanguagePicker" Width="118" Height="26" Cursor="Hand"/>
+      </DockPanel>
+    </Grid>
     <!-- Kept as a named element because the code swaps its text to explain when
          the watcher is missing; it just carries no standing hint line now. -->
     <TextBlock x:Name="AutoStartHint" Style="{StaticResource Hint}" Visibility="Collapsed"/>
@@ -4776,6 +4805,7 @@ function Show-SettingsWindow {
     $script:SettingsWindow    = $sw
     $script:SettingsAutoCheck = $sw.FindName('AutoStartCheck')
     $script:SettingsAutoHint  = $sw.FindName('AutoStartHint')
+    $script:SettingsLanguage  = $sw.FindName('LanguagePicker')
     $script:SettingsAnimCheck = $sw.FindName('AnimCheck')
     $script:SettingsChatTitleCheck = $sw.FindName('ChatTitleCheck')
     $script:SettingsVoiceCommand = $sw.FindName('VoiceCommandCheck')
@@ -4839,6 +4869,41 @@ function Show-SettingsWindow {
             }
         } catch { }
     }
+
+    $languageOptions = @(
+        [pscustomobject]@{ Id = 'en'; Label = 'English' },
+        [pscustomobject]@{ Id = 'ko'; Label = 'Korean' },
+        [pscustomobject]@{ Id = 'ja'; Label = 'Japanese' },
+        [pscustomobject]@{ Id = 'zh-Hans'; Label = 'Chinese (Simplified)' }
+    )
+    $selectedLanguage = if ($Config.language -and $Config.language -ne 'auto') {
+        [string]$Config.language
+    } else {
+        [string]$script:Lang
+    }
+    foreach ($option in $languageOptions) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = $option.Label
+        $item.Tag = $option.Id
+        [void]$script:SettingsLanguage.Items.Add($item)
+        if ($option.Id -eq $selectedLanguage) {
+            $script:SettingsLanguage.SelectedItem = $item
+        }
+    }
+    if (-not $script:SettingsLanguage.SelectedItem) {
+        $placeholder = New-Object System.Windows.Controls.ComboBoxItem
+        $placeholder.Content = 'Choose language'
+        $placeholder.IsEnabled = $false
+        $script:SettingsLanguage.Items.Insert(0, $placeholder)
+        $script:SettingsLanguage.SelectedItem = $placeholder
+    }
+    $script:SettingsLanguage.Add_SelectionChanged({
+        if ($script:SettingsSuppress) { return }
+        $selected = $script:SettingsLanguage.SelectedItem
+        if ($selected -and $selected.Tag) {
+            Restart-CompanionForLanguage ([string]$selected.Tag)
+        }
+    })
 
     # Updates. Primed under suppression: with Checked/Unchecked handlers, simply
     # setting IsChecked fires them, and opening the window would write config.
@@ -5086,6 +5151,7 @@ function Show-SettingsWindow {
         $script:SettingsWindow    = $null
         $script:SettingsAnimCheck = $null
         $script:SettingsChatTitleCheck = $null
+        $script:SettingsLanguage = $null
         $script:SettingsRememberPos = $null
     })
 

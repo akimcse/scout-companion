@@ -1,5 +1,11 @@
 # Release notes
 
+## v0.11.0 — Choose the UI language in Settings
+
+- Add a Language picker beside the Windows startup control.
+- Select English, Korean, Japanese, or Simplified Chinese without editing `config.json`.
+- Persist the choice and restart Companion automatically so the whole UI changes together.
+
 ## v0.10.3 — Voice listening recovers after an update
 
 - Restart the voice bridge when it exits unexpectedly while voice commands remain enabled.
