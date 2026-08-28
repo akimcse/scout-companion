@@ -1,0 +1,4 @@
+numpy==2.4.6
+sounddevice==0.5.5
+sherpa-onnx==1.13.5
+edge-tts>=7.0.0

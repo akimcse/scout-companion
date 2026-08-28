@@ -36,6 +36,7 @@ $Payload = @(
     'Add-ToStartMenu.ps1'
     'Install.ps1'
     'Install.cmd'
+    'voice'
     'config.sample.json'
     'LICENSE'
     'README.md'
@@ -58,8 +59,20 @@ $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("scpkg-{0}" -f ([guid]
 $stage = Join-Path $stageRoot 'ScoutCompanion'
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 try {
-    foreach ($f in $Payload) { Copy-Item (Join-Path $ScriptDir $f) (Join-Path $stage $f) -Force }
+    foreach ($f in $Payload) {
+        $source = Join-Path $ScriptDir $f
+        $destination = Join-Path $stage $f
+        if (Test-Path $source -PathType Container) {
+            Copy-Item $source $destination -Recurse -Force
+        } else {
+            Copy-Item $source $destination -Force
+        }
+    }
     Copy-Item $langDir $stage -Recurse -Force
+    Get-ChildItem $stage -Directory -Filter '__pycache__' -Recurse |
+        Remove-Item -Recurse -Force
+    Get-ChildItem $stage -File -Filter '*.pyc' -Recurse |
+        Remove-Item -Force
 
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
     $zip = Join-Path $OutDir ("ScoutCompanion-{0}.zip" -f $version)

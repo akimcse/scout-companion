@@ -35,6 +35,21 @@
   "animationEnabled": true,
   "_animationEnabled": "Whether the mascot animates at all. Also toggleable at runtime from the tray menu or the settings window, which write the change back to this file.",
 
+  "voiceCommandEnabled": false,
+  "_voiceCommandEnabled": "Listen for Hey Scout and type recognized commands into the currently visible Scout conversation. Saved by the Voice control setting.",
+
+  "voiceReplyEnabled": true,
+  "_voiceReplyEnabled": "Read the final answer from the current Scout conversation aloud. Saved independently from voice command input.",
+
+  "voiceWakeSensitivity": 65,
+  "_voiceWakeSensitivity": "Hey Scout wake-word sensitivity from 0 to 100. Higher accepts more STT variations but can increase false activations.",
+
+  "voiceNoiseSensitivity": 35,
+  "_voiceNoiseSensitivity": "Ambient-noise sensitivity from 0 to 100. Lower blocks more background noise; higher detects quieter speech.",
+
+  "voiceRuntimeDir": null,
+  "_voiceRuntimeDir": "Folder containing the prepared Scout Voice runtime. Default: %LOCALAPPDATA%\\ScoutVoiceAssistant.",
+
   "showChatTitle": false,
   "_showChatTitle": "Which name the toast shows for a conversation. false (default) shows what you asked - the session's own first message or latest request. true shows Scout's own sidebar title for the chat. IMPORTANT: this also decides whether the companion goes looking for those titles on its own, by typing into Scout's chat search - see chatTitleScanMs. With this off it never touches the search box; clicking a session still opens the right chat, and learns the title as a free side effect. Also toggleable from the settings window.",
 

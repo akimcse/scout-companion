@@ -8,9 +8,18 @@ When the agent is working and you've looked away, a small toast in the corner sh
 **what it's doing right now** — and lets you **Allow or Deny** its prompts with one click,
 without switching back.
 
+> **Optional voice control:** open Settings and use the
+> **음성으로 제어** section to enable command input and, independently, spoken
+> answers. Recognized commands are typed into the currently visible Scout
+> conversation, and the answer from that same turn is read back. Both choices
+> and the 0-100 wake-word and ambient-noise sensitivity controls are stored in
+> `config.json`; the voice engine follows Companion's lifetime. First-time users can run the five-phrase
+> voice enrollment from the same settings section; raw recordings are discarded
+> and only the encrypted speaker profile is retained.
+
 ![PowerShell](https://img.shields.io/badge/PowerShell-5%2B-5391FE?logo=powershell&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
-![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+![Core dependencies](https://img.shields.io/badge/core_dependencies-none-brightgreen)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 </div>
@@ -64,9 +73,13 @@ you act on approvals in place.
   It types while busy, widens its eyes when it needs you, and blinks throughout.
 - **🔔 Long-turn & new-version alerts** — a tray balloon when a long turn ends, and an
   offer in the tray menu when a newer release exists.
+- **🎙️ Optional voice control** — say “Hey Scout”, dictate into the conversation already
+  open in Scout, and optionally hear that turn's final answer. Includes five-phrase
+  enrollment plus wake-word and ambient-noise sensitivity controls.
 - **🌍 Fifteen languages** — follows your Windows display language, or pin one.
-- **🪶 Single file, zero config** — pure PowerShell + WPF. No dependencies, no build step,
-  no binary assets; even the mascots are drawn at runtime. Discovers everything itself.
+- **🪶 Zero-config core** — the overlay is pure PowerShell + WPF with no build step or
+  binary assets; even the mascots are drawn at runtime. Voice control is optional and
+  prepares its own per-user Python environment on first enrollment.
 
 ## Install & run
 
@@ -80,6 +93,10 @@ That fetches the latest release, installs it to `%LOCALAPPDATA%\Programs\ScoutCo
 adds Start Menu entries, and registers it in **Settings → Apps**. Per-user throughout — no
 admin rights, nothing in `Program Files` or `HKLM`. Installing over an existing copy keeps
 your settings and learned chat titles.
+
+Voice control is optional. It requires Python 3.11 or later and downloads about 200 MB of
+on-device speech models the first time **“헤이 스카웃” 음성 인식하기** is used. It does
+not enable itself or add a separate startup task.
 
 **Or by hand** — download `ScoutCompanion-<version>.zip` from the
 [latest release](https://github.com/akimcse/scout-companion/releases/latest), unzip, and
@@ -379,6 +396,11 @@ Everything works out of the box; Settings covers the day-to-day knobs. To go fur
 | `openMatchingSession` | `true` | Make clicking a row land Scout on that chat. `false` only focuses the window |
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps) |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in Settings |
+| `voiceCommandEnabled` | `false` | Listen for “Hey Scout” and type the command into the current Scout conversation |
+| `voiceReplyEnabled` | `true` | Read the completed answer aloud when voice command input is enabled |
+| `voiceWakeSensitivity` | `65` | Wake-word matching sensitivity from 0–100 |
+| `voiceNoiseSensitivity` | `35` | Ambient-noise sensitivity from 0–100; lower rejects more background sound |
+| `voiceRuntimeDir` | `%LOCALAPPDATA%\ScoutVoiceAssistant` | Per-user Python environment, models, and encrypted speaker profile |
 | `mascot` | `quokka` | Which mascot to show. Also in Settings |
 | `language` | `auto` | UI language. `auto` follows Windows; set a tag from `lang/` to pin it |
 | `opacity` | `1.0` | Toast opacity, clamped 0.35–1.0. Also in Settings |
@@ -458,9 +480,12 @@ because YAML is not testable and this is — see `Test-SessionMatch.ps1`.
 ## Privacy & safety
 
 - Reads only local session files and the local agent window. **No telemetry.**
-- **One network call, and only one:** an anonymous request to GitHub for the newest release
-  tag, a few times a day. It sends nothing about you. Set `updateCheck` to `false` for none
-  at all.
+- The core overlay makes one anonymous GitHub release check a few times a day; set
+  `updateCheck` to `false` to disable it. Optional voice setup downloads speech models
+  from GitHub, and the default neural voice uses Microsoft Edge's online TTS service with
+  the Windows voice as fallback.
+- Voice recordings are discarded after enrollment. Only a speaker embedding encrypted
+  for the current Windows user is retained locally.
 - Clicking **Allow** here is exactly equivalent to clicking Allow in the agent — it forwards
   your click, bypassing none of the agent's own permission checks. Treat approvals with the
   same care you would in the agent itself.

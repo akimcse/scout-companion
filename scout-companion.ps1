@@ -78,6 +78,7 @@ try {
         try { $script:InstanceMutex.Dispose() } catch { }
         exit 0
     }
+
 } catch {
     # A lock we cannot take is not a reason to refuse to run: a possible
     # duplicate is better than no companion at all.
@@ -130,6 +131,80 @@ if (-not ('ScoutNative' -as [type])) {
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint pid);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct INPUT {
+            public uint type;
+            public INPUTUNION U;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+        public struct INPUTUNION {
+            [System.Runtime.InteropServices.FieldOffset(0)] public MOUSEINPUT mi;
+            [System.Runtime.InteropServices.FieldOffset(0)] public KEYBDINPUT ki;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct MOUSEINPUT {
+            public int dx, dy;
+            public uint mouseData, dwFlags, time;
+            public System.UIntPtr dwExtraInfo;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        public struct KEYBDINPUT {
+            public ushort wVk, wScan;
+            public uint dwFlags, time;
+            public System.UIntPtr dwExtraInfo;
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)]
+        private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+        private const uint INPUT_KEYBOARD = 1;
+        private const uint KEYEVENTF_KEYUP = 0x0002;
+        private const uint KEYEVENTF_UNICODE = 0x0004;
+
+        private static void SendKey(ushort virtualKey, bool keyUp) {
+            var input = new INPUT {
+                type = INPUT_KEYBOARD,
+                U = new INPUTUNION {
+                    ki = new KEYBDINPUT {
+                        wVk = virtualKey,
+                        dwFlags = keyUp ? KEYEVENTF_KEYUP : 0
+                    }
+                }
+            };
+            if (SendInput(1, new INPUT[] { input },
+                    System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT))) != 1) {
+                throw new System.ComponentModel.Win32Exception();
+            }
+        }
+
+        public static void SendUnicodeText(string text) {
+            foreach (char ch in text) {
+                var down = new INPUT {
+                    type = INPUT_KEYBOARD,
+                    U = new INPUTUNION {
+                        ki = new KEYBDINPUT {
+                            wScan = ch,
+                            dwFlags = KEYEVENTF_UNICODE
+                        }
+                    }
+                };
+                var up = down;
+                up.U.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+                if (SendInput(2, new INPUT[] { down, up },
+                        System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT))) != 2) {
+                    throw new System.ComponentModel.Win32Exception();
+                }
+            }
+        }
+
+        public static void SendEnter() {
+            SendKey(0x0D, false);
+            SendKey(0x0D, true);
+        }
 
         public static System.Collections.Generic.List<System.IntPtr> TopLevelWindows(
                 System.Collections.Generic.HashSet<uint> pids) {
@@ -204,6 +279,13 @@ $Config = [ordered]@{
     animIntervalMs      = 80
     # Mascot animation can be switched off entirely from the tray or settings.
     animationEnabled    = $true
+    # Reuse the local Scout Voice runtime as a headless child process. This only
+    # follows the companion's lifetime. Both choices are persisted in config.
+    voiceCommandEnabled = $false
+    voiceReplyEnabled   = $true
+    voiceWakeSensitivity = 65
+    voiceNoiseSensitivity = 35
+    voiceRuntimeDir     = $null
     # Which name to show for a conversation on the toast: $false shows what you
     # actually asked (the session's own first message / latest request), $true
     # shows Scout's own sidebar title for the chat. The chat title is still
@@ -1373,7 +1455,9 @@ function Handle-Event($sess, $evt) {
         }
         'assistant.message' {
             $txt = $evt.data.content; if (-not $txt) { $txt = $evt.data.text }
-            if ($txt) { $sess.Saying = Truncate $txt 200 }
+            if ($txt) {
+                $sess.Saying = Truncate $txt 200
+            }
         }
         'tool.execution_start' {
             $desc = Describe-Tool $evt.data.toolName $evt.data.arguments
@@ -1543,6 +1627,218 @@ function Focus-Agent {
         [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
     }
     [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
+}
+
+function Get-AgentMessageBox([IntPtr]$hwnd) {
+    $root = $null
+    try { $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd) } catch { return $null }
+    if (-not $root) { return $null }
+    $edit = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::Edit)
+    $name = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, 'Message')
+    try {
+        return $root.FindFirst(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            (New-Object System.Windows.Automation.AndCondition($edit, $name)))
+    } catch { return $null }
+}
+
+function Get-AgentMessageText($box) {
+    if (-not $box) { return $null }
+    try {
+        $p = $box.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+        return $p.DocumentRange.GetText(-1).TrimEnd("`r", "`n")
+    } catch { return $null }
+}
+
+function Get-VoiceEventSnapshot {
+    $offsets = @{}
+    foreach ($dir in @(Get-ChildItem $SessionRoot -Directory -ErrorAction SilentlyContinue)) {
+        $path = Join-Path $dir.FullName 'events.jsonl'
+        if (Test-Path $path) {
+            try { $offsets[$path] = (New-Object System.IO.FileInfo $path).Length } catch { }
+        }
+    }
+    return $offsets
+}
+
+function Read-VoiceEventChunk([string]$path, [long]$offset) {
+    $fi = New-Object System.IO.FileInfo $path
+    if (-not $fi.Exists -or $fi.Length -le $offset) {
+        return [pscustomobject]@{ Offset = $offset; Events = @() }
+    }
+    if ($fi.Length -lt $offset) { $offset = 0 }
+    $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $fs.Seek($offset, 'Begin') | Out-Null
+        $sr = New-Object System.IO.StreamReader($fs)
+        $chunk = $sr.ReadToEnd()
+    } finally { $fs.Dispose() }
+    # events.jsonl is append-only. Do not commit a partial final line: otherwise
+    # the first half and second half both fail JSON parsing and the event is lost.
+    $lastNewline = $chunk.LastIndexOf("`n")
+    if ($lastNewline -lt 0) {
+        return [pscustomobject]@{ Offset = $offset; Events = @() }
+    }
+    $complete = $chunk.Substring(0, $lastNewline + 1)
+    $next = $offset + [System.Text.Encoding]::UTF8.GetByteCount($complete)
+    $events = @()
+    foreach ($line in ($complete -split "`n")) {
+        $line = $line.Trim()
+        if (-not $line) { continue }
+        try { $events += ($line | ConvertFrom-Json) } catch { }
+    }
+    return [pscustomobject]@{ Offset = $next; Events = $events }
+}
+
+function Write-VoiceUiResponse([string]$id, [string]$answer, [string]$errorText) {
+    $value = [ordered]@{ id = $id; answer = $answer; error = $errorText }
+    $temporary = $script:VoiceResponsePath + '.tmp'
+    ($value | ConvertTo-Json -Compress) | Set-Content $temporary -Encoding UTF8
+    Move-Item $temporary $script:VoiceResponsePath -Force
+}
+
+function Clear-VoiceUiRequest {
+    if ($script:VoiceUiRequest) {
+        $script:VoiceLastRequestId = $script:VoiceUiRequest.Id
+    }
+    $script:VoiceUiRequest = $null
+}
+
+function Read-VoiceUiRequest {
+    if (-not $script:VoiceEnabled -or $script:VoiceUiRequest -or
+            -not (Test-Path $script:VoiceRequestPath)) { return }
+    try { $request = Get-Content $script:VoiceRequestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return }
+    if (-not $request.id -or -not $request.command -or $request.id -eq $script:VoiceLastRequestId) { return }
+    $script:VoiceUiRequest = [pscustomobject]@{
+        Id          = [string]$request.id
+        Command     = [string]$request.command
+        StartedUtc  = [datetime]::UtcNow
+        Submitted   = $false
+        Hwnd        = [IntPtr]::Zero
+        EventPath   = $null
+        EventOffset = [long]0
+        Offsets     = $null
+        Answer      = $null
+        SawTurnStart = $false
+        SawTurnEnd  = $false
+    }
+}
+
+function Submit-VoiceUiRequest {
+    $request = $script:VoiceUiRequest
+    if (-not $request -or $request.Submitted) { return }
+    $win = Get-AgentWindow
+    if (-not $win) { return }
+    Wake-AgentA11y $win.Hwnd
+    $send = Find-AgentButton $win.Hwnd @('Send')
+    if (-not $send) { return }
+    $box = Get-AgentMessageBox $win.Hwnd
+    if (-not $box) { return }
+    $draft = Get-AgentMessageText $box
+    if ($null -eq $draft) { return }
+    if ($draft.Trim().Length -gt 0) {
+        Write-VoiceUiResponse $request.Id '' 'Scout has an unsent draft. Send or clear it before using voice control.'
+        Clear-VoiceUiRequest
+        return
+    }
+
+    $request.Offsets = Get-VoiceEventSnapshot
+    $previous = [ScoutNative]::GetForegroundWindow()
+    try {
+        [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
+        [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
+        $box.SetFocus()
+        Start-Sleep -Milliseconds 75
+        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        if (-not $focused -or
+                (($focused.GetRuntimeId() -join ',') -ne ($box.GetRuntimeId() -join ','))) {
+            throw 'Scout did not accept keyboard focus.'
+        }
+        [ScoutNative]::SendUnicodeText($request.Command)
+        Start-Sleep -Milliseconds 150
+        $box = Get-AgentMessageBox $win.Hwnd
+        if ((Get-AgentMessageText $box) -ne $request.Command) {
+            throw 'Scout did not accept the voice command text.'
+        }
+        [ScoutNative]::SendEnter()
+        $request.Submitted = $true
+        $request.Hwnd = $win.Hwnd
+    } catch {
+        Write-VoiceUiResponse $request.Id '' $_.Exception.Message
+        Clear-VoiceUiRequest
+    } finally {
+        Start-Sleep -Milliseconds 100
+        if ($previous -ne [IntPtr]::Zero -and $previous -ne $win.Hwnd) {
+            [void][ScoutNative]::SetForegroundWindow($previous)
+        }
+    }
+}
+
+function Read-VoiceUiEvents {
+    $request = $script:VoiceUiRequest
+    if (-not $request -or -not $request.Submitted) { return }
+
+    $paths = if ($request.EventPath) {
+        @($request.EventPath)
+    } else {
+        @(Get-ChildItem $SessionRoot -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName 'events.jsonl' } |
+            Where-Object { Test-Path $_ } |
+            Sort-Object { (Get-Item $_).LastWriteTimeUtc } -Descending |
+            Select-Object -First 8)
+    }
+    foreach ($path in $paths) {
+        $offset = if ($request.EventPath -eq $path) {
+            [long]$request.EventOffset
+        } elseif ($request.Offsets.ContainsKey($path)) {
+            [long]$request.Offsets[$path]
+        } else { [long]0 }
+        $chunk = Read-VoiceEventChunk $path $offset
+        if (-not $request.EventPath) { $request.Offsets[$path] = $chunk.Offset }
+        foreach ($evt in $chunk.Events) {
+            if (-not $request.EventPath -and $evt.type -eq 'user.message' -and
+                    ([string]$evt.data.content).Trim() -eq $request.Command.Trim()) {
+                $request.EventPath = $path
+                $request.EventOffset = $chunk.Offset
+            } elseif ($request.EventPath -eq $path -and $evt.type -eq 'assistant.turn_start') {
+                $request.SawTurnStart = $true
+            } elseif ($request.EventPath -eq $path -and $evt.type -eq 'assistant.message') {
+                $text = $evt.data.content
+                if (-not $text) { $text = $evt.data.text }
+                if ($text) { $request.Answer = [string]$text }
+            } elseif ($request.EventPath -eq $path -and $evt.type -eq 'assistant.turn_end') {
+                $request.SawTurnEnd = $true
+            }
+        }
+        if ($request.EventPath -eq $path) {
+            $request.EventOffset = $chunk.Offset
+        }
+    }
+}
+
+function Complete-VoiceUiRequest {
+    Read-VoiceUiRequest
+    $request = $script:VoiceUiRequest
+    if (-not $request) { return }
+    if (([datetime]::UtcNow - $request.StartedUtc).TotalSeconds -gt 600) {
+        Write-VoiceUiResponse $request.Id '' 'Timed out waiting for Scout.'
+        Clear-VoiceUiRequest
+        return
+    }
+    if (-not $request.Submitted) {
+        Submit-VoiceUiRequest
+        return
+    }
+    Read-VoiceUiEvents
+    # Session events continue while Scout is minimized or behind another app.
+    # Use the authoritative turn boundary instead of an on-screen Send button.
+    if ($request.Answer -and $request.SawTurnStart -and $request.SawTurnEnd) {
+        Write-VoiceUiResponse $request.Id $request.Answer ''
+        Clear-VoiceUiRequest
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -2402,6 +2698,11 @@ function Focus-AgentSessionByDir([string]$dir) {
             </Path.Style>
           </Path>
         </Button>
+        <Button x:Name="VoiceToggleBtn" Content="MIC" DockPanel.Dock="Right"
+                Width="38" Height="24" Margin="0,0,2,0"
+                Background="Transparent" Foreground="#FF9AA6BE" BorderThickness="0"
+                FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Top"
+                Cursor="Hand" ToolTip="Enable voice control"/>
 
         <StackPanel x:Name="HeaderArea" VerticalAlignment="Center" Background="Transparent" Cursor="Hand" ToolTip="Open">
           <DockPanel LastChildFill="True">
@@ -2435,6 +2736,25 @@ function Focus-AgentSessionByDir([string]$dir) {
            and a chevron that opens it. -->
       <Border x:Name="SessionsPanel" Margin="0,10,0,0" Padding="10,8" CornerRadius="9" Background="#FF232838" Visibility="Collapsed">
         <StackPanel x:Name="SessionsList"/>
+      </Border>
+
+      <Border x:Name="VoicePanel" Margin="0,10,0,0" Padding="10,9" CornerRadius="9"
+              Background="#FF2A2030" BorderBrush="#FFFD8EA1" BorderThickness="1"
+              Visibility="Collapsed">
+        <StackPanel>
+          <DockPanel>
+            <Ellipse Width="9" Height="9" Fill="#FFFD8EA1" Margin="0,0,8,0"
+                     VerticalAlignment="Center" DockPanel.Dock="Left"/>
+            <TextBlock x:Name="VoiceStatus" Text="Listening" Foreground="#FFFFD7DF"
+                       FontWeight="SemiBold" FontSize="12.5"/>
+          </DockPanel>
+          <TextBlock x:Name="VoiceCommand" Margin="17,6,0,0" Foreground="#FFE6EAF2"
+                     FontSize="11.5" TextWrapping="Wrap" MaxHeight="48"
+                     TextTrimming="CharacterEllipsis"/>
+          <TextBlock x:Name="VoiceAnswer" Margin="17,5,0,0" Foreground="#FFB9C2D6"
+                     FontSize="11" TextWrapping="Wrap" MaxHeight="64"
+                     TextTrimming="CharacterEllipsis"/>
+        </StackPanel>
       </Border>
 
       <!-- The detailed step list, shown under the single-session row. It carries
@@ -2506,6 +2826,10 @@ $StepsPanel   = $Window.FindName('StepsPanel')
 $StepsText    = $Window.FindName('StepsText')
 $SessionsPanel = $Window.FindName('SessionsPanel')
 $SessionsList  = $Window.FindName('SessionsList')
+$VoicePanel    = $Window.FindName('VoicePanel')
+$VoiceStatus   = $Window.FindName('VoiceStatus')
+$VoiceCommand  = $Window.FindName('VoiceCommand')
+$VoiceAnswer   = $Window.FindName('VoiceAnswer')
 $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
 $PermSummary  = $Window.FindName('PermSummary')
@@ -2521,6 +2845,7 @@ $AnswerBtn    = $Window.FindName('AnswerBtn')
 $HeaderArea   = $Window.FindName('HeaderArea')
 $CloseBtn     = $Window.FindName('CloseBtn')
 $SettingsBtn  = $Window.FindName('SettingsBtn')
+$VoiceToggleBtn = $Window.FindName('VoiceToggleBtn')
 $BodyT        = $Window.FindName('BodyT')
 $BodyS        = $Window.FindName('BodyS')
 $BodyR        = $Window.FindName('BodyR')
@@ -2545,6 +2870,7 @@ $Theme = @{
     # an approval can be answered from the toast, a question cannot, so telling
     # them apart from across the room decides whether you have to walk over.
     AskBg         = B '#FF5CC8F5'; AskBorder     = B '#FF0E7FB8'; AskHeader     = B '#FF06263A'
+    VoiceBg       = B '#FF241C2A'; VoiceBorder   = B '#FFFD8EA1'; VoiceHeader   = B '#FFFFE8ED'
     PermBgNormal  = B '#FF2A2030'; PermBdNormal  = B '#FFB4843C'; PermTxtNormal = B '#FFD6CFC2'
     PermBgAlert   = B '#FFFFFFFF'; PermBdAlert   = B '#FFFF7A00'; PermTxtAlert  = B '#FF3A2E10'
     PermBgAsk     = B '#FFFFFFFF'; PermBdAsk     = B '#FF0E7FB8'; PermTxtAsk    = B '#FF10303F'
@@ -2553,7 +2879,15 @@ $script:ThemeState = $null
 
 # state: 'alert' (approval), 'ask' (question), 'working' (busy), 'idle' (default/dim)
 function Set-Theme([string]$state) {
-    if ($state -eq 'alert') {
+    if ($state -eq 'voice') {
+        $RootBorder.Background  = $Theme.VoiceBg
+        $RootBorder.BorderBrush = $Theme.VoiceBorder
+        $RootBorder.BorderThickness = 2
+        $HeaderText.Foreground  = $Theme.VoiceHeader
+        $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(253, 142, 161)
+        $RootGlow.BlurRadius    = 25
+        $RootGlow.Opacity       = 0.72
+    } elseif ($state -eq 'alert') {
         $RootBorder.Background  = $Theme.AlertBg
         $RootBorder.BorderBrush = $Theme.AlertBorder
         $RootBorder.BorderThickness = 2
@@ -2777,14 +3111,199 @@ $script:VisibilityReconciled = $false
 # about to start, so the greeting covers the moment the app becomes usable
 # rather than the moment the script began parsing.
 $script:GreetUntil = [datetime]::MinValue
+$script:VoiceState = $null
+$script:VoiceWasActive = $false
+$script:VoiceProcess = $null
+$script:VoiceEnabled = $false
+$script:VoiceActivationUntil = [datetime]::MinValue
+$script:VoiceStatePath = Join-Path $env:TEMP "scout-companion-voice-$PID.json"
+$script:VoiceStopPath = Join-Path $env:TEMP "scout-companion-voice-$PID.stop"
+$script:VoiceRequestPath = Join-Path $env:TEMP "scout-companion-voice-$PID.request.json"
+$script:VoiceResponsePath = Join-Path $env:TEMP "scout-companion-voice-$PID.response.json"
+$script:VoiceUiRequest = $null
+$script:VoiceLastRequestId = $null
+$script:VoiceRuntimeDir = if ($Config.voiceRuntimeDir) {
+    [Environment]::ExpandEnvironmentVariables([string]$Config.voiceRuntimeDir)
+} else {
+    Join-Path $env:LOCALAPPDATA 'ScoutVoiceAssistant'
+}
+
+function Start-VoiceBridge {
+    if ($script:VoiceProcess) {
+        try {
+            $script:VoiceProcess.Refresh()
+            if (-not $script:VoiceProcess.HasExited) { return $true }
+        } catch { }
+    }
+    $python = Join-Path $script:VoiceRuntimeDir '.venv\Scripts\pythonw.exe'
+    $voiceProfile = Join-Path $script:VoiceRuntimeDir 'voice-profile.dat'
+    $bridge = Join-Path $ScriptDir 'voice\companion_voice_host.py'
+    if (-not (Test-Path $python) -or -not (Test-Path $voiceProfile) -or -not (Test-Path $bridge)) {
+        Write-CompanionLog "voice unavailable: runtime, profile, or bridge is missing"
+        return $false
+    }
+    Remove-Item $script:VoiceStatePath -Force -ErrorAction SilentlyContinue
+    Remove-Item $script:VoiceStopPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $script:VoiceRequestPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $script:VoiceResponsePath -Force -ErrorAction SilentlyContinue
+    $arguments = @(
+        "`"$bridge`"",
+        '--runtime-dir', "`"$script:VoiceRuntimeDir`"",
+        '--state-file', "`"$script:VoiceStatePath`"",
+        '--stop-file', "`"$script:VoiceStopPath`"",
+        '--request-file', "`"$script:VoiceRequestPath`"",
+        '--response-file', "`"$script:VoiceResponsePath`"",
+        '--reply-enabled', $(if ([bool]$Config.voiceReplyEnabled) { 'true' } else { 'false' }),
+        '--wake-sensitivity', ([int]$Config.voiceWakeSensitivity),
+        '--noise-sensitivity', ([int]$Config.voiceNoiseSensitivity),
+        '--parent-pid', "$PID"
+    )
+    try {
+        $script:VoiceProcess = Start-Process $python -ArgumentList $arguments `
+            -WorkingDirectory $script:VoiceRuntimeDir -WindowStyle Hidden -PassThru
+        $script:VoiceEnabled = $true
+        $script:VoiceActivationUntil = [datetime]::UtcNow.AddSeconds(5)
+        Write-CompanionLog "voice bridge started pid=$($script:VoiceProcess.Id)"
+        return $true
+    } catch {
+        Write-CompanionLog "voice bridge failed to start: $_"
+        $script:VoiceEnabled = $false
+        return $false
+    }
+}
+
+function Stop-OwnedProcessTree([int]$RootId) {
+    try { $all = @(Get-CimInstance Win32_Process -ErrorAction Stop) }
+    catch { $all = @() }
+    $pending = @($RootId)
+    $owned = New-Object System.Collections.Generic.List[int]
+    while ($pending.Count) {
+        $parent = $pending[0]
+        $pending = @($pending | Select-Object -Skip 1)
+        foreach ($child in @($all | Where-Object { $_.ParentProcessId -eq $parent })) {
+            [void]$owned.Add([int]$child.ProcessId)
+            $pending += [int]$child.ProcessId
+        }
+    }
+    $ids = $owned.ToArray()
+    [array]::Reverse($ids)
+    foreach ($id in $ids) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+    Stop-Process -Id $RootId -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-VoiceBridge {
+    $p = $script:VoiceProcess
+    if ($p) {
+        $rootId = $p.Id
+        try {
+            if (-not $p.HasExited) {
+                Set-Content -Path $script:VoiceStopPath -Value 'stop' -Encoding Ascii
+                [void]$p.WaitForExit(1000)
+            }
+        } catch { }
+        # Windows does not cascade process termination. Clean descendants even
+        # after a graceful host exit so a TTS player cannot keep speaking.
+        Stop-OwnedProcessTree $rootId
+    }
+    Remove-Item $script:VoiceStatePath -Force -ErrorAction SilentlyContinue
+    Remove-Item ($script:VoiceStatePath + '.tmp') -Force -ErrorAction SilentlyContinue
+    Remove-Item $script:VoiceStopPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $script:VoiceRequestPath -Force -ErrorAction SilentlyContinue
+    Remove-Item ($script:VoiceRequestPath + '.tmp') -Force -ErrorAction SilentlyContinue
+    Remove-Item $script:VoiceResponsePath -Force -ErrorAction SilentlyContinue
+    Remove-Item ($script:VoiceResponsePath + '.tmp') -Force -ErrorAction SilentlyContinue
+    $script:VoiceProcess = $null
+    $script:VoiceState = $null
+    $script:VoiceUiRequest = $null
+    $script:VoiceEnabled = $false
+    $script:VoiceActivationUntil = [datetime]::MinValue
+}
+
+function Read-VoiceState {
+    if ($script:VoiceProcess) {
+        try {
+            $script:VoiceProcess.Refresh()
+            if ($script:VoiceProcess.HasExited) {
+                $script:VoiceProcess = $null
+                $script:VoiceEnabled = $false
+            }
+        } catch { }
+    }
+    if (-not (Test-Path $script:VoiceStatePath)) {
+        $script:VoiceState = $null
+        return
+    }
+    try {
+        $script:VoiceState = Get-Content $script:VoiceStatePath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+    } catch { }
+}
+
+function Sync-VoiceControls {
+    $on = [bool]$script:VoiceEnabled
+    if ($VoiceToggleBtn) {
+        $VoiceToggleBtn.Content = if ($on) { 'MIC ON' } else { 'MIC' }
+        $VoiceToggleBtn.Foreground = if ($on) { '#FFFFD7DF' } else { '#FF9AA6BE' }
+        $VoiceToggleBtn.ToolTip = if ($on) { 'Disable voice control' } else { 'Enable voice control' }
+    }
+    if ($MenuVoice) {
+        $MenuVoice.Text = if ($on) { 'Disable voice control' } else { 'Enable voice control' }
+        $MenuVoice.Checked = $on
+    }
+}
+
+function Set-VoiceCommandEnabled([bool]$on, [switch]$Persist) {
+    $Config.voiceCommandEnabled = $on
+    if ($Persist) {
+        [void](Save-Setting @{ voiceCommandEnabled = $on })
+    }
+    if ($on) {
+        if (-not (Start-VoiceBridge)) {
+            [System.Windows.Forms.MessageBox]::Show(
+                'The prepared Scout Voice runtime or voice profile was not found.',
+                'Scout Companion',
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            ) | Out-Null
+        } else {
+            $script:Hidden = $false
+        }
+    } else {
+        Stop-VoiceBridge
+    }
+    Sync-VoiceControls
+}
+
+function Set-VoiceReplyEnabled([bool]$on, [switch]$Persist) {
+    $Config.voiceReplyEnabled = $on
+    if ($Persist) {
+        [void](Save-Setting @{ voiceReplyEnabled = $on })
+    }
+    if ($script:VoiceEnabled) {
+        Stop-VoiceBridge
+        if ([bool]$Config.voiceCommandEnabled) { [void](Start-VoiceBridge) }
+    }
+    Sync-VoiceControls
+}
+
+function Toggle-VoiceControl {
+    if ($script:VoiceEnabled) {
+        Set-VoiceCommandEnabled $false -Persist
+    } else {
+        Set-VoiceCommandEnabled $true -Persist
+    }
+}
 
 # The whole visibility policy, in one place and with no side effects, so the
 # ordering of the rules is reviewable and testable rather than buried in the
 # poll loop. Order matters and is the point:
 #   1. anything waiting on the user is worth showing,
-#   2. otherwise show only while the agent is working out of sight,
-#   3. a dismissal suppresses both of those,
-#   4. an explicit pin overrides everything, including the dismissal.
+#   2. a minimized agent always leaves the companion visible,
+#   3. otherwise show only while the agent is working out of sight,
+#   4. a dismissal suppresses all automatic display rules,
+#   5. an explicit pin overrides everything, including the dismissal.
 function Get-ShouldShow {
     param(
         [bool]$HasPending, [bool]$HasAsk, [bool]$IsActive,
@@ -2797,6 +3316,7 @@ function Get-ShouldShow {
     # only has to survive the rule that would otherwise hide it at startup, and
     # closing the toast has to still mean closed.
     elseif ($Greeting) { $show = $true }
+    elseif ($AgentRunning -and $IsMinimized) { $show = $true }
     elseif ($IsActive -and $AgentRunning -and ($IsMinimized -or -not $IsForeground)) { $show = $true }
     if ($Hidden) { $show = $false }
     if ($Pinned) { $show = $true }
@@ -2827,6 +3347,7 @@ $HeaderArea.Add_MouseLeftButtonDown({ $args[1].Handled = $true; Focus-AgentSessi
 $AnswerBtn.Add_Click({ Focus-AgentSession })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $script:Pinned = $false; $Window.Hide() })
 $SettingsBtn.Add_Click({ Show-SettingsWindow })
+$VoiceToggleBtn.Add_Click({ Toggle-VoiceControl })
 
 # ---------------------------------------------------------------------------
 # Mascots.
@@ -3473,6 +3994,10 @@ function Stop-Companion {
     # From the outside that looks exactly like "settings don't save".
     try { Save-PendingOpacity } catch { }
     try { Save-PendingPosition } catch { }
+    try { Save-PendingVoiceSensitivity } catch { }
+    try { Save-PendingNoiseSensitivity } catch { }
+    try { Stop-VoiceEnrollment } catch { }
+    try { Stop-VoiceBridge } catch { }
     try { $timer.Stop() } catch { }
     try { $anim.Stop() }  catch { }
     try { if ($script:SettingsWindow) { $script:SettingsWindow.Close() } } catch { }
@@ -3535,7 +4060,218 @@ $script:SettingsChatTitleCheck = $null
 $script:SettingsSuppress  = $false
 $script:OpacitySaveTimer  = $null
 $script:OpacityPendingValue = 1.0
+$script:VoiceSensitivityTimer = $null
+$script:VoiceSensitivityPending = $null
+$script:NoiseSensitivityTimer = $null
+$script:NoiseSensitivityPending = $null
+$script:VoiceEnrollmentProcess = $null
+$script:VoiceEnrollmentTimer = $null
+$script:VoiceEnrollmentRestart = $false
+$script:VoicePreparationProcess = $null
+$script:VoicePreparationTimer = $null
 $script:SelfProc          = [System.Diagnostics.Process]::GetCurrentProcess()
+
+function Save-PendingVoiceSensitivity {
+    if (-not $script:VoiceSensitivityTimer -or
+            -not $script:VoiceSensitivityTimer.IsEnabled) { return }
+    $script:VoiceSensitivityTimer.Stop()
+    if ($null -eq $script:VoiceSensitivityPending) { return }
+    $value = [int]$script:VoiceSensitivityPending
+    [void](Save-Setting @{ voiceWakeSensitivity = $value })
+    if ($script:VoiceEnabled) {
+        Stop-VoiceBridge
+        if ([bool]$Config.voiceCommandEnabled) { [void](Start-VoiceBridge) }
+        Sync-VoiceControls
+    }
+}
+
+function Save-PendingNoiseSensitivity {
+    if (-not $script:NoiseSensitivityTimer -or
+            -not $script:NoiseSensitivityTimer.IsEnabled) { return }
+    $script:NoiseSensitivityTimer.Stop()
+    if ($null -eq $script:NoiseSensitivityPending) { return }
+    $value = [int]$script:NoiseSensitivityPending
+    [void](Save-Setting @{ voiceNoiseSensitivity = $value })
+    if ($script:VoiceEnabled) {
+        Stop-VoiceBridge
+        if ([bool]$Config.voiceCommandEnabled) { [void](Start-VoiceBridge) }
+        Sync-VoiceControls
+    }
+}
+
+function Complete-VoiceRuntimePreparation {
+    $process = $script:VoicePreparationProcess
+    if (-not $process) { return }
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) { return }
+    } catch { return }
+    if ($script:VoicePreparationTimer) { $script:VoicePreparationTimer.Stop() }
+    $succeeded = $process.ExitCode -eq 0
+    $script:VoicePreparationProcess = $null
+    if (-not $succeeded) {
+        if ($script:SettingsVoiceEnrollButton) {
+            $script:SettingsVoiceEnrollButton.IsEnabled = $true
+        }
+        if ($script:SettingsVoiceEnrollStatus) {
+            $script:SettingsVoiceEnrollStatus.Text = 'Voice runtime setup failed'
+        }
+        return
+    }
+    Start-VoiceEnrollment
+}
+
+function Start-VoiceRuntimePreparation {
+    if ($script:VoicePreparationProcess) {
+        try {
+            $script:VoicePreparationProcess.Refresh()
+            if (-not $script:VoicePreparationProcess.HasExited) { return }
+        } catch { }
+    }
+    $preparer = Join-Path $ScriptDir 'voice\Prepare-VoiceRuntime.ps1'
+    if (-not (Test-Path $preparer)) {
+        if ($script:SettingsVoiceEnrollStatus) {
+            $script:SettingsVoiceEnrollStatus.Text = 'Voice runtime setup is missing'
+        }
+        return
+    }
+    if ($script:SettingsVoiceEnrollButton) {
+        $script:SettingsVoiceEnrollButton.IsEnabled = $false
+    }
+    if ($script:SettingsVoiceEnrollStatus) {
+        $script:SettingsVoiceEnrollStatus.Text = 'Preparing voice runtime...'
+    }
+    try {
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', "`"$preparer`"",
+            '-InstallDir', "`"$script:VoiceRuntimeDir`""
+        )
+        $script:VoicePreparationProcess = Start-Process powershell.exe `
+            -ArgumentList $arguments -WindowStyle Hidden -PassThru
+        if (-not $script:VoicePreparationTimer) {
+            $script:VoicePreparationTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:VoicePreparationTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+            $script:VoicePreparationTimer.Add_Tick({ Complete-VoiceRuntimePreparation })
+        }
+        $script:VoicePreparationTimer.Start()
+    } catch {
+        $script:VoicePreparationProcess = $null
+        if ($script:SettingsVoiceEnrollButton) {
+            $script:SettingsVoiceEnrollButton.IsEnabled = $true
+        }
+        if ($script:SettingsVoiceEnrollStatus) {
+            $script:SettingsVoiceEnrollStatus.Text = 'Could not prepare voice runtime'
+        }
+    }
+}
+
+function Complete-VoiceEnrollment {
+    $process = $script:VoiceEnrollmentProcess
+    if (-not $process) { return }
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) { return }
+    } catch { return }
+
+    if ($script:VoiceEnrollmentTimer) { $script:VoiceEnrollmentTimer.Stop() }
+    $completed = $process.ExitCode -eq 0 -and
+        (Test-Path (Join-Path $script:VoiceRuntimeDir 'voice-profile.dat'))
+    $script:VoiceEnrollmentProcess = $null
+
+    if ($script:SettingsVoiceEnrollButton) {
+        $script:SettingsVoiceEnrollButton.IsEnabled = $true
+    }
+    if ($script:SettingsVoiceEnrollStatus) {
+        $script:SettingsVoiceEnrollStatus.Text = if ($completed) {
+            'Voice profile ready'
+        } else {
+            'Voice setup canceled'
+        }
+    }
+    if ([bool]$Config.voiceCommandEnabled) {
+        [void](Start-VoiceBridge)
+        Sync-VoiceControls
+    }
+    $script:VoiceEnrollmentRestart = $false
+}
+
+function Start-VoiceEnrollment {
+    if ($script:VoiceEnrollmentProcess) {
+        try {
+            $script:VoiceEnrollmentProcess.Refresh()
+            if (-not $script:VoiceEnrollmentProcess.HasExited) { return }
+        } catch { }
+    }
+    $pythonw = Join-Path $script:VoiceRuntimeDir '.venv\Scripts\pythonw.exe'
+    $enrollment = Join-Path $script:VoiceRuntimeDir 'enrollment_gui.py'
+    if (-not (Test-Path $pythonw) -or -not (Test-Path $enrollment)) {
+        Start-VoiceRuntimePreparation
+        return
+    }
+
+    $script:VoiceEnrollmentRestart = [bool]$script:VoiceEnabled
+    if ($script:VoiceEnabled) {
+        Stop-VoiceBridge
+        Sync-VoiceControls
+    }
+    if ($script:SettingsVoiceEnrollButton) {
+        $script:SettingsVoiceEnrollButton.IsEnabled = $false
+    }
+    if ($script:SettingsVoiceEnrollStatus) {
+        $script:SettingsVoiceEnrollStatus.Text = 'Recording 5 phrases...'
+    }
+    try {
+        $script:VoiceEnrollmentProcess = Start-Process $pythonw `
+            -ArgumentList "`"$enrollment`"" `
+            -WorkingDirectory $script:VoiceRuntimeDir -PassThru
+        if (-not $script:VoiceEnrollmentTimer) {
+            $script:VoiceEnrollmentTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:VoiceEnrollmentTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+            $script:VoiceEnrollmentTimer.Add_Tick({ Complete-VoiceEnrollment })
+        }
+        $script:VoiceEnrollmentTimer.Start()
+    } catch {
+        $script:VoiceEnrollmentProcess = $null
+        $script:VoiceEnrollmentRestart = $false
+        if ($script:SettingsVoiceEnrollButton) {
+            $script:SettingsVoiceEnrollButton.IsEnabled = $true
+        }
+        if ($script:SettingsVoiceEnrollStatus) {
+            $script:SettingsVoiceEnrollStatus.Text = 'Could not open voice setup'
+        }
+        if ([bool]$Config.voiceCommandEnabled) {
+            [void](Start-VoiceBridge)
+            Sync-VoiceControls
+        }
+    }
+}
+
+function Stop-VoiceEnrollment {
+    if ($script:VoiceEnrollmentTimer) { $script:VoiceEnrollmentTimer.Stop() }
+    if ($script:VoicePreparationTimer) { $script:VoicePreparationTimer.Stop() }
+    $preparation = $script:VoicePreparationProcess
+    if ($preparation) {
+        try {
+            $preparation.Refresh()
+            if (-not $preparation.HasExited) {
+                Stop-OwnedProcessTree $preparation.Id
+            }
+        } catch { }
+    }
+    $script:VoicePreparationProcess = $null
+    $process = $script:VoiceEnrollmentProcess
+    if ($process) {
+        try {
+            $process.Refresh()
+            if (-not $process.HasExited) {
+                Stop-OwnedProcessTree $process.Id
+            }
+        } catch { }
+    }
+    $script:VoiceEnrollmentProcess = $null
+    $script:VoiceEnrollmentRestart = $false
+}
 
 # Applies the Startup checkbox, and snaps it back if the folder write failed so
 # the control never claims something that did not happen.
@@ -3713,6 +4449,90 @@ function Apply-AutoStartFromUI {
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
+    <TextBlock Style="{StaticResource Section}" Text="&#xC74C;&#xC131;&#xC73C;&#xB85C; &#xC81C;&#xC5B4;"/>
+    <DockPanel LastChildFill="False">
+      <CheckBox x:Name="VoiceCommandCheck"
+                Content="&#xC74C;&#xC131;&#xC73C;&#xB85C; &#xBA85;&#xB839; &#xC2E4;&#xD589;&#xD558;&#xAE30;"
+                DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Listens for Hey Scout and types recognized commands into the current Scout conversation. The choice is saved locally.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
+    <DockPanel LastChildFill="False" Margin="0,10,0,0">
+      <CheckBox x:Name="VoiceReplyCheck"
+                Content="&#xC74C;&#xC131;&#xC73C;&#xB85C; &#xB2F5;&#xBCC0;&#xBC1B;&#xAE30;"
+                DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Reads the final answer from that Scout conversation aloud. The choice is saved locally.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
+    <StackPanel Margin="0,12,0,0">
+      <DockPanel>
+        <TextBlock Text="&quot;&#xD5E4;&#xC774; &#xC2A4;&#xCE74;&#xC6C3;&quot; &#xBD80;&#xB974;&#xAE30; &#xBBFC;&#xAC10;&#xB3C4;"
+                   Foreground="#FF9AA6BE" VerticalAlignment="Center"/>
+        <TextBlock x:Name="VoiceSensitivityValue" Text="65"
+                   Foreground="#FFE6EAF2" VerticalAlignment="Center"
+                   TextAlignment="Right" DockPanel.Dock="Right"/>
+      </DockPanel>
+      <Grid Margin="0,6,0,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock Grid.Column="0" Text="&#xC815;&#xD655;" Foreground="#FF8A93A6"
+                   FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
+        <Slider x:Name="VoiceSensitivitySlider" Grid.Column="1"
+                Minimum="0" Maximum="100" Value="65" TickFrequency="1"
+                IsSnapToTickEnabled="True" SmallChange="1" LargeChange="10"
+                VerticalAlignment="Center" Cursor="Hand"/>
+        <TextBlock Grid.Column="2" Text="&#xC624;&#xCC28;&#xD5C8;&#xC6A9;"
+                   Foreground="#FF8A93A6" FontSize="11"
+                   VerticalAlignment="Center" Margin="8,0,0,0"/>
+      </Grid>
+    </StackPanel>
+    <StackPanel Margin="0,12,0,0">
+      <DockPanel>
+        <TextBlock Text="&#xC18C;&#xC74C; &#xBBFC;&#xAC10;&#xB3C4;"
+                   Foreground="#FF9AA6BE" VerticalAlignment="Center"/>
+        <TextBlock x:Name="NoiseSensitivityValue" Text="35"
+                   Foreground="#FFE6EAF2" VerticalAlignment="Center"
+                   TextAlignment="Right" DockPanel.Dock="Right"/>
+      </DockPanel>
+      <Grid Margin="0,6,0,0">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBlock Grid.Column="0" Text="&#xC18C;&#xC74C; &#xCC28;&#xB2E8;"
+                   Foreground="#FF8A93A6" FontSize="11"
+                   VerticalAlignment="Center" Margin="0,0,8,0"/>
+        <Slider x:Name="NoiseSensitivitySlider" Grid.Column="1"
+                Minimum="0" Maximum="100" Value="35" TickFrequency="1"
+                IsSnapToTickEnabled="True" SmallChange="1" LargeChange="10"
+                VerticalAlignment="Center" Cursor="Hand"/>
+        <TextBlock Grid.Column="2" Text="&#xC791;&#xC740; &#xC18C;&#xB9AC; &#xAC10;&#xC9C0;"
+                   Foreground="#FF8A93A6" FontSize="11"
+                   VerticalAlignment="Center" Margin="8,0,0,0"/>
+      </Grid>
+    </StackPanel>
+    <DockPanel Margin="0,12,0,0">
+      <Button x:Name="VoiceEnrollButton"
+              Content="&quot;&#xD5E4;&#xC774; &#xC2A4;&#xCE74;&#xC6C3;&quot; &#xC74C;&#xC131; &#xC778;&#xC2DD;&#xD558;&#xAE30;"
+              MinWidth="190" Height="28" Padding="10,0"
+              Background="#FF2F6FBF" Foreground="#FFFFFFFF"
+              BorderThickness="0" Cursor="Hand" DockPanel.Dock="Left"/>
+      <TextBlock x:Name="VoiceEnrollStatus" Text=""
+                 Foreground="#FF9AA6BE" FontSize="11"
+                 Margin="10,0,0,0" VerticalAlignment="Center"
+                 TextTrimming="CharacterEllipsis"/>
+    </DockPanel>
+
+    <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
+
     <TextBlock Style="{StaticResource Section}" Text="APPEARANCE"/>
     <DockPanel LastChildFill="False">
       <CheckBox x:Name="AnimCheck" Content="Animate the mascot" DockPanel.Dock="Left" VerticalAlignment="Center"/>
@@ -3876,6 +4696,14 @@ function Show-SettingsWindow {
     $script:SettingsAutoHint  = $sw.FindName('AutoStartHint')
     $script:SettingsAnimCheck = $sw.FindName('AnimCheck')
     $script:SettingsChatTitleCheck = $sw.FindName('ChatTitleCheck')
+    $script:SettingsVoiceCommand = $sw.FindName('VoiceCommandCheck')
+    $script:SettingsVoiceReply = $sw.FindName('VoiceReplyCheck')
+    $script:SettingsVoiceSensitivity = $sw.FindName('VoiceSensitivitySlider')
+    $script:SettingsVoiceSensitivityText = $sw.FindName('VoiceSensitivityValue')
+    $script:SettingsNoiseSensitivity = $sw.FindName('NoiseSensitivitySlider')
+    $script:SettingsNoiseSensitivityText = $sw.FindName('NoiseSensitivityValue')
+    $script:SettingsVoiceEnrollButton = $sw.FindName('VoiceEnrollButton')
+    $script:SettingsVoiceEnrollStatus = $sw.FindName('VoiceEnrollStatus')
     $script:SettingsMemText   = $sw.FindName('MemText')
     $script:SettingsCpuText   = $sw.FindName('CpuText')
     $script:SettingsUpText    = $sw.FindName('UpText')
@@ -3906,6 +4734,29 @@ function Show-SettingsWindow {
     }
     $script:SettingsAnimCheck.IsChecked = $script:AnimEnabled
     $script:SettingsChatTitleCheck.IsChecked = [bool]$Config.showChatTitle
+    $script:SettingsVoiceCommand.IsChecked = [bool]$Config.voiceCommandEnabled
+    $script:SettingsVoiceReply.IsChecked = [bool]$Config.voiceReplyEnabled
+    $sensitivity = [Math]::Max(0, [Math]::Min(100, [int]$Config.voiceWakeSensitivity))
+    $script:SettingsVoiceSensitivity.Value = $sensitivity
+    $script:SettingsVoiceSensitivityText.Text = [string]$sensitivity
+    $noiseSensitivity = [Math]::Max(0, [Math]::Min(100, [int]$Config.voiceNoiseSensitivity))
+    $script:SettingsNoiseSensitivity.Value = $noiseSensitivity
+    $script:SettingsNoiseSensitivityText.Text = [string]$noiseSensitivity
+    $voiceProfilePath = Join-Path $script:VoiceRuntimeDir 'voice-profile.dat'
+    $script:SettingsVoiceEnrollStatus.Text = if (Test-Path $voiceProfilePath) {
+        'Voice profile ready'
+    } else {
+        'Voice profile required'
+    }
+    if ($script:VoiceEnrollmentProcess) {
+        try {
+            $script:VoiceEnrollmentProcess.Refresh()
+            if (-not $script:VoiceEnrollmentProcess.HasExited) {
+                $script:SettingsVoiceEnrollButton.IsEnabled = $false
+                $script:SettingsVoiceEnrollStatus.Text = 'Recording 5 phrases...'
+            }
+        } catch { }
+    }
 
     # Updates. Primed under suppression: with Checked/Unchecked handlers, simply
     # setting IsChecked fires them, and opening the window would write config.
@@ -4063,6 +4914,46 @@ function Show-SettingsWindow {
     $script:SettingsChatTitleCheck.Add_Unchecked({
         if (-not $script:SettingsSuppress) { Set-ShowChatTitle $false }
     })
+    $onVoiceCommand = {
+        if ($script:SettingsSuppress) { return }
+        $on = [bool]$script:SettingsVoiceCommand.IsChecked
+        Set-VoiceCommandEnabled $on -Persist
+    }
+    $script:SettingsVoiceCommand.Add_Checked($onVoiceCommand)
+    $script:SettingsVoiceCommand.Add_Unchecked($onVoiceCommand)
+    $onVoiceReply = {
+        if ($script:SettingsSuppress) { return }
+        Set-VoiceReplyEnabled ([bool]$script:SettingsVoiceReply.IsChecked) -Persist
+    }
+    $script:SettingsVoiceReply.Add_Checked($onVoiceReply)
+    $script:SettingsVoiceReply.Add_Unchecked($onVoiceReply)
+    $script:SettingsVoiceSensitivity.Add_ValueChanged({
+        $value = [int]$script:SettingsVoiceSensitivity.Value
+        $script:SettingsVoiceSensitivityText.Text = [string]$value
+        $Config.voiceWakeSensitivity = $value
+        $script:VoiceSensitivityPending = $value
+        if (-not $script:VoiceSensitivityTimer) {
+            $script:VoiceSensitivityTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:VoiceSensitivityTimer.Interval = [TimeSpan]::FromMilliseconds(700)
+            $script:VoiceSensitivityTimer.Add_Tick({ Save-PendingVoiceSensitivity })
+        }
+        $script:VoiceSensitivityTimer.Stop()
+        $script:VoiceSensitivityTimer.Start()
+    })
+    $script:SettingsNoiseSensitivity.Add_ValueChanged({
+        $value = [int]$script:SettingsNoiseSensitivity.Value
+        $script:SettingsNoiseSensitivityText.Text = [string]$value
+        $Config.voiceNoiseSensitivity = $value
+        $script:NoiseSensitivityPending = $value
+        if (-not $script:NoiseSensitivityTimer) {
+            $script:NoiseSensitivityTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:NoiseSensitivityTimer.Interval = [TimeSpan]::FromMilliseconds(700)
+            $script:NoiseSensitivityTimer.Add_Tick({ Save-PendingNoiseSensitivity })
+        }
+        $script:NoiseSensitivityTimer.Stop()
+        $script:NoiseSensitivityTimer.Start()
+    })
+    $script:SettingsVoiceEnrollButton.Add_Click({ Start-VoiceEnrollment })
 
     # Live resource readout, refreshed only while this window is open.
     $script:SettingsLastCpu = $script:SelfProc.TotalProcessorTime
@@ -4107,6 +4998,8 @@ function Show-SettingsWindow {
         # settings window right after moving the slider otherwise dropped it.
         try { Save-PendingOpacity } catch { }
         try { Save-PendingPosition } catch { }
+        try { Save-PendingVoiceSensitivity } catch { }
+        try { Save-PendingNoiseSensitivity } catch { }
         try { $script:SettingsResTimer.Stop() } catch { }
         $script:SettingsWindow    = $null
         $script:SettingsAnimCheck = $null
@@ -4380,11 +5273,13 @@ function Install-CompanionUpdate {
 }
 
 $MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Open Scout')
+$MenuVoice = New-Object System.Windows.Forms.ToolStripMenuItem 'Enable voice control'
 $MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Pause animation')
 $MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Settings...')
 $MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Exit')
 $MenuPause.CheckOnClick = $true
 $MenuPause.Checked = -not $script:AnimEnabled
+$MenuVoice.CheckOnClick = $false
 
 $MenuShow.Add_Click({
     # A pin, not a nudge. "Show" has to work even when nothing is happening --
@@ -4401,6 +5296,7 @@ $MenuShow.Add_Click({
     }
 })
 $MenuOpen.Add_Click({ Focus-AgentSession })
+$MenuVoice.Add_Click({ Toggle-VoiceControl })
 $MenuPause.Add_Click({
     # CheckOnClick has already flipped Checked by the time this runs.
     Sync-AnimationEnabled (-not $MenuPause.Checked) -Persist
@@ -4427,6 +5323,7 @@ $MenuCheck.Add_Click({
 $TrayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 [void]$TrayMenu.Items.Add($MenuShow)
 [void]$TrayMenu.Items.Add($MenuOpen)
+[void]$TrayMenu.Items.Add($MenuVoice)
 [void]$TrayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 [void]$TrayMenu.Items.Add($MenuPause)
 [void]$TrayMenu.Items.Add($MenuSet)
@@ -4986,8 +5883,12 @@ function Render-Steps {
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds([int]$Config.pollIntervalMs)
 $timer.Add_Tick({
+    try { Read-VoiceState } catch { }
     try { Read-NewEvents } catch { }
     try { Merge-SessionState } catch { }
+    try { Complete-VoiceUiRequest } catch {
+        Write-CompanionLog "voice UI request failed: $_"
+    }
     # Both are cheap no-ops nearly every tick: the check is rate-limited to
     # hours, and completion only touches a handle that is usually null.
     try { Update-CheckForRelease } catch { }
@@ -5025,13 +5926,18 @@ $timer.Add_Tick({
 
     $hasPending = $State.PendingPerms.Count -gt 0
     $hasAsk     = $State.PendingAsks.Count -gt 0
+    $voiceActive = [bool]($script:VoiceState -and $script:VoiceState.active)
+    $voiceVisible = $voiceActive -or (
+        $script:VoiceEnabled -and [datetime]::UtcNow -lt $script:VoiceActivationUntil
+    )
     $ageSec = ([datetime]::UtcNow - $State.LastEventUtc).TotalSeconds
     $running = ($State.Steps | Where-Object { -not $_.Done } | Measure-Object).Count -gt 0
     $isActive = $hasPending -or $hasAsk -or $running -or ($State.TurnActive) -or ($Sessions.Count -gt 0 -and $ageSec -le [double]$Config.activeWindowSeconds)
 
     # A question parks the turn just like an approval does, so neither counts as
     # "busy" - the mascot should be waiting, not typing.
-    $script:Busy = (-not $hasPending) -and (-not $hasAsk) -and ($State.TurnActive -or $running -or ($ageSec -le 6))
+    $voiceBusy = $voiceActive -and $script:VoiceState.stage -in @('processing', 'speaking')
+    $script:Busy = $voiceBusy -or ((-not $hasPending) -and (-not $hasAsk) -and ($State.TurnActive -or $running -or ($ageSec -le 6)))
     $script:Pending = $hasPending
     $script:Asking  = $hasAsk
 
@@ -5039,6 +5945,8 @@ $timer.Add_Tick({
     # new approval or question arrives, or when a fresh working turn begins
     # (idle -> busy edge), so closing it once doesn't mute the companion forever.
     if ($script:Hidden -and ($hasPending -or $hasAsk)) { $script:Hidden = $false }
+    if ($voiceActive -and -not $script:VoiceWasActive) { $script:Hidden = $false }
+    $script:VoiceWasActive = $voiceActive
     if ($script:Hidden -and $script:Busy -and -not $script:PrevBusy) { $script:Hidden = $false }
     $script:PrevBusy = $script:Busy
 
@@ -5046,6 +5954,7 @@ $timer.Add_Tick({
     # change. Approval outranks a question because the toast can act on it.
     $desiredState = if ($hasPending) { 'alert' }
                     elseif ($hasAsk) { 'ask' }
+                    elseif ($voiceVisible) { 'voice' }
                     elseif ($script:Busy -and $agentRunning) { 'working' }
                     else { 'idle' }
     if ($desiredState -ne $script:ThemeState) {
@@ -5058,6 +5967,7 @@ $timer.Add_Tick({
         $detail = switch ($desiredState) {
             'alert'   { T 'Approval needed' }
             'ask'     { T 'Waiting on you' }
+            'voice'   { 'Voice control active' }
             'working' { T 'Scout is working' }
             default   { if ($agentRunning) { T 'Idle' } else { T 'Agent not detected' } }
         }
@@ -5069,6 +5979,7 @@ $timer.Add_Tick({
     # header still admits how much is queued behind it.
     $extra = Get-QueueSuffix ($State.PendingPerms.Count + $State.PendingAsks.Count)
     if ($hasPending) {
+        $VoicePanel.Visibility = 'Collapsed'
         $first = $State.PendingPerms[ @($State.PendingPerms.Keys)[0] ]
         $HeaderText.Text = (T 'Approval needed') + $extra
         $PermTitle.Text  = [char]0x26A0 + ' ' + (T 'Permission requested')
@@ -5087,6 +5998,7 @@ $timer.Add_Tick({
         Hide-ActivityPanels
     }
     elseif ($hasAsk) {
+        $VoicePanel.Visibility = 'Collapsed'
         $first = $State.PendingAsks[ @($State.PendingAsks.Keys)[0] ]
         $HeaderText.Text = (T 'Waiting on you') + $extra
         $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question')
@@ -5108,7 +6020,28 @@ $timer.Add_Tick({
         $SayingText.Visibility = 'Collapsed'
         Hide-ActivityPanels
     }
+    elseif ($voiceVisible) {
+        $PermPanel.Visibility = 'Collapsed'
+        $HeaderText.Text = 'Scout Voice'
+        $HeaderFrom.Visibility = 'Collapsed'
+        $SayingText.Visibility = 'Collapsed'
+        $ElapsedText.Visibility = 'Collapsed'
+        Hide-ActivityPanels
+        $VoiceStatus.Text = if ($script:VoiceState) {
+            [string]$script:VoiceState.status
+        } else {
+            'Preparing the voice engine'
+        }
+        $command = if ($script:VoiceState) { [string]$script:VoiceState.command } else { '' }
+        $answer = if ($script:VoiceState) { [string]$script:VoiceState.answer } else { '' }
+        $VoiceCommand.Text = if ($command) { "You  $command" } else { 'Say a command...' }
+        $VoiceAnswer.Text = if ($answer) { "Scout  $answer" } else { '' }
+        $VoiceAnswer.Visibility = if ($answer) { 'Visible' } else { 'Collapsed' }
+        $VoicePanel.Visibility = 'Visible'
+        $Dot.Fill = '#FFFD8EA1'
+    }
     else {
+        $VoicePanel.Visibility = 'Collapsed'
         $PermPanel.Visibility = 'Collapsed'
         $many = $Sessions.Count -gt 1
         if (-not $agentRunning) { $HeaderText.Text = T 'Agent not detected'; $Dot.Fill = '#FF8A93A6' }
@@ -5167,6 +6100,7 @@ $timer.Add_Tick({
         -IsActive $isActive -AgentRunning $agentRunning -IsMinimized $isMinimized `
         -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned `
         -Greeting $greeting
+    if ($voiceVisible) { $shouldShow = $true }
 
     # A long turn just finished. Worth saying only when it is not already on
     # screen: a balloon telling you what the visible toast is telling you is
@@ -5229,6 +6163,8 @@ Merge-SessionState
 # Draw the configured mascot. This has to run after the mascot functions are
 # defined, so it deliberately lives here rather than next to Set-Theme.
 Set-Mascot ([string]$Config.mascot)
+if ([bool]$Config.voiceCommandEnabled) { [void](Start-VoiceBridge) }
+Sync-VoiceControls
 
 # Say hello, so launching the companion has a visible result. Armed here rather
 # than at the top of the script: everything above this line is setup, and a
@@ -5249,6 +6185,10 @@ $Window.Add_Closed({
     # opacity write has to survive that.
     try { Save-PendingOpacity } catch { }
     try { Save-PendingPosition } catch { }
+    try { Save-PendingVoiceSensitivity } catch { }
+    try { Save-PendingNoiseSensitivity } catch { }
+    try { Stop-VoiceEnrollment } catch { }
+    try { Stop-VoiceBridge } catch { }
     try { $Tray.Visible = $false; $Tray.Dispose() } catch { }
     try { if ($script:InstanceMutex) { $script:InstanceMutex.ReleaseMutex(); $script:InstanceMutex.Dispose(); $script:InstanceMutex = $null } } catch { }
     try { if ($script:ShowRequest) { $script:ShowRequest.Dispose(); $script:ShowRequest = $null } } catch { }
@@ -5258,5 +6198,3 @@ $app = New-Object System.Windows.Application
 # the tray is free to come and go without taking the companion down with it.
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnMainWindowClose
 $app.Run($Window) | Out-Null
-
-
