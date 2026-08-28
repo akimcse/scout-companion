@@ -57,6 +57,13 @@ jobs:
           $subject = git log -1 --pretty=%s
           ./Bump-Version.ps1 -Subject $subject
 
+          # Capture the body now, while HEAD is still the merge commit. The
+          # publish step runs after the version has been committed and rebased,
+          # so by then HEAD is the bot's own commit and its body is empty -
+          # which is exactly how v0.8.3 came out with no notes. A file also
+          # keeps this text out of step outputs, and so out of any script.
+          git log -1 --pretty=%b | Out-File notes-body.md -Encoding utf8
+
       - name: Run the tests
         if: steps.bump.outputs.bumped == 'true'
         shell: pwsh
@@ -111,9 +118,11 @@ jobs:
           # when the work was done. Anything better has to be written by hand,
           # and notes nobody edits beat notes nobody writes.
           #
-          # Read with git for the same reason as the subject above: it is text a
-          # fork controls, and it must not become part of this script.
-          $body = (git log -1 --pretty=%b | Out-String).Trim()
+          # Read from the file captured before the version was committed: by now
+          # HEAD is the bot's commit, whose body is empty. Reading it from a
+          # file rather than an Actions expression also keeps text a fork
+          # controls out of this script.
+          $body = if (Test-Path notes-body.md) { (Get-Content notes-body.md -Raw).Trim() } else { '' }
           $install = 'irm https://raw.githubusercontent.com/${{ github.repository }}/main/web-install.ps1 | iex'
           $fence = '```'
           $notes = @"
