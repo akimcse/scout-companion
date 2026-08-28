@@ -97,7 +97,7 @@ try {
     # the behaviour, and the convention the behaviour depends on.
     # ------------------------------------------------------------------
     Write-Host "`nthe update checkboxes answer to more than a mouse"
-    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'NotifyFinishChk')) {
+    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'NotifyFinishChk', 'RememberPosCheck')) {
         $cb = $w.FindName($n)
         if (-not $cb) {
             $script:Fail++; Write-Host ("  FAIL missing control {0}" -f $n); continue
@@ -125,7 +125,7 @@ try {
     # both use Checked/Unchecked; a control that quietly used Click instead
     # would behave differently for reasons no reader could see.
     Write-Host "`nand are wired the same way as the rest of the window"
-    foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk', 'SettingsNotifyChk')) {
+    foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk', 'SettingsNotifyChk', 'SettingsRememberPos')) {
         $usesToggle = $text -match [regex]::Escape("`$script:$n.Add_Checked")
         $usesClick  = $text -match [regex]::Escape("`$script:$n.Add_Click")
         Check "$n subscribes to Checked"   ([int][bool]$usesToggle) 1
@@ -216,6 +216,28 @@ try {
     # child, so a header docked last would take the width and leave none for it.
     $ed = @($tx.SelectNodes('//*') | Where-Object { $_.GetAttribute('x:Name') -eq 'ElapsedText' } | ForEach-Object { $_.GetAttribute('DockPanel.Dock') })
     Check 'and is docked right'  ([int]($ed -contains 'Right')) 1
+
+    # ------------------------------------------------------------------
+    # The toast has to stay where it is put.
+    #
+    # It is SizeToContent, and the size handler re-ran the corner placement
+    # unconditionally - so every step line, session row and approval card
+    # dragged a moved toast back to the bottom right. The guard is that the
+    # corner placement only applies while nothing has been remembered.
+    # ------------------------------------------------------------------
+    Write-Host "`nthe toast stays where it is put"
+    Check 'the position can be remembered' ([int][bool]($text -match 'rememberPosition\s+= \$true')) 1
+    Check 'and there is a control for it'  ([int][bool]($w.FindName('RememberPosCheck'))) 1
+    # The fault itself: SizeChanged must not re-place a toast that was moved.
+    Check 'resizing does not move it back' ([int][bool]($text -match '(?s)Add_SizeChanged\(\{.*?if \(\$script:SavedPosition\) \{ return \}')) 1
+    # Writes are coalesced, and a drag ending just before exit must not be lost.
+    Check 'the write is debounced'         ([int][bool]($text -match 'PositionTimer')) 1
+    Check 'and flushed on the way out'     ([int](([regex]::Matches($text, 'Save-PendingPosition')).Count -ge 4)) 1
+    # A saved position is checked against the screens that exist now, because a
+    # toast placed off-screen cannot be retrieved - it has no taskbar button.
+    Check 'restore is screen-checked'      ([int][bool]($text -match 'Get-RestoredPosition \$script:SavedPosition \(Get-ScreenRects\)')) 1
+    # WinForms reports device pixels, WPF positions in device-independent ones.
+    Check 'and DPI is converted'           ([int][bool]($text -match 'TransformFromDevice')) 1
 
     # Both start collapsed, or the toast would flash a panel on the first frame.
     foreach ($p in @('StepsPanel', 'SessionsPanel')) {

@@ -68,6 +68,13 @@
   "notifyAfterSeconds": 60,
   "_notifyAfterSeconds": "How long a turn has to run before finishing is worth a notification. The median turn is 11 seconds and the 90th percentile 36, so a low value here would fire constantly for work that never left your screen.",
 
+  "rememberPosition": true,
+  "_rememberPosition": "Put the toast back where you last dragged it, instead of the bottom-right corner. The saved position is checked against the screens that exist when it is restored: an undocked laptop, a display switched off, or a changed resolution falls back to the corner rather than opening the toast somewhere you cannot reach it - it has no taskbar button to retrieve it with. Also toggleable from the settings window, where turning it off forgets the position and returns the toast to the corner.",
+
+  "windowLeft": null,
+  "windowTop": null,
+  "_windowPosition": "Where the toast was last left, in device-independent units. Written for you when you drag it; there is no reason to set these by hand. Both must be present or the position is ignored.",
+
   "updateCheck": true,
   "_updateCheck": "Ask GitHub every so often whether there is a newer release, and say so in the tray. The check runs off the UI thread so a slow or unreachable GitHub never stalls the toast, and it fails silently - being offline is not an error worth reporting. Set to false to never look.",
 

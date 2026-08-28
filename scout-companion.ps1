@@ -231,6 +231,14 @@ $Config = [ordered]@{
     # launched something - and Windows files a new tray icon into the hidden
     # overflow flyout. Set to 0 to start silently.
     startupGreetingSeconds = 5
+    # Put the toast back where you last dragged it, rather than in the corner.
+    # The position is checked against the screens that exist at the time: an
+    # undocked laptop or a changed resolution falls back to the corner rather
+    # than restoring the toast somewhere unreachable - it has no taskbar button
+    # to get it back with.
+    rememberPosition    = $true
+    windowLeft          = $null
+    windowTop           = $null
     # Say so when a long turn finishes. Measured over three days of real use: 83
     # turns ran over two minutes and 8 over ten, and while one of those is going
     # you are looking at something else with no way to know it ended.
@@ -2610,13 +2618,148 @@ function Set-Theme([string]$state) {
     $GlowBorder.Background = $RootBorder.Background
 }
 
+# Where the toast should sit, given a remembered position and the screens that
+# actually exist right now.
+#
+# Returns $null when there is nothing usable to restore, and the caller falls
+# back to the bottom-right corner.
+#
+# A remembered position cannot be trusted on sight: the monitor it was on may be
+# gone, the laptop may have been undocked, or the resolution may have changed.
+# Restoring onto a screen that no longer exists puts the toast somewhere nobody
+# can reach it, and it has no taskbar button to get it back with.
+#
+# Pure, so the rules can be tested without a desktop. Rectangles are
+# [pscustomobject] with Left/Top/Right/Bottom.
+function Get-RestoredPosition($saved, $screens, [double]$width, [double]$height) {
+    if (-not $saved) { return $null }
+    if ($null -eq $saved.Left -or $null -eq $saved.Top) { return $null }
+    $l = [double]$saved.Left
+    $t = [double]$saved.Top
+    if ([double]::IsNaN($l) -or [double]::IsNaN($t)) { return $null }
+
+    $all = @($screens)
+    if ($all.Count -eq 0) { return $null }
+
+    # Enough of the title area has to land on a screen to grab it with the
+    # mouse. Checking only the top-left corner would accept a window one pixel
+    # onto the desktop; checking the whole rectangle would reject one hanging
+    # slightly off the bottom, which is harmless and something people do.
+    $need = 80
+    foreach ($s in $all) {
+        $visibleW = [Math]::Min($l + $width, $s.Right) - [Math]::Max($l, $s.Left)
+        $visibleH = [Math]::Min($t + $height, $s.Bottom) - [Math]::Max($t, $s.Top)
+        if ($visibleW -ge $need -and $visibleH -ge 24) {
+            return [pscustomobject]@{ Left = $l; Top = $t }
+        }
+    }
+    return $null
+}
+
 function Place-BottomRight {
     $wa = [System.Windows.SystemParameters]::WorkArea
     $Window.Left = $wa.Right - $Window.ActualWidth - 16
     $Window.Top  = $wa.Bottom - $Window.ActualHeight - 16
 }
-$Window.Add_Loaded({ Place-BottomRight })
-$Window.Add_SizeChanged({ Place-BottomRight })
+
+# The screens as plain rectangles, for Get-RestoredPosition. WinForms reports
+# these in device pixels while WPF positions in device-independent ones, so they
+# have to be scaled or a remembered position is judged against the wrong
+# coordinate space on any display that is not at 100%.
+function Get-ScreenRects {
+    $out = @()
+    try {
+        $src = [System.Windows.PresentationSource]::FromVisual($Window)
+        $sx = 1.0; $sy = 1.0
+        if ($src -and $src.CompositionTarget) {
+            $m = $src.CompositionTarget.TransformFromDevice
+            $sx = $m.M11; $sy = $m.M22
+        }
+        foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+            $b = $s.Bounds
+            $out += [pscustomobject]@{
+                Left   = $b.Left   * $sx
+                Top    = $b.Top    * $sy
+                Right  = $b.Right  * $sx
+                Bottom = $b.Bottom * $sy
+            }
+        }
+    } catch { }
+    return $out
+}
+
+# Put the toast back where it was last left, or in the corner if that position
+# is no longer reachable.
+function Restore-Position {
+    $pos = $null
+    if ($Config.rememberPosition) {
+        $pos = Get-RestoredPosition $script:SavedPosition (Get-ScreenRects) $Window.ActualWidth $Window.ActualHeight
+    }
+    if ($pos) {
+        $Window.Left = $pos.Left
+        $Window.Top  = $pos.Top
+    } else {
+        Place-BottomRight
+    }
+}
+
+# Moving the toast is how the position is chosen, so remember where it was let
+# go of. Coalesced behind a timer like the opacity slider: a drag raises
+# LocationChanged continuously, and writing config.json on every pixel would be
+# both wasteful and a good way to corrupt it.
+$script:SavedPosition   = $null
+# What was in config.json from last time. Loaded rather than assumed, and only
+# when both halves are there - a file with one of the two is not a position.
+if ($null -ne $Config.windowLeft -and $null -ne $Config.windowTop) {
+    try {
+        $script:SavedPosition = [pscustomobject]@{
+            Left = [double]$Config.windowLeft
+            Top  = [double]$Config.windowTop
+        }
+    } catch { }
+}
+$script:PositionTimer   = $null
+$script:SuppressPosSave = $false
+
+function Save-PendingPosition {
+    if (-not $script:PositionTimer) { return }
+    $script:PositionTimer.Stop()
+    if (-not $Config.rememberPosition) { return }
+    $l = $Window.Left; $t = $Window.Top
+    if ([double]::IsNaN($l) -or [double]::IsNaN($t)) { return }
+    $script:SavedPosition = [pscustomobject]@{ Left = $l; Top = $t }
+    [void](Save-Setting @{ windowLeft = [Math]::Round($l); windowTop = [Math]::Round($t) })
+}
+
+$Window.Add_Loaded({
+    # SizeChanged fires during layout before ActualWidth settles, so the first
+    # placement happens here where the size is real.
+    $script:SuppressPosSave = $true
+    try { Restore-Position } finally { $script:SuppressPosSave = $false }
+})
+
+$Window.Add_SizeChanged({
+    # Only re-place a toast that is still in its default corner. Re-placing
+    # unconditionally is what made a moved toast snap back: the window is
+    # SizeToContent, so every step line, session row and approval card changes
+    # its height, and each one dragged it home again.
+    if ($script:SavedPosition) { return }
+    $script:SuppressPosSave = $true
+    try { Place-BottomRight } finally { $script:SuppressPosSave = $false }
+})
+
+$Window.Add_LocationChanged({
+    if ($script:SuppressPosSave) { return }
+    if (-not $Config.rememberPosition) { return }
+    if (-not $script:PositionTimer) {
+        $script:PositionTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:PositionTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+        $script:PositionTimer.Add_Tick({ Save-PendingPosition })
+    }
+    $script:PositionTimer.Stop()
+    $script:PositionTimer.Start()
+})
+
 $Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
 
 $script:Hidden = $false
@@ -3329,6 +3472,7 @@ function Stop-Companion {
     # before quitting was still sitting in that timer and died with the process.
     # From the outside that looks exactly like "settings don't save".
     try { Save-PendingOpacity } catch { }
+    try { Save-PendingPosition } catch { }
     try { $timer.Stop() } catch { }
     try { $anim.Stop() }  catch { }
     try { if ($script:SettingsWindow) { $script:SettingsWindow.Close() } } catch { }
@@ -3601,6 +3745,13 @@ function Apply-AutoStartFromUI {
               SmallChange="0.05" LargeChange="0.05"
               VerticalAlignment="Center" Cursor="Hand"/>
     </DockPanel>
+    <DockPanel LastChildFill="False" Margin="0,12,0,0">
+      <CheckBox x:Name="RememberPosCheck" Content="Remember where I put it" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Drag the toast anywhere and it comes back there, instead of the bottom-right corner. If the screen it was on has gone - undocked, or a display switched off - it returns to the corner rather than opening somewhere you cannot reach it, since it has no taskbar button. Turning this off forgets the saved position.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
@@ -3732,6 +3883,7 @@ function Show-SettingsWindow {
     $script:SettingsAgentTurns = $sw.FindName('AgentTurnsText')
     $script:SettingsAgentSess = $sw.FindName('AgentSessText')
     $script:SettingsNotifyChk = $sw.FindName('NotifyFinishChk')
+    $script:SettingsRememberPos = $sw.FindName('RememberPosCheck')
     $script:SettingsMascot    = $sw.FindName('MascotPicker')
     $script:SettingsOpacity   = $sw.FindName('OpacitySlider')
     $script:SettingsOpacityText = $sw.FindName('OpacityValue')
@@ -3765,8 +3917,37 @@ function Show-SettingsWindow {
         $script:SettingsAutoUpdChk.IsChecked = [bool]$Config.autoUpdate
         $script:SettingsAutoUpdChk.IsEnabled = [bool]$Config.updateCheck
         $script:SettingsNotifyChk.IsChecked  = [bool]$Config.notifyOnFinish
+        $script:SettingsRememberPos.IsChecked = [bool]$Config.rememberPosition
     } finally { $script:SettingsSuppress = $false }
     Sync-UpdateStatusText
+
+    # Checked/Unchecked, matching every other checkbox here.
+    $onRememberPos = {
+        if ($script:SettingsSuppress) { return }
+        $on = [bool]$script:SettingsRememberPos.IsChecked
+        $Config.rememberPosition = $on
+        if ($on) {
+            # Start from where it is now, rather than from a position saved
+            # before the setting was turned off.
+            Save-PendingPosition
+            if (-not $script:SavedPosition) {
+                $script:SavedPosition = [pscustomobject]@{ Left = $Window.Left; Top = $Window.Top }
+                [void](Save-Setting @{ rememberPosition = $on; windowLeft = [Math]::Round($Window.Left); windowTop = [Math]::Round($Window.Top) })
+                return
+            }
+        } else {
+            # Turning it off forgets, and puts the toast back in the corner so
+            # the change is visible rather than taking effect at some later
+            # restart.
+            $script:SavedPosition = $null
+            [void](Save-Setting @{ rememberPosition = $on; windowLeft = $null; windowTop = $null })
+            Place-BottomRight
+            return
+        }
+        [void](Save-Setting @{ rememberPosition = $on })
+    }
+    $script:SettingsRememberPos.Add_Checked($onRememberPos)
+    $script:SettingsRememberPos.Add_Unchecked($onRememberPos)
 
     # Checked/Unchecked, matching every other checkbox here - see the note on
     # the update ones below.
@@ -3925,10 +4106,12 @@ function Show-SettingsWindow {
         # Drain the debounced opacity write before the window goes: closing the
         # settings window right after moving the slider otherwise dropped it.
         try { Save-PendingOpacity } catch { }
+        try { Save-PendingPosition } catch { }
         try { $script:SettingsResTimer.Stop() } catch { }
         $script:SettingsWindow    = $null
         $script:SettingsAnimCheck = $null
         $script:SettingsChatTitleCheck = $null
+        $script:SettingsRememberPos = $null
     })
 
     # Match the dark body with a dark title bar instead of leaving a bright
@@ -5065,6 +5248,7 @@ $Window.Add_Closed({
     # Last line of defence: closing the toast ends the app, and a pending
     # opacity write has to survive that.
     try { Save-PendingOpacity } catch { }
+    try { Save-PendingPosition } catch { }
     try { $Tray.Visible = $false; $Tray.Dispose() } catch { }
     try { if ($script:InstanceMutex) { $script:InstanceMutex.ReleaseMutex(); $script:InstanceMutex.Dispose(); $script:InstanceMutex = $null } } catch { }
     try { if ($script:ShowRequest) { $script:ShowRequest.Dispose(); $script:ShowRequest = $null } } catch { }
