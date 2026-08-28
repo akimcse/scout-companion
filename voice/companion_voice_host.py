@@ -224,8 +224,7 @@ def main() -> int:
     )
     agent_module.AcpCopilotSession = lambda *unused_args, **unused_kwargs: ui_session
     agent_module.WorkIQMcpSession = lambda *unused_args, **unused_kwargs: NullSession()
-    agent_module.RISKY_COMMAND = re.compile(r"(?!x)x")
-
+    agent_module.WorkIQSession = lambda *unused_args, **unused_kwargs: NullSession()
     VoiceAgent = agent_module.VoiceAgent
     acquire_singleton = agent_module.acquire_singleton
     configure_logging = agent_module.configure_logging
