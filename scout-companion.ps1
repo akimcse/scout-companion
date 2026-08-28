@@ -45,6 +45,46 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # ---------------------------------------------------------------------------
+# One companion at a time.
+#
+# Nothing stopped a second one starting, and nothing on screen said one was
+# already running: the toast sets ShowInTaskbar="False" so it never appears in
+# the taskbar, and Windows files a new tray icon into the hidden overflow
+# flyout. Two Start Menu entries ship - "Scout Companion" and the "(auto)"
+# watcher - and either can be launched again on top of a copy already there.
+#
+# The duplicates are invisible as duplicates, and present as unrelated faults:
+#
+#   - the toasts stack exactly on top of each other, and since each is drawn at
+#     the configured opacity the pile is opaque however far the slider goes;
+#   - every instance finds the Allow button and invokes it, so one approval is
+#     answered several times;
+#   - each writes titles.json on its own schedule, and the interleaved
+#     read-modify-write loses learned chat names.
+#
+# A named mutex in the Local\ namespace is per-session and needs no cleanup on
+# a crash - Windows releases it with the process. The second instance hands its
+# request to the first and leaves: launching it again pins the toast, so the
+# launch has a visible result, which is what the user wanted by launching it.
+$script:InstanceMutex = $null
+$script:ShowRequest   = $null
+try {
+    $script:ShowRequest = New-Object System.Threading.EventWaitHandle(
+        $false, [System.Threading.EventResetMode]::AutoReset, 'Local\ScoutCompanion.Show')
+    $created = $false
+    $script:InstanceMutex = New-Object System.Threading.Mutex($true, 'Local\ScoutCompanion.Instance', [ref]$created)
+    if (-not $created) {
+        try { [void]$script:ShowRequest.Set() } catch { }
+        try { $script:InstanceMutex.Dispose() } catch { }
+        exit 0
+    }
+} catch {
+    # A lock we cannot take is not a reason to refuse to run: a possible
+    # duplicate is better than no companion at all.
+    Write-Warning "Could not take the single-instance lock: $($_.Exception.Message)"
+}
+
+# ---------------------------------------------------------------------------
 # Native interop: foreground/minimize detection, focus, and a11y wake.
 # ---------------------------------------------------------------------------
 if (-not ('ScoutNative' -as [type])) {
@@ -3173,6 +3213,9 @@ function Stop-Companion {
         if ($script:TrayIcons) { foreach ($i in $script:TrayIcons.Values) { $i.Dispose() } }
     } catch { }
     try { $Window.Close() } catch { }
+    # Released explicitly so a relaunch during a slow shutdown is not refused.
+    try { if ($script:InstanceMutex) { $script:InstanceMutex.ReleaseMutex(); $script:InstanceMutex.Dispose(); $script:InstanceMutex = $null } } catch { }
+    try { if ($script:ShowRequest) { $script:ShowRequest.Dispose(); $script:ShowRequest = $null } } catch { }
 }
 
 # ---------------------------------------------------------------------------
@@ -4783,6 +4826,18 @@ $timer.Add_Tick({
         Render-Steps
     }
 
+    # A second launch asks the running copy to show itself rather than starting
+    # a rival. Checked here because the poll loop is the one thing guaranteed to
+    # be running; WaitOne(0) does not block and costs nothing when unsignalled.
+    if ($script:ShowRequest) {
+        try {
+            if ($script:ShowRequest.WaitOne(0)) {
+                $script:Pinned = $true
+                $script:Hidden = $false
+            }
+        } catch { }
+    }
+
     # visibility policy
     $greeting = [datetime]::UtcNow -lt $script:GreetUntil
     $shouldShow = Get-ShouldShow -HasPending $hasPending -HasAsk $hasAsk `
@@ -4871,6 +4926,8 @@ $Window.Add_Closed({
     # opacity write has to survive that.
     try { Save-PendingOpacity } catch { }
     try { $Tray.Visible = $false; $Tray.Dispose() } catch { }
+    try { if ($script:InstanceMutex) { $script:InstanceMutex.ReleaseMutex(); $script:InstanceMutex.Dispose(); $script:InstanceMutex = $null } } catch { }
+    try { if ($script:ShowRequest) { $script:ShowRequest.Dispose(); $script:ShowRequest = $null } } catch { }
 })
 $app = New-Object System.Windows.Application
 # The toast is the app: closing it exits, and any settings window opened from
