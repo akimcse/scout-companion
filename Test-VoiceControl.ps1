@@ -20,6 +20,11 @@ foreach ($name in 'VoiceCommandCheck', 'VoiceReplyCheck', 'VoiceSensitivitySlide
         'NoiseSensitivitySlider', 'VoiceEnrollButton') {
     Assert-True ($Text -match "x:Name=`"$name`"") "$name exists"
 }
+foreach ($label in 'VOICE CONTROL', 'Run commands by voice', 'Receive spoken answers',
+        '&quot;Hey Scout&quot; wake sensitivity', 'Noise sensitivity',
+        'Set up voice recognition') {
+    Assert-True ($Text -match [regex]::Escape($label)) "$label is shown in English"
+}
 
 Write-Host 'current conversation bridge'
 Assert-True ($Text -match 'SendUnicodeText\(\$request\.Command\)') 'types into Scout'

@@ -4510,10 +4510,10 @@ function Apply-AutoStartFromUI {
 
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
-    <TextBlock Style="{StaticResource Section}" Text="&#xC74C;&#xC131;&#xC73C;&#xB85C; &#xC81C;&#xC5B4;"/>
+    <TextBlock Style="{StaticResource Section}" Text="VOICE CONTROL"/>
     <DockPanel LastChildFill="False">
       <CheckBox x:Name="VoiceCommandCheck"
-                Content="&#xC74C;&#xC131;&#xC73C;&#xB85C; &#xBA85;&#xB839; &#xC2E4;&#xD589;&#xD558;&#xAE30;"
+                Content="Run commands by voice"
                 DockPanel.Dock="Left" VerticalAlignment="Center"/>
       <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
         <Border.ToolTip><ToolTip>Listens for Hey Scout and types recognized commands into the current Scout conversation. The choice is saved locally.</ToolTip></Border.ToolTip>
@@ -4522,7 +4522,7 @@ function Apply-AutoStartFromUI {
     </DockPanel>
     <DockPanel LastChildFill="False" Margin="0,10,0,0">
       <CheckBox x:Name="VoiceReplyCheck"
-                Content="&#xC74C;&#xC131;&#xC73C;&#xB85C; &#xB2F5;&#xBCC0;&#xBC1B;&#xAE30;"
+                Content="Receive spoken answers"
                 DockPanel.Dock="Left" VerticalAlignment="Center"/>
       <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
         <Border.ToolTip><ToolTip>Reads the final answer from that Scout conversation aloud. The choice is saved locally.</ToolTip></Border.ToolTip>
@@ -4531,7 +4531,7 @@ function Apply-AutoStartFromUI {
     </DockPanel>
     <StackPanel Margin="0,12,0,0">
       <DockPanel>
-        <TextBlock Text="&quot;&#xD5E4;&#xC774; &#xC2A4;&#xCE74;&#xC6C3;&quot; &#xBD80;&#xB974;&#xAE30; &#xBBFC;&#xAC10;&#xB3C4;"
+        <TextBlock Text="&quot;Hey Scout&quot; wake sensitivity"
                    Foreground="#FF9AA6BE" VerticalAlignment="Center"/>
         <TextBlock x:Name="VoiceSensitivityValue" Text="65"
                    Foreground="#FFE6EAF2" VerticalAlignment="Center"
@@ -4543,20 +4543,20 @@ function Apply-AutoStartFromUI {
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <TextBlock Grid.Column="0" Text="&#xC815;&#xD655;" Foreground="#FF8A93A6"
+        <TextBlock Grid.Column="0" Text="Strict" Foreground="#FF8A93A6"
                    FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
         <Slider x:Name="VoiceSensitivitySlider" Grid.Column="1"
                 Minimum="0" Maximum="100" Value="65" TickFrequency="1"
                 IsSnapToTickEnabled="True" SmallChange="1" LargeChange="10"
                 VerticalAlignment="Center" Cursor="Hand"/>
-        <TextBlock Grid.Column="2" Text="&#xC624;&#xCC28;&#xD5C8;&#xC6A9;"
+        <TextBlock Grid.Column="2" Text="More tolerant"
                    Foreground="#FF8A93A6" FontSize="11"
                    VerticalAlignment="Center" Margin="8,0,0,0"/>
       </Grid>
     </StackPanel>
     <StackPanel Margin="0,12,0,0">
       <DockPanel>
-        <TextBlock Text="&#xC18C;&#xC74C; &#xBBFC;&#xAC10;&#xB3C4;"
+        <TextBlock Text="Noise sensitivity"
                    Foreground="#FF9AA6BE" VerticalAlignment="Center"/>
         <TextBlock x:Name="NoiseSensitivityValue" Text="35"
                    Foreground="#FFE6EAF2" VerticalAlignment="Center"
@@ -4568,21 +4568,21 @@ function Apply-AutoStartFromUI {
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <TextBlock Grid.Column="0" Text="&#xC18C;&#xC74C; &#xCC28;&#xB2E8;"
+        <TextBlock Grid.Column="0" Text="Noise filtering"
                    Foreground="#FF8A93A6" FontSize="11"
                    VerticalAlignment="Center" Margin="0,0,8,0"/>
         <Slider x:Name="NoiseSensitivitySlider" Grid.Column="1"
                 Minimum="0" Maximum="100" Value="35" TickFrequency="1"
                 IsSnapToTickEnabled="True" SmallChange="1" LargeChange="10"
                 VerticalAlignment="Center" Cursor="Hand"/>
-        <TextBlock Grid.Column="2" Text="&#xC791;&#xC740; &#xC18C;&#xB9AC; &#xAC10;&#xC9C0;"
+        <TextBlock Grid.Column="2" Text="Detect quiet speech"
                    Foreground="#FF8A93A6" FontSize="11"
                    VerticalAlignment="Center" Margin="8,0,0,0"/>
       </Grid>
     </StackPanel>
     <DockPanel Margin="0,12,0,0">
       <Button x:Name="VoiceEnrollButton"
-              Content="&quot;&#xD5E4;&#xC774; &#xC2A4;&#xCE74;&#xC6C3;&quot; &#xC74C;&#xC131; &#xC778;&#xC2DD;&#xD558;&#xAE30;"
+              Content="Set up voice recognition"
               MinWidth="190" Height="28" Padding="10,0"
               Background="#FF2F6FBF" Foreground="#FFFFFFFF"
               BorderThickness="0" Cursor="Hand" DockPanel.Dock="Left"/>
