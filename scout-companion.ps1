@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Scout Companion - a floating overlay for the Microsoft Scout / OpenClaw desktop agent.
 
@@ -1170,6 +1170,106 @@ function Add-TurnRecord($sess, [datetime]$startUtc, [datetime]$endUtc, [double]$
     }
 }
 
+# Scout describes every permission request twice: once for a machine - the
+# command, the path, the argument object - and once for a person, in `intention`
+# (present on four requests in five) or `toolTitle`. Only the machine half was
+# ever shown, so an approval arrived reading
+#
+#   $s="$env:USERPROFILE\.copilot\session-state\6c8d..\files" $m="$env:USER...
+#
+# and answering it meant parsing shell first. The readable half was in the event
+# the whole time.
+#
+# So: a headline in prose, and the literal request underneath for anyone who
+# wants to check it - which is the point of the prompt, and the reason the
+# detail is kept rather than replaced. Monospace only where the detail is code;
+# a path or a URL reads better in the UI font.
+function Format-PermissionRequest($req) {
+    $summary = $null
+    $detail  = $null
+    $mono    = $false
+    if (-not $req) { return @{ Summary = (T 'Approval requested'); Detail = ''; Mono = $false } }
+
+    $intent = if ($req.intention) { [string]$req.intention } else { $null }
+
+    switch ([string]$req.kind) {
+        'shell' {
+            $summary = if ($intent) { $intent } else { T 'Run a shell command' }
+            $detail  = if ($req.fullCommandText) { [string]$req.fullCommandText }
+                       elseif ($req.commandText) { [string]$req.commandText } else { '' }
+            $mono    = $true
+            # Worth saying out loud: it is the difference between a command that
+            # reads and one that overwrites, and it is not obvious from a glance
+            # at a long pipeline.
+            if ($req.hasWriteFileRedirection) { $summary = $summary + '  ' + (T '(writes to a file)') }
+        }
+        'read' {
+            $summary = T 'Read a file'
+            $detail  = [string]$req.path
+        }
+        'write' {
+            # intention distinguishes a new file from a change to one that
+            # exists, which matters more here than anywhere else.
+            $summary = if ($intent) { $intent } else { T 'Write to a file' }
+            $detail  = [string]$req.fileName
+        }
+        'url' {
+            $summary = if ($intent) { $intent } else { T 'Fetch a web page' }
+            $detail  = [string]$req.url
+        }
+        'mcp' {
+            # The server is the part that says whose code is about to run, so it
+            # leads. toolTitle is already prose where it exists.
+            $title = if ($req.toolTitle) { [string]$req.toolTitle }
+                     elseif ($intent)    { $intent }
+                     else                { [string]$req.toolName }
+            $summary = if ($req.serverName) { '{0}: {1}' -f $req.serverName, $title } else { $title }
+            $detail  = Format-PermissionArgs $req.args
+            $mono    = $true
+        }
+        'custom-tool' {
+            $summary = if ($intent) { $intent } else { [string]$req.toolName }
+            $detail  = Format-PermissionArgs $req.args
+            $mono    = $true
+        }
+        'memory' {
+            $summary = if ($intent) { $intent } else { T 'Save a memory' }
+            $detail  = if ($req.fact) { [string]$req.fact } else { [string]$req.subject }
+        }
+        default {
+            $summary = if ($intent) { $intent } else { T 'Approval requested' }
+            $detail  = if ($req.fullCommandText) { [string]$req.fullCommandText }
+                       elseif ($req.path)        { [string]$req.path }
+                       elseif ($req.toolName)    { [string]$req.toolName }
+                       else                      { '' }
+        }
+    }
+
+    if (-not $summary) { $summary = T 'Approval requested' }
+    if ($null -eq $detail) { $detail = '' }
+    # A detail that only repeats the headline is noise. Common for reads, where
+    # intention is already "Read file: C:\...".
+    if ($detail -and $summary.Contains($detail)) { $detail = '' }
+    return @{ Summary = $summary; Detail = $detail; Mono = $mono }
+}
+
+# Tool arguments arrive as an object of arbitrary shape. One line per argument
+# reads far better than the JSON would, and the values that matter - a url, a
+# path, a query - are usually scalars.
+function Format-PermissionArgs($argObj) {
+    if (-not $argObj) { return '' }
+    $lines = @()
+    foreach ($p in $argObj.PSObject.Properties) {
+        $v = $p.Value
+        if ($null -eq $v) { continue }
+        $s = if ($v -is [string]) { $v }
+             elseif ($v -is [bool] -or $v -is [int] -or $v -is [long] -or $v -is [double]) { [string]$v }
+             else { try { ($v | ConvertTo-Json -Depth 3 -Compress) } catch { [string]$v } }
+        $lines += '{0}: {1}' -f $p.Name, (Truncate $s 400)
+    }
+    return ($lines -join "`n")
+}
+
 function Handle-Event($sess, $evt) {
     $sess.LastEventUtc = [datetime]::UtcNow
     switch ($evt.type) {
@@ -1264,16 +1364,17 @@ function Handle-Event($sess, $evt) {
         'permission.requested' {
             $req = $evt.data.permissionRequest
             $id  = $evt.data.requestId
-            $text = $null
-            if ($req) {
-                if ($req.fullCommandText) { $text = $req.fullCommandText }
-                elseif ($req.commandText)  { $text = $req.commandText }
-                elseif ($req.toolName)     { $text = $req.toolName }
-                elseif ($req.path)         { $text = $req.path }
-            }
-            if (-not $text) { $text = '(approval requested)' }
+            $fmt = Format-PermissionRequest $req
             $kind = if ($req) { $req.kind } else { 'permission' }
-            $sess.PendingPerms[$id] = @{ text = (Truncate $text 280); kind = $kind; session = $sess.Label }
+            # Caps are a guard against a pathological payload, not a display
+            # budget - the panel scrolls.
+            $sess.PendingPerms[$id] = @{
+                summary = (Truncate $fmt.Summary 300)
+                text    = (Truncate $fmt.Detail 4000)
+                mono    = $fmt.Mono
+                kind    = $kind
+                session = $sess.Label
+            }
         }
         'permission.completed' {
             $id = $evt.data.requestId
@@ -2295,8 +2396,22 @@ function Focus-AgentSessionByDir([string]$dir) {
                off the toast if it were appended to it. -->
           <TextBlock x:Name="PermFrom" Margin="0,2,0,0" Text="" Foreground="#FFD6CFC2" FontSize="10.5"
                      Opacity="0.85" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
-          <TextBlock x:Name="PermText" Margin="0,5,0,0" Foreground="#FFD6CFC2" FontSize="11.5"
-                     TextWrapping="Wrap" MaxHeight="90" TextTrimming="CharacterEllipsis"/>
+          <!-- What is being asked, in prose. Scout supplies this itself; the
+               companion used to drop it and show only the literal request. -->
+          <TextBlock x:Name="PermSummary" Margin="0,6,0,0" Foreground="#FFD6CFC2" FontSize="12.5"
+                     FontWeight="SemiBold" TextWrapping="Wrap"/>
+          <!-- The literal request, kept because checking it is the whole point of
+               a prompt. Ellipsising it was a real hazard rather than a cosmetic
+               one: what gets cut is the tail, and the tail of a shell command is
+               where the destructive part of it tends to live, so "Allow" was
+               being offered on text the reader could not finish. Scrolls instead
+               of trimming - the toast keeps its size, and the whole request is
+               reachable. -->
+          <ScrollViewer Margin="0,4,0,0" MaxHeight="132" VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled">
+            <TextBlock x:Name="PermText" Foreground="#FFD6CFC2" FontSize="11"
+                       TextWrapping="Wrap"/>
+          </ScrollViewer>
           <!-- MinWidth, not Width. Fixed widths were fine in English and clipped
                the moment the captions were translated: "??克剋棘戟龜??" and
                "Odm챠tnout" both overrun a 74 px Deny button. MinWidth keeps the
@@ -2333,6 +2448,12 @@ $SessionsPanel = $Window.FindName('SessionsPanel')
 $SessionsList  = $Window.FindName('SessionsList')
 $PermPanel    = $Window.FindName('PermPanel')
 $PermText     = $Window.FindName('PermText')
+$PermSummary  = $Window.FindName('PermSummary')
+# Held rather than rebuilt: the prompt card swaps between them on every render,
+# and a FontFamily parsed from a string each time is a needless allocation on
+# the UI thread. The mono list mirrors the one the step panel uses.
+$script:MonoFont = New-Object System.Windows.Media.FontFamily 'Consolas, Cascadia Mono, monospace'
+$script:UiFont   = $PermText.FontFamily
 $PermFrom     = $Window.FindName('PermFrom')
 $AllowBtn     = $Window.FindName('AllowBtn')
 $DenyBtn      = $Window.FindName('DenyBtn')
@@ -2380,6 +2501,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAlert
         $PermPanel.BorderBrush  = $Theme.PermBdAlert
         $PermText.Foreground    = $Theme.PermTxtAlert
+        $PermSummary.Foreground = $Theme.PermTxtAlert
         $PermFrom.Foreground    = $Theme.PermTxtAlert
         $PermTitle.Foreground   = $Theme.AlertHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(255, 176, 0)
@@ -2394,6 +2516,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgAsk
         $PermPanel.BorderBrush  = $Theme.PermBdAsk
         $PermText.Foreground    = $Theme.PermTxtAsk
+        $PermSummary.Foreground = $Theme.PermTxtAsk
         $PermFrom.Foreground    = $Theme.PermTxtAsk
         $PermTitle.Foreground   = $Theme.AskHeader
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 150, 210)
@@ -2408,6 +2531,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermSummary.Foreground = $Theme.PermTxtNormal
         $PermFrom.Foreground    = $Theme.PermTxtNormal
         $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(56, 170, 100)
@@ -2422,6 +2546,7 @@ function Set-Theme([string]$state) {
         $PermPanel.Background   = $Theme.PermBgNormal
         $PermPanel.BorderBrush  = $Theme.PermBdNormal
         $PermText.Foreground    = $Theme.PermTxtNormal
+        $PermSummary.Foreground = $Theme.PermTxtNormal
         $PermFrom.Foreground    = $Theme.PermTxtNormal
         $PermTitle.Foreground   = $Theme.PermBdNormal
         $RootGlow.Color         = [System.Windows.Media.Color]::FromRgb(0, 0, 0)
@@ -4293,6 +4418,19 @@ function Set-FromLine($block, $item) {
     }
 }
 
+# Fills the prompt card: a prose headline, and the literal request under it.
+# The detail collapses when it would only repeat the headline, so a plain "Read
+# a file" prompt does not leave an empty box under it.
+function Set-PermBody([string]$summary, [string]$detail, [bool]$mono) {
+    $PermSummary.Text = $summary
+    $PermSummary.Visibility = if ($summary) { 'Visible' } else { 'Collapsed' }
+    $PermText.Text = $detail
+    $PermText.Visibility = if ($detail) { 'Visible' } else { 'Collapsed' }
+    # A command reads as code and belongs in a mono face; a path or a sentence
+    # does not, and setting one for everything made prose look like a log line.
+    $PermText.FontFamily = if ($mono) { $script:MonoFont } else { $script:UiFont }
+}
+
 # The "(+2)" after the header. One card can only show one prompt, so the count
 # has to speak for everything else still waiting - approvals and questions
 # together. Counting only the shown prompt's own kind was worse than no count
@@ -4700,7 +4838,7 @@ $timer.Add_Tick({
         # The card already names the asking conversation, and it need not be the
         # one the header was following a moment ago.
         $HeaderFrom.Visibility = 'Collapsed'
-        $PermText.Text = $first.text
+        Set-PermBody $first.summary $first.text ([bool]$first.mono)
         $AllowBtn.Visibility  = 'Visible'
         $DenyBtn.Visibility   = 'Visible'
         $AnswerBtn.Visibility = 'Collapsed'
@@ -4716,11 +4854,13 @@ $timer.Add_Tick({
         $PermTitle.Text  = [char]0x2753 + ' ' + (T 'The agent asked you a question')
         Set-FromLine $PermFrom $first
         $HeaderFrom.Visibility = 'Collapsed'
-        $body = $first.text
+        # The question leads and the choices follow it, which is the same split
+        # the permission card uses: what is being asked, then the specifics.
+        $choices = ''
         if ($first.choices -and $first.choices.Count) {
-            $body = $body + "`n" + (($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n")
+            $choices = ($first.choices | ForEach-Object { [char]0x2022 + " $_" }) -join "`n"
         }
-        $PermText.Text = Truncate $body 320
+        Set-PermBody (Truncate $first.text 300) (Truncate $choices 1200) $false
         # The companion cannot answer for you, so it offers the one useful action.
         $AllowBtn.Visibility  = 'Collapsed'
         $DenyBtn.Visibility   = 'Collapsed'

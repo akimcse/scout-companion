@@ -13,6 +13,14 @@
   "The agent asked you a question": "The agent asked you a question",
   "The agent is waiting for your answer.": "The agent is waiting for your answer.",
 
+  "Approval requested": "Approval requested",
+  "Run a shell command": "Run a shell command",
+  "(writes to a file)": "(writes to a file)",
+  "Read a file": "Read a file",
+  "Write to a file": "Write to a file",
+  "Fetch a web page": "Fetch a web page",
+  "Save a memory": "Save a memory",
+
   "Allow": "Allow",
   "Deny": "Deny",
   "Open": "Open",
