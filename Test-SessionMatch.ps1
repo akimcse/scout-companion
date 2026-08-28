@@ -24,7 +24,7 @@ foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-Ch
                  'Format-Idle', 'Group-SessionRows',
                  'Compare-CompanionVersion', 'Test-UpdatableInstall',
                  'ConvertTo-EventTime', 'Format-Duration', 'Get-ElapsedLabel',
-                 'Test-ShouldNotifyFinish')) {
+                 'Test-ShouldNotifyFinish', 'Get-RestoredPosition')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -280,6 +280,47 @@ Same 'toast already showing: silent'   (Test-ShouldNotifyFinish $false $true $tr
 Same 'agent in front: silent'          (Test-ShouldNotifyFinish $true $false $false) $false
 Same 'in front, even if hidden'        (Test-ShouldNotifyFinish $true $true $false) $false
 Same 'in front beats everything'       (Test-ShouldNotifyFinish $true $true $true) $false
+
+Write-Host "`nGet-RestoredPosition"
+# The toast would not stay where it was put. It is SizeToContent, and every
+# step line, session row and approval card changes its height - and each of
+# those re-ran the corner placement, dragging it home again.
+#
+# Restoring is not simply "use the saved numbers": the monitor it was on may be
+# gone. A toast placed off-screen cannot be retrieved, because it has no taskbar
+# button.
+function Rect($l, $t, $r, $b) { [pscustomobject]@{ Left=$l; Top=$t; Right=$r; Bottom=$b } }
+$one = @( (Rect 0 0 1920 1080) )
+# A second monitor to the left, which is where negative coordinates come from.
+$two = @( (Rect 0 0 1920 1080), (Rect -1920 0 0 1080) )
+function Pos($l, $t) { [pscustomobject]@{ Left=$l; Top=$t } }
+
+$ok = Get-RestoredPosition (Pos 800 400) $one 380 300
+Same 'a position on screen is kept'    ($ok.Left) 800
+Same 'both halves of it'               ($ok.Top)  400
+
+# Nothing saved yet, or half a position, is not a position.
+Same 'nothing saved, nothing restored' (Get-RestoredPosition $null $one 380 300) $null
+Same 'a half position is refused'      (Get-RestoredPosition (Pos 800 $null) $one 380 300) $null
+Same 'and so is a NaN'                 (Get-RestoredPosition (Pos ([double]::NaN) 400) $one 380 300) $null
+
+# The case that matters: the screen it was on is gone.
+Same 'a vanished monitor falls back'   (Get-RestoredPosition (Pos -1500 300) $one 380 300) $null
+Same 'but is fine while it exists'     ((Get-RestoredPosition (Pos -1500 300) $two 380 300).Left) -1500
+# No screens at all - a locked or disconnected session.
+Same 'no screens, no restore'          (Get-RestoredPosition (Pos 800 400) @() 380 300) $null
+
+# Below and to the right of everything.
+Same 'past the bottom right falls back' (Get-RestoredPosition (Pos 3000 2000) $one 380 300) $null
+
+# Hanging off an edge is fine as long as enough is left to grab. People do park
+# the toast half off the bottom, and refusing that would be worse than allowing
+# it - the corner is not where they left it.
+$edge = Get-RestoredPosition (Pos 1700 1040) $one 380 300
+Same 'hanging off the edge is allowed' ($edge.Left) 1700
+# But a sliver is not enough to grab with a mouse.
+Same 'a sliver is not'                 (Get-RestoredPosition (Pos 1890 400) $one 380 300) $null
+Same 'nor a sliver at the bottom'      (Get-RestoredPosition (Pos 800 1070) $one 380 300) $null
 
 Write-Host "`nConvertTo-EventTime"
 # Turn timing has to come from the event, never the clock. The companion reads a
