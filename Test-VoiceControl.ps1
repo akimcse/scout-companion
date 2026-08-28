@@ -25,11 +25,50 @@ foreach ($language in "'en'", "'ko'", "'ja'", "'zh-Hans'") {
     Assert-True ($Text -match [regex]::Escape("Id = $language")) "$language is selectable"
 }
 Assert-True ($Text -match 'Restart-CompanionForLanguage') 'language changes restart Companion'
-Assert-True ($Text -match "placeholder.Content = 'Choose language'") 'unsupported current languages are not shown as English'
+Assert-True ($Text -match "placeholder.Content = T 'Choose language'") 'unsupported current languages are not shown as English'
 foreach ($label in 'VOICE CONTROL', 'Run commands by voice', 'Receive spoken answers',
         '&quot;Hey Scout&quot; wake sensitivity', 'Noise sensitivity',
         'Set up voice recognition') {
     Assert-True ($Text -match [regex]::Escape($label)) "$label is shown in English"
+}
+
+Write-Host 'settings translations'
+$settingsMatch = [regex]::Match(
+    $Text, "(?s)\[xml\]\`$settingsXaml\s*=\s*@'(.*?)'@")
+Assert-True $settingsMatch.Success 'settings XAML can be audited'
+[xml]$settingsXml = $settingsMatch.Groups[1].Value
+$settingsKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($node in $settingsXml.SelectNodes('//*')) {
+    foreach ($attribute in 'Text', 'Content', 'ToolTip', 'Title') {
+        $value = $node.GetAttribute($attribute)
+        if ($value -and $value -notmatch '^\{|^&#x|^\s*$|^-?$|^\d+%?$') {
+            [void]$settingsKeys.Add($value)
+        }
+    }
+}
+foreach ($tooltip in $settingsXml.SelectNodes('//*[local-name()="ToolTip"]')) {
+    if ($tooltip.InnerText.Trim()) {
+        [void]$settingsKeys.Add($tooltip.InnerText.Trim())
+    }
+}
+$dynamicSettingsKeys = @(
+    'English', 'Korean', 'Japanese', 'Chinese (Simplified)',
+    'Choose language', 'Voice profile ready', 'Voice profile required',
+    'Recording 5 phrases...', 'Voice setup canceled',
+    'Preparing voice runtime...', 'Voice runtime setup failed',
+    'Voice runtime setup is missing', 'Could not prepare voice runtime',
+    'Could not open voice setup', 'Enable voice control',
+    'Disable voice control',
+    'The prepared Scout Voice runtime or voice profile was not found.'
+)
+foreach ($tag in 'ko', 'ja', 'zh-Hans') {
+    $translation = Get-Content (Join-Path $Root "lang\$tag.json") -Raw |
+        ConvertFrom-Json
+    $translationKeys = @($translation.PSObject.Properties.Name)
+    $missing = @($settingsKeys + $dynamicSettingsKeys |
+        Where-Object { $translationKeys -notcontains $_ } |
+        Sort-Object -Unique)
+    Assert-True ($missing.Count -eq 0) "$tag covers every settings label"
 }
 
 Write-Host 'current conversation bridge'
