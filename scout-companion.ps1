@@ -78,6 +78,7 @@ try {
         try { $script:InstanceMutex.Dispose() } catch { }
         exit 0
     }
+
 } catch {
     # A lock we cannot take is not a reason to refuse to run: a possible
     # duplicate is better than no companion at all.
@@ -3171,35 +3172,40 @@ function Start-VoiceBridge {
     }
 }
 
+function Stop-OwnedProcessTree([int]$RootId) {
+    try { $all = @(Get-CimInstance Win32_Process -ErrorAction Stop) }
+    catch { $all = @() }
+    $pending = @($RootId)
+    $owned = New-Object System.Collections.Generic.List[int]
+    while ($pending.Count) {
+        $parent = $pending[0]
+        $pending = @($pending | Select-Object -Skip 1)
+        foreach ($child in @($all | Where-Object { $_.ParentProcessId -eq $parent })) {
+            [void]$owned.Add([int]$child.ProcessId)
+            $pending += [int]$child.ProcessId
+        }
+    }
+    $ids = $owned.ToArray()
+    [array]::Reverse($ids)
+    foreach ($id in $ids) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+    Stop-Process -Id $RootId -Force -ErrorAction SilentlyContinue
+}
+
 function Stop-VoiceBridge {
     $p = $script:VoiceProcess
     if ($p) {
+        $rootId = $p.Id
         try {
             if (-not $p.HasExited) {
                 Set-Content -Path $script:VoiceStopPath -Value 'stop' -Encoding Ascii
-                if (-not $p.WaitForExit(1000)) {
-                    # If graceful shutdown stalls, stop only the bridge's known
-                    # process tree, children first, so none survive Companion.
-                    $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
-                    $pending = @($p.Id)
-                    $owned = New-Object System.Collections.Generic.List[int]
-                    while ($pending.Count) {
-                        $parent = $pending[0]
-                        $pending = @($pending | Select-Object -Skip 1)
-                        foreach ($child in @($all | Where-Object { $_.ParentProcessId -eq $parent })) {
-                            [void]$owned.Add([int]$child.ProcessId)
-                            $pending += [int]$child.ProcessId
-                        }
-                    }
-                    $ownedArray = $owned.ToArray()
-                    [array]::Reverse($ownedArray)
-                    foreach ($id in $ownedArray) {
-                        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
-                    }
-                    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-                }
+                [void]$p.WaitForExit(1000)
             }
         } catch { }
+        # Windows does not cascade process termination. Clean descendants even
+        # after a graceful host exit so a TTS player cannot keep speaking.
+        Stop-OwnedProcessTree $rootId
     }
     Remove-Item $script:VoiceStatePath -Force -ErrorAction SilentlyContinue
     Remove-Item ($script:VoiceStatePath + '.tmp') -Force -ErrorAction SilentlyContinue
@@ -4061,6 +4067,8 @@ $script:NoiseSensitivityPending = $null
 $script:VoiceEnrollmentProcess = $null
 $script:VoiceEnrollmentTimer = $null
 $script:VoiceEnrollmentRestart = $false
+$script:VoicePreparationProcess = $null
+$script:VoicePreparationTimer = $null
 $script:SelfProc          = [System.Diagnostics.Process]::GetCurrentProcess()
 
 function Save-PendingVoiceSensitivity {
@@ -4091,6 +4099,73 @@ function Save-PendingNoiseSensitivity {
     }
 }
 
+function Complete-VoiceRuntimePreparation {
+    $process = $script:VoicePreparationProcess
+    if (-not $process) { return }
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) { return }
+    } catch { return }
+    if ($script:VoicePreparationTimer) { $script:VoicePreparationTimer.Stop() }
+    $succeeded = $process.ExitCode -eq 0
+    $script:VoicePreparationProcess = $null
+    if (-not $succeeded) {
+        if ($script:SettingsVoiceEnrollButton) {
+            $script:SettingsVoiceEnrollButton.IsEnabled = $true
+        }
+        if ($script:SettingsVoiceEnrollStatus) {
+            $script:SettingsVoiceEnrollStatus.Text = 'Voice runtime setup failed'
+        }
+        return
+    }
+    Start-VoiceEnrollment
+}
+
+function Start-VoiceRuntimePreparation {
+    if ($script:VoicePreparationProcess) {
+        try {
+            $script:VoicePreparationProcess.Refresh()
+            if (-not $script:VoicePreparationProcess.HasExited) { return }
+        } catch { }
+    }
+    $preparer = Join-Path $ScriptDir 'voice\Prepare-VoiceRuntime.ps1'
+    if (-not (Test-Path $preparer)) {
+        if ($script:SettingsVoiceEnrollStatus) {
+            $script:SettingsVoiceEnrollStatus.Text = 'Voice runtime setup is missing'
+        }
+        return
+    }
+    if ($script:SettingsVoiceEnrollButton) {
+        $script:SettingsVoiceEnrollButton.IsEnabled = $false
+    }
+    if ($script:SettingsVoiceEnrollStatus) {
+        $script:SettingsVoiceEnrollStatus.Text = 'Preparing voice runtime...'
+    }
+    try {
+        $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', "`"$preparer`"",
+            '-InstallDir', "`"$script:VoiceRuntimeDir`""
+        )
+        $script:VoicePreparationProcess = Start-Process powershell.exe `
+            -ArgumentList $arguments -WindowStyle Hidden -PassThru
+        if (-not $script:VoicePreparationTimer) {
+            $script:VoicePreparationTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:VoicePreparationTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+            $script:VoicePreparationTimer.Add_Tick({ Complete-VoiceRuntimePreparation })
+        }
+        $script:VoicePreparationTimer.Start()
+    } catch {
+        $script:VoicePreparationProcess = $null
+        if ($script:SettingsVoiceEnrollButton) {
+            $script:SettingsVoiceEnrollButton.IsEnabled = $true
+        }
+        if ($script:SettingsVoiceEnrollStatus) {
+            $script:SettingsVoiceEnrollStatus.Text = 'Could not prepare voice runtime'
+        }
+    }
+}
+
 function Complete-VoiceEnrollment {
     $process = $script:VoiceEnrollmentProcess
     if (-not $process) { return }
@@ -4114,7 +4189,7 @@ function Complete-VoiceEnrollment {
             'Voice setup canceled'
         }
     }
-    if ($script:VoiceEnrollmentRestart -and [bool]$Config.voiceCommandEnabled) {
+    if ([bool]$Config.voiceCommandEnabled) {
         [void](Start-VoiceBridge)
         Sync-VoiceControls
     }
@@ -4131,9 +4206,7 @@ function Start-VoiceEnrollment {
     $pythonw = Join-Path $script:VoiceRuntimeDir '.venv\Scripts\pythonw.exe'
     $enrollment = Join-Path $script:VoiceRuntimeDir 'enrollment_gui.py'
     if (-not (Test-Path $pythonw) -or -not (Test-Path $enrollment)) {
-        if ($script:SettingsVoiceEnrollStatus) {
-            $script:SettingsVoiceEnrollStatus.Text = 'Voice setup is not installed'
-        }
+        Start-VoiceRuntimePreparation
         return
     }
 
@@ -4176,12 +4249,23 @@ function Start-VoiceEnrollment {
 
 function Stop-VoiceEnrollment {
     if ($script:VoiceEnrollmentTimer) { $script:VoiceEnrollmentTimer.Stop() }
+    if ($script:VoicePreparationTimer) { $script:VoicePreparationTimer.Stop() }
+    $preparation = $script:VoicePreparationProcess
+    if ($preparation) {
+        try {
+            $preparation.Refresh()
+            if (-not $preparation.HasExited) {
+                Stop-OwnedProcessTree $preparation.Id
+            }
+        } catch { }
+    }
+    $script:VoicePreparationProcess = $null
     $process = $script:VoiceEnrollmentProcess
     if ($process) {
         try {
             $process.Refresh()
             if (-not $process.HasExited) {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                Stop-OwnedProcessTree $process.Id
             }
         } catch { }
     }

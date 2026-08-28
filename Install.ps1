@@ -41,7 +41,17 @@ $AppName    = 'Scout Companion'
 $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\ScoutCompanion'
 $RegKey     = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ScoutCompanion'
 $IconPath   = Join-Path $env:LOCALAPPDATA 'ScoutCompanion\scout-companion.ico'
+$VoiceDir   = Join-Path $env:LOCALAPPDATA 'ScoutVoiceAssistant'
 $SourceDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$installedConfig = Join-Path $InstallDir 'config.json'
+if (Test-Path $installedConfig) {
+    try {
+        $configured = (Get-Content $installedConfig -Raw | ConvertFrom-Json).voiceRuntimeDir
+        if ($configured) {
+            $VoiceDir = [Environment]::ExpandEnvironmentVariables([string]$configured)
+        }
+    } catch { }
+}
 
 # Carried across an upgrade rather than overwritten: these are the user's, not
 # ours. They live beside the script because that is where the app looks for
@@ -72,6 +82,27 @@ function Get-CompanionVersion {
 # The companion has no taskbar button, so "is it running" is a process
 # question. Matched on the script path rather than the name, because every
 # PowerShell window is powershell.exe.
+function Stop-ProcessTree([int]$RootId) {
+    try { $all = @(Get-CimInstance Win32_Process -ErrorAction Stop) }
+    catch { $all = @() }
+    $pending = @($RootId)
+    $owned = New-Object System.Collections.Generic.List[int]
+    while ($pending.Count) {
+        $parent = $pending[0]
+        $pending = @($pending | Select-Object -Skip 1)
+        foreach ($child in @($all | Where-Object { $_.ParentProcessId -eq $parent })) {
+            [void]$owned.Add([int]$child.ProcessId)
+            $pending += [int]$child.ProcessId
+        }
+    }
+    $ids = $owned.ToArray()
+    [array]::Reverse($ids)
+    foreach ($id in $ids) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
+    Stop-Process -Id $RootId -Force -ErrorAction SilentlyContinue
+}
+
 function Stop-Companion {
     $stopped = 0
     $me = $PID
@@ -84,7 +115,7 @@ function Stop-Companion {
         # Only ever the copy being operated on, so a checkout running from
         # somewhere else is left alone.
         if ($p.CommandLine -notlike "*$InstallDir*") { continue }
-        try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop; $stopped++ } catch { }
+        try { Stop-ProcessTree $p.ProcessId; $stopped++ } catch { }
     }
     return $stopped
 }
@@ -133,6 +164,18 @@ if ($Uninstall) {
     if (Test-Path $RegKey) {
         Remove-Item $RegKey -Recurse -Force -ErrorAction SilentlyContinue
         Write-Host '  removed the Add/Remove Programs entry'
+    }
+
+    if (Test-Path (Join-Path $VoiceDir '.managed-by-scout-companion')) {
+        for ($i = 0; $i -lt 3 -and (Test-Path $VoiceDir); $i++) {
+            Remove-Item $VoiceDir -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path $VoiceDir) { Start-Sleep -Milliseconds 500 }
+        }
+        if (Test-Path $VoiceDir) {
+            Write-Warning "  could not remove optional voice runtime at $VoiceDir"
+        } else {
+            Write-Host '  removed the optional voice runtime'
+        }
     }
 
     Write-Host ''

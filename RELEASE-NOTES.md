@@ -1,5 +1,42 @@
 # Release notes
 
+## v0.10.0 — Talk to the Scout conversation already on screen
+
+Voice control is now an optional part of Scout Companion. Say “Hey Scout” and the
+recognized command is typed into the conversation currently open in Scout; when that turn
+finishes, Companion can read the final answer aloud even while Scout is minimized or behind
+another app.
+
+### New
+
+- **Current-conversation voice commands.** The existing Scout chat keeps its full context,
+  permissions, tools, and visible history instead of sending speech to a separate agent.
+- **Independent input and output settings.** Enable voice commands and spoken answers
+  separately under **음성으로 제어**. Both choices persist in `config.json`.
+- **Five-phrase enrollment.** First-time users can prepare the optional runtime and enroll
+  their voice from Settings. Raw recordings are discarded; the encrypted speaker embedding
+  stays under the current Windows profile.
+- **Wake and noise sensitivity.** Two 0–100 sliders tune fuzzy “Hey Scout” matching and
+  ambient-noise rejection.
+- **Portable optional runtime.** Release packages include the Python sources and a preparer
+  that creates a per-user environment and downloads the on-device speech models only when
+  enrollment is requested.
+
+### Changed
+
+- A minimized Scout window always leaves the Companion toast visible, even while idle.
+- Consecutive wake phrases are no longer submitted as commands.
+- Spoken answers can only be interrupted by an explicit wake phrase, preventing TTS echo
+  and background noise from generating accidental Scout turns.
+- Answer completion follows Scout's session event stream rather than an on-screen button,
+  so spoken output does not depend on window focus.
+
+### Notes
+
+- Voice control is off by default and does not add a separate startup task.
+- Python 3.11 or later is required only for voice control. First-time setup downloads about
+  200 MB of speech models.
+
 ## v0.8.0 — One toast for one session or many
 
 The single-session and multi-session toasts were two different shapes; now they are one.
