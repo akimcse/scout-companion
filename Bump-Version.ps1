@@ -92,9 +92,23 @@ function Set-DeclaredVersion([string]$path, [string]$version) {
         { param($m) $m.Groups[1].Value + $version + $m.Groups[2].Value },
         1)
     if ($new -eq $text) { throw "version line in $path did not change" }
-    # -NoNewline, because the file has no trailing blank line and adding one
+
+    # Write with .NET and an explicit encoding, preserving whatever byte order
+    # mark the file already had.
+    #
+    # Set-Content -Encoding UTF8 cannot be used here: it means "with a BOM" in
+    # Windows PowerShell and "without one" in PowerShell 7, and the workflow
+    # runs this under 7. So the release process stripped the BOM from
+    # scout-companion.ps1 - which contains non-ASCII - and Windows PowerShell
+    # then reads such a file in the system ANSI codepage. Every automated
+    # release would have shipped an app that does not parse outside a codepage
+    # that happens to tolerate those bytes. Caught by the test that requires a
+    # BOM on any non-ASCII script, on the run right after it was added.
+    $bytes  = [System.IO.File]::ReadAllBytes($path)
+    $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    # -NoNewline equivalent: the file has no trailing blank line, and adding one
     # would show up as a spurious diff on every release.
-    Set-Content -Path $path -Value $new -Encoding UTF8 -NoNewline
+    [System.IO.File]::WriteAllText($path, $new, (New-Object System.Text.UTF8Encoding($hasBom)))
 }
 
 # Running this file directly is what the workflow does; dot-sourcing it is what
