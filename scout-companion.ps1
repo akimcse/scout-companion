@@ -3176,6 +3176,8 @@ $script:VoiceState = $null
 $script:VoiceWasActive = $false
 $script:VoiceProcess = $null
 $script:VoiceEnabled = $false
+$script:VoiceReady = $false
+$script:VoiceRestartAfter = [datetime]::MinValue
 $script:VoiceActivationUntil = [datetime]::MinValue
 $script:VoiceStatePath = Join-Path $env:TEMP "scout-companion-voice-$PID.json"
 $script:VoiceStopPath = Join-Path $env:TEMP "scout-companion-voice-$PID.stop"
@@ -3223,6 +3225,7 @@ function Start-VoiceBridge {
         $script:VoiceProcess = Start-Process $python -ArgumentList $arguments `
             -WorkingDirectory $script:VoiceRuntimeDir -WindowStyle Hidden -PassThru
         $script:VoiceEnabled = $true
+        $script:VoiceReady = $false
         $script:VoiceActivationUntil = [datetime]::UtcNow.AddSeconds(5)
         Write-CompanionLog "voice bridge started pid=$($script:VoiceProcess.Id)"
         return $true
@@ -3279,6 +3282,7 @@ function Stop-VoiceBridge {
     $script:VoiceState = $null
     $script:VoiceUiRequest = $null
     $script:VoiceEnabled = $false
+    $script:VoiceReady = $false
     $script:VoiceActivationUntil = [datetime]::MinValue
 }
 
@@ -3287,10 +3291,25 @@ function Read-VoiceState {
         try {
             $script:VoiceProcess.Refresh()
             if ($script:VoiceProcess.HasExited) {
+                Write-CompanionLog "voice bridge exited code=$($script:VoiceProcess.ExitCode); scheduling restart"
+                $delay = if ($script:VoiceReady) { 2 } else { 30 }
                 $script:VoiceProcess = $null
                 $script:VoiceEnabled = $false
+                $script:VoiceReady = $false
+                $script:VoiceRestartAfter = [datetime]::UtcNow.AddSeconds($delay)
             }
         } catch { }
+    }
+    if ([bool]$Config.voiceCommandEnabled -and -not $script:VoiceProcess -and
+            -not $script:VoiceEnrollmentProcess -and
+            -not $script:VoicePreparationProcess -and
+            [datetime]::UtcNow -ge $script:VoiceRestartAfter) {
+        # A new Companion can briefly race the previous voice host releasing
+        # its singleton lock during an update. Keep the persisted setting true
+        # and recover without requiring the user to toggle MIC off and on.
+        $script:VoiceRestartAfter = [datetime]::UtcNow.AddSeconds(30)
+        [void](Start-VoiceBridge)
+        Sync-VoiceControls
     }
     if (-not (Test-Path $script:VoiceStatePath)) {
         $script:VoiceState = $null
@@ -3299,6 +3318,8 @@ function Read-VoiceState {
     try {
         $script:VoiceState = Get-Content $script:VoiceStatePath -Raw -Encoding UTF8 |
             ConvertFrom-Json
+        $script:VoiceReady = $true
+        $script:VoiceRestartAfter = [datetime]::MinValue
     } catch { }
 }
 
