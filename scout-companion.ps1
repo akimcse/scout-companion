@@ -1380,7 +1380,19 @@ function Invoke-AgentButton([string[]]$labels) {
 function Focus-Agent {
     $win = Get-AgentWindow
     if (-not $win) { return }
-    [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
+    # SW_RESTORE, and only for a window that is actually minimized. It used to be
+    # called unconditionally, which is the one case where "restore" does harm:
+    # against a maximized window that is merely behind something, SW_RESTORE
+    # un-maximizes it. So answering a prompt from the toast - which lands here
+    # whenever the Allow button cannot be found and pressed directly - shrank
+    # Scout to whatever size it last had before being maximized. The approval
+    # worked; the window it belonged to came back the wrong size.
+    #
+    # A window minimized from a maximized state is restored to maximized by
+    # SW_RESTORE, so the minimized case needs no special handling.
+    if ([ScoutNative]::IsIconic($win.Hwnd)) {
+        [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
+    }
     [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
 }
 
