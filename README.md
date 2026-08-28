@@ -8,6 +8,16 @@ When the agent is working and you've looked away, a small toast in the corner sh
 **what it's doing right now** — and lets you **Allow or Deny** its prompts with one click,
 without switching back.
 
+> **Voice-integrated build:** this checkout can reuse an existing
+> `%LOCALAPPDATA%\ScoutVoiceAssistant` runtime. Open Settings and use the
+> **음성으로 제어** section to enable command input and, independently, spoken
+> answers. Recognized commands are typed into the currently visible Scout
+> conversation, and the answer from that same turn is read back. Both choices
+> and the 0-100 wake-word and ambient-noise sensitivity controls are stored in
+> `config.json`; the voice engine follows Companion's lifetime. First-time users can run the five-phrase
+> voice enrollment from the same settings section; raw recordings are discarded
+> and only the encrypted speaker profile is retained.
+
 ![PowerShell](https://img.shields.io/badge/PowerShell-5%2B-5391FE?logo=powershell&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
 ![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)

@@ -8,6 +8,8 @@ Thumbs.db
 desktop.ini
 rt.err
 *.err
+__pycache__/
+*.pyc
 
 drafts/
 

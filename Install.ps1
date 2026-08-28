@@ -55,6 +55,7 @@ $Payload = @(
     'Start-ScoutCompanion.cmd'
     'Watch-Scout.ps1'
     'Add-ToStartMenu.ps1'
+    'voice'
     'config.sample.json'
     'LICENSE'
     'README.md'
@@ -189,7 +190,13 @@ if ($existing) {
 }
 
 foreach ($f in $Payload) {
-    Copy-Item (Join-Path $SourceDir $f) (Join-Path $InstallDir $f) -Force
+    $source = Join-Path $SourceDir $f
+    $destination = Join-Path $InstallDir $f
+    if (Test-Path $source -PathType Container) {
+        Copy-Item $source $destination -Recurse -Force
+    } else {
+        Copy-Item $source $destination -Force
+    }
 }
 Copy-Item (Join-Path $SourceDir 'lang') $InstallDir -Recurse -Force
 Write-Host ("  copied {0} files and {1} language files" -f $Payload.Count, (Get-ChildItem (Join-Path $InstallDir 'lang') -File).Count)
