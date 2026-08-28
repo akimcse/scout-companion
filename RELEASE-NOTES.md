@@ -1,5 +1,11 @@
 # Release notes
 
+## v0.11.1 — Localize every selectable-language setting
+
+- Translate all settings labels, tooltips, voice setup states, and language names into
+  Korean, Japanese, and Simplified Chinese.
+- Add a test that compares every settings string with each selectable translation file.
+
 ## v0.11.0 — Choose the UI language in Settings
 
 - Add a Language picker beside the Windows startup control.

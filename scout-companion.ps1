@@ -3328,10 +3328,10 @@ function Sync-VoiceControls {
     if ($VoiceToggleBtn) {
         $VoiceToggleBtn.Content = if ($on) { 'MIC ON' } else { 'MIC' }
         $VoiceToggleBtn.Foreground = if ($on) { '#FFFFD7DF' } else { '#FF9AA6BE' }
-        $VoiceToggleBtn.ToolTip = if ($on) { 'Disable voice control' } else { 'Enable voice control' }
+        $VoiceToggleBtn.ToolTip = if ($on) { T 'Disable voice control' } else { T 'Enable voice control' }
     }
     if ($MenuVoice) {
-        $MenuVoice.Text = if ($on) { 'Disable voice control' } else { 'Enable voice control' }
+        $MenuVoice.Text = if ($on) { T 'Disable voice control' } else { T 'Enable voice control' }
         $MenuVoice.Checked = $on
     }
 }
@@ -3344,7 +3344,7 @@ function Set-VoiceCommandEnabled([bool]$on, [switch]$Persist) {
     if ($on) {
         if (-not (Start-VoiceBridge)) {
             [System.Windows.Forms.MessageBox]::Show(
-                'The prepared Scout Voice runtime or voice profile was not found.',
+                (T 'The prepared Scout Voice runtime or voice profile was not found.'),
                 'Scout Companion',
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Warning
@@ -4197,7 +4197,7 @@ function Complete-VoiceRuntimePreparation {
             $script:SettingsVoiceEnrollButton.IsEnabled = $true
         }
         if ($script:SettingsVoiceEnrollStatus) {
-            $script:SettingsVoiceEnrollStatus.Text = 'Voice runtime setup failed'
+            $script:SettingsVoiceEnrollStatus.Text = T 'Voice runtime setup failed'
         }
         return
     }
@@ -4214,7 +4214,7 @@ function Start-VoiceRuntimePreparation {
     $preparer = Join-Path $ScriptDir 'voice\Prepare-VoiceRuntime.ps1'
     if (-not (Test-Path $preparer)) {
         if ($script:SettingsVoiceEnrollStatus) {
-            $script:SettingsVoiceEnrollStatus.Text = 'Voice runtime setup is missing'
+            $script:SettingsVoiceEnrollStatus.Text = T 'Voice runtime setup is missing'
         }
         return
     }
@@ -4222,7 +4222,7 @@ function Start-VoiceRuntimePreparation {
         $script:SettingsVoiceEnrollButton.IsEnabled = $false
     }
     if ($script:SettingsVoiceEnrollStatus) {
-        $script:SettingsVoiceEnrollStatus.Text = 'Preparing voice runtime...'
+        $script:SettingsVoiceEnrollStatus.Text = T 'Preparing voice runtime...'
     }
     try {
         $arguments = @(
@@ -4244,7 +4244,7 @@ function Start-VoiceRuntimePreparation {
             $script:SettingsVoiceEnrollButton.IsEnabled = $true
         }
         if ($script:SettingsVoiceEnrollStatus) {
-            $script:SettingsVoiceEnrollStatus.Text = 'Could not prepare voice runtime'
+            $script:SettingsVoiceEnrollStatus.Text = T 'Could not prepare voice runtime'
         }
     }
 }
@@ -4267,9 +4267,9 @@ function Complete-VoiceEnrollment {
     }
     if ($script:SettingsVoiceEnrollStatus) {
         $script:SettingsVoiceEnrollStatus.Text = if ($completed) {
-            'Voice profile ready'
+            T 'Voice profile ready'
         } else {
-            'Voice setup canceled'
+            T 'Voice setup canceled'
         }
     }
     if ([bool]$Config.voiceCommandEnabled) {
@@ -4302,7 +4302,7 @@ function Start-VoiceEnrollment {
         $script:SettingsVoiceEnrollButton.IsEnabled = $false
     }
     if ($script:SettingsVoiceEnrollStatus) {
-        $script:SettingsVoiceEnrollStatus.Text = 'Recording 5 phrases...'
+        $script:SettingsVoiceEnrollStatus.Text = T 'Recording 5 phrases...'
     }
     try {
         $script:VoiceEnrollmentProcess = Start-Process $pythonw `
@@ -4321,7 +4321,7 @@ function Start-VoiceEnrollment {
             $script:SettingsVoiceEnrollButton.IsEnabled = $true
         }
         if ($script:SettingsVoiceEnrollStatus) {
-            $script:SettingsVoiceEnrollStatus.Text = 'Could not open voice setup'
+            $script:SettingsVoiceEnrollStatus.Text = T 'Could not open voice setup'
         }
         if ([bool]$Config.voiceCommandEnabled) {
             [void](Start-VoiceBridge)
@@ -4856,25 +4856,25 @@ function Show-SettingsWindow {
     $script:SettingsNoiseSensitivityText.Text = [string]$noiseSensitivity
     $voiceProfilePath = Join-Path $script:VoiceRuntimeDir 'voice-profile.dat'
     $script:SettingsVoiceEnrollStatus.Text = if (Test-Path $voiceProfilePath) {
-        'Voice profile ready'
+        T 'Voice profile ready'
     } else {
-        'Voice profile required'
+        T 'Voice profile required'
     }
     if ($script:VoiceEnrollmentProcess) {
         try {
             $script:VoiceEnrollmentProcess.Refresh()
             if (-not $script:VoiceEnrollmentProcess.HasExited) {
                 $script:SettingsVoiceEnrollButton.IsEnabled = $false
-                $script:SettingsVoiceEnrollStatus.Text = 'Recording 5 phrases...'
+                $script:SettingsVoiceEnrollStatus.Text = T 'Recording 5 phrases...'
             }
         } catch { }
     }
 
     $languageOptions = @(
-        [pscustomobject]@{ Id = 'en'; Label = 'English' },
-        [pscustomobject]@{ Id = 'ko'; Label = 'Korean' },
-        [pscustomobject]@{ Id = 'ja'; Label = 'Japanese' },
-        [pscustomobject]@{ Id = 'zh-Hans'; Label = 'Chinese (Simplified)' }
+        [pscustomobject]@{ Id = 'en'; Label = (T 'English') },
+        [pscustomobject]@{ Id = 'ko'; Label = (T 'Korean') },
+        [pscustomobject]@{ Id = 'ja'; Label = (T 'Japanese') },
+        [pscustomobject]@{ Id = 'zh-Hans'; Label = (T 'Chinese (Simplified)') }
     )
     $selectedLanguage = if ($Config.language -and $Config.language -ne 'auto') {
         [string]$Config.language
@@ -4892,7 +4892,7 @@ function Show-SettingsWindow {
     }
     if (-not $script:SettingsLanguage.SelectedItem) {
         $placeholder = New-Object System.Windows.Controls.ComboBoxItem
-        $placeholder.Content = 'Choose language'
+        $placeholder.Content = T 'Choose language'
         $placeholder.IsEnabled = $false
         $script:SettingsLanguage.Items.Insert(0, $placeholder)
         $script:SettingsLanguage.SelectedItem = $placeholder
@@ -5421,7 +5421,7 @@ function Install-CompanionUpdate {
 }
 
 $MenuOpen  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Open Scout')
-$MenuVoice = New-Object System.Windows.Forms.ToolStripMenuItem 'Enable voice control'
+$MenuVoice = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Enable voice control')
 $MenuPause = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Pause animation')
 $MenuSet   = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Settings...')
 $MenuExit  = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Exit')
