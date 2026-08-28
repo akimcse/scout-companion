@@ -1,5 +1,13 @@
 # Release notes
 
+## v0.10.1 — Voice commands can reach a background Scout window
+
+- Acquire Scout's message-box focus through an attached input queue when Windows rejects a
+  normal foreground switch.
+- Retry focus acquisition before entering text and restore the application that was in
+  front afterward.
+- Preserve maximized window state while moving focus.
+
 ## v0.10.0 — Talk to the Scout conversation already on screen
 
 Voice control is now an optional part of Scout Companion. Say “Hey Scout” and the
