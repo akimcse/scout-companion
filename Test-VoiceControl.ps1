@@ -20,6 +20,12 @@ foreach ($name in 'VoiceCommandCheck', 'VoiceReplyCheck', 'VoiceSensitivitySlide
         'NoiseSensitivitySlider', 'VoiceEnrollButton') {
     Assert-True ($Text -match "x:Name=`"$name`"") "$name exists"
 }
+Assert-True ($Text -match 'x:Name="LanguagePicker"') 'language picker exists'
+foreach ($language in "'en'", "'ko'", "'ja'", "'zh-Hans'") {
+    Assert-True ($Text -match [regex]::Escape("Id = $language")) "$language is selectable"
+}
+Assert-True ($Text -match 'Restart-CompanionForLanguage') 'language changes restart Companion'
+Assert-True ($Text -match "placeholder.Content = 'Choose language'") 'unsupported current languages are not shown as English'
 foreach ($label in 'VOICE CONTROL', 'Run commands by voice', 'Receive spoken answers',
         '&quot;Hey Scout&quot; wake sensitivity', 'Noise sensitivity',
         'Set up voice recognition') {

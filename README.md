@@ -77,6 +77,7 @@ you act on approvals in place.
   open in Scout, and optionally hear that turn's final answer. Includes five-phrase
   enrollment plus wake-word and ambient-noise sensitivity controls.
 - **🌍 Fifteen languages** — follows your Windows display language, or pin one.
+  English, Korean, Japanese, and Simplified Chinese can be selected directly in Settings.
 - **🪶 Zero-config core** — the overlay is pure PowerShell + WPF with no build step or
   binary assets; even the mascots are drawn at runtime. Voice control is optional and
   prepares its own per-user Python environment on first enrollment.
