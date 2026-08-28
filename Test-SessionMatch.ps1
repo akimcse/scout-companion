@@ -455,6 +455,14 @@ Same 'and the guard is written too'  ([bool]($wfText -match "git commit -m .*\[s
 # A release must never carry contents newer than its own tag.
 Same 'the tag pins the commit'       ([bool]($wfText -match '--target \$sha')) $true
 
+# The notes have to be captured before the version is committed. After that,
+# HEAD is the bot's own commit and its body is empty - which is how v0.8.3 came
+# out with no notes at all.
+Same 'notes are captured early'      ([bool]($wfText -match 'git log -1 --pretty=%b \| Out-File notes-body\.md')) $true
+$bodyIdx  = $wfText.IndexOf('notes-body.md')
+$commitIdx = $wfText.IndexOf('git commit -m')
+Same 'and before the commit step'    ([bool]($bodyIdx -gt 0 -and $bodyIdx -lt $commitIdx)) $true
+
 Write-Host "`nscripts survive a machine that is not this one"
 # Windows PowerShell reads a script in the system ANSI codepage unless a BOM
 # says otherwise. On this machine that happens to be compatible; on a US-locale
