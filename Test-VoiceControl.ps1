@@ -55,6 +55,10 @@ Assert-True (-not $insideFunction) 'focus helper is script-scoped'
 Assert-True ($Text -match '\$request\.SawTurnEnd') 'waits for the turn boundary'
 Assert-True ($Text -match 'assistant\.turn_end') 'reads the authoritative end event'
 Assert-True ($Text -match 'AgentRunning -and \$IsMinimized') 'stays visible when minimized'
+Assert-True ($Text -match 'voice bridge exited code=') 'unexpected bridge exits are detected'
+Assert-True ($Text -match 'VoiceRestartAfter') 'persisted voice input restarts after failure'
+Assert-True ($Text -match 'if \(\$script:VoiceReady\) \{ 2 \} else \{ 30 \}') 'startup failures back off'
+Assert-True ($Text -match '\$script:VoiceReady = \$true') 'published state marks the bridge ready'
 
 Write-Host 'portable runtime'
 $required = @(

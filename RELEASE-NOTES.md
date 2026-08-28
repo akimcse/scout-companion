@@ -1,5 +1,10 @@
 # Release notes
 
+## v0.10.3 — Voice listening recovers after an update
+
+- Restart the voice bridge when it exits unexpectedly while voice commands remain enabled.
+- Back off retries so an update-time singleton lock race recovers without a busy loop.
+
 ## v0.10.2 — Voice settings follow the English UI
 
 - Replace the hard-coded Korean voice-control labels with English source strings.
