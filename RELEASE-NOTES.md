@@ -1,5 +1,10 @@
 # Release notes
 
+## v0.10.2 — Voice settings follow the English UI
+
+- Replace the hard-coded Korean voice-control labels with English source strings.
+- Clarify the wake and noise sensitivity endpoints and voice enrollment action.
+
 ## v0.10.1 — Voice commands can reach a background Scout window
 
 - Acquire Scout's message-box focus through an attached input queue when Windows rejects a
