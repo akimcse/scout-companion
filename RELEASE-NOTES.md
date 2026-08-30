@@ -1,5 +1,12 @@
 # Release notes
 
+## v0.12.0 — Voice enrollment follows the selected language
+
+- Localize the separate five-phrase voice enrollment window in English, Korean, Japanese,
+  and Simplified Chinese.
+- Change the enrollment prompts and speech recognizer language together with the UI.
+- Pass the current Companion language into the enrollment process.
+
 ## v0.11.1 — Localize every selectable-language setting
 
 - Translate all settings labels, tooltips, voice setup states, and language names into

@@ -134,6 +134,7 @@
     "Could not open voice setup":  "음성 설정을 열지 못했습니다",
     "Enable voice control":  "음성 제어 켜기",
     "Disable voice control":  "음성 제어 끄기",
+    "Listening":  "듣는 중",
     "The prepared Scout Voice runtime or voice profile was not found.":  "준비된 Scout Voice 런타임 또는 음성 프로필을 찾지 못했습니다.",
     "Remember where I put it":  "마지막 위치 기억",
     "Drag the toast anywhere and it comes back there, instead of the bottom-right corner. If the screen it was on has gone - undocked, or a display switched off - it returns to the corner rather than opening somewhere you cannot reach it, since it has no taskbar button. Turning this off forgets the saved position.":  "토스트를 옮긴 위치를 기억합니다. 해당 화면이 분리되거나 꺼지면 접근할 수 없는 위치 대신 오른쪽 아래로 돌아갑니다. 끄면 저장된 위치를 삭제합니다.",

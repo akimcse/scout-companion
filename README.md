@@ -15,7 +15,8 @@ without switching back.
 > and the 0-100 wake-word and ambient-noise sensitivity controls are stored in
 > `config.json`; the voice engine follows Companion's lifetime. First-time users can run the five-phrase
 > voice enrollment from the same settings section; raw recordings are discarded
-> and only the encrypted speaker profile is retained.
+> and only the encrypted speaker profile is retained. The enrollment UI,
+> recognizer, and five prompts follow the selected language.
 
 ![PowerShell](https://img.shields.io/badge/PowerShell-5%2B-5391FE?logo=powershell&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
