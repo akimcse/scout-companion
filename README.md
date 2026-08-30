@@ -9,7 +9,7 @@ When the agent is working and you've looked away, a small toast in the corner sh
 without switching back.
 
 > **Optional voice control:** open Settings and use the
-> **음성으로 제어** section to enable command input and, independently, spoken
+> **VOICE CONTROL** section to enable command input and, independently, spoken
 > answers. Recognized commands are typed into the currently visible Scout
 > conversation, and the answer from that same turn is read back. Both choices
 > and the 0-100 wake-word and ambient-noise sensitivity controls are stored in
