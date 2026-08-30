@@ -16,14 +16,17 @@ Assert-True ($Config.voiceCommandEnabled -eq $false) 'command input defaults off
 Assert-True ($Config.voiceReplyEnabled -eq $true) 'spoken replies default on'
 Assert-True ($Config.voiceWakeSensitivity -eq 65) 'wake sensitivity has a default'
 Assert-True ($Config.voiceNoiseSensitivity -eq 35) 'noise sensitivity has a default'
-foreach ($name in 'VoiceCommandCheck', 'VoiceReplyCheck', 'VoiceSensitivitySlider',
-        'NoiseSensitivitySlider', 'VoiceEnrollButton') {
+foreach ($name in 'VoiceCommandCheck', 'VoiceReplyCheck', 'VoiceLanguageHint',
+        'VoiceSensitivitySlider', 'NoiseSensitivitySlider', 'VoiceEnrollButton') {
     Assert-True ($Text -match "x:Name=`"$name`"") "$name exists"
 }
 Assert-True ($Text -match 'x:Name="LanguagePicker"') 'language picker exists'
-foreach ($language in "'en'", "'ko'", "'ja'", "'zh-Hans'") {
+foreach ($language in "'en'", "'zh-Hans'", "'zh-Hant'", "'fr'", "'de'", "'it'",
+        "'es'", "'ja'", "'ko'", "'ru'", "'pt-BR'", "'tr'", "'pl'", "'cs'", "'hu'") {
     Assert-True ($Text -match [regex]::Escape("Id = $language")) "$language is selectable"
 }
+Assert-True ($Text -match "\`$script:VoiceLanguages = @\('en', 'ko', 'ja', 'zh-Hans'\)") 'voice languages remain explicit'
+Assert-True ($Text -match "\`$script:Lang -notin \`$script:VoiceLanguages") 'unsupported voice languages show their fallback'
 Assert-True ($Text -match 'Restart-CompanionForLanguage') 'language changes restart Companion'
 Assert-True ($Text -match "placeholder.Content = T 'Choose language'") 'unsupported current languages are not shown as English'
 foreach ($label in 'VOICE CONTROL', 'Run commands by voice', 'Receive spoken answers',
@@ -194,6 +197,18 @@ Assert-True ($Tts -match 'Kill\(entireProcessTree: true\)') 'TTS playback is sto
 $Project = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\ScoutVoiceEngine.csproj') -Raw -Encoding UTF8
 Assert-True ($Project -match 'org\.k2fsa\.sherpa\.onnx') 'Sherpa ONNX is the .NET speech backend'
 Assert-True ($Project -match 'NAudio') 'NAudio is the Windows microphone backend'
+$EnrollmentForm = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\EnrollmentForm.cs') -Raw -Encoding UTF8
+$VoiceApp = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\App.cs') -Raw -Encoding UTF8
+Assert-True ($Project -match '<UseWPF>true</UseWPF>') 'enrollment uses the same WPF UI framework as settings'
+Assert-True ($EnrollmentForm -match 'SizeToContent = SizeToContent\.Height') 'enrollment window grows to fit localized text'
+Assert-True ($EnrollmentForm -match 'TextWrapping = TextWrapping\.Wrap') 'enrollment text wraps without clipping'
+Assert-True ($EnrollmentForm -match '#FF1B1F2A') 'enrollment uses the settings window background'
+Assert-True ($EnrollmentForm -match '#FFE6EAF2') 'enrollment uses the settings window foreground'
+Assert-True ($EnrollmentForm -match 'Segoe UI, Malgun Gothic, Yu Gothic UI, Microsoft YaHei UI') 'WPF enrollment has CJK font fallback'
+Assert-True ($EnrollmentForm -match 'ScoutCompanion", "scout-companion\.ico"') 'enrollment reuses the Companion icon'
+Assert-True ($EnrollmentForm -match 'DwmSetWindowAttribute\(handle, 20') 'enrollment uses the settings dark title bar'
+Assert-True ($VoiceApp -match 'SetApartmentState\(ApartmentState\.STA\)') 'WPF enrollment runs on an STA thread'
+Assert-True ($Text -match '\$startInfo\.CreateNoWindow = \$true') 'voice enrollment does not open a console'
 $Installer = Get-Content (Join-Path $Root 'Install.ps1') -Raw
 Assert-True ($Installer -match 'Stop-ProcessTree') 'installer stops the voice process tree'
 Assert-True ($Installer -match 'Remove-UpgradePath') 'installer retries locked upgrade files'

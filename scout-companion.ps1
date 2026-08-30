@@ -468,6 +468,7 @@ function Convert-XamlText([xml]$doc) {
 }
 
 $script:Lang = Import-Language $Config.language
+$script:VoiceLanguages = @('en', 'ko', 'ja', 'zh-Hans')
 
 # Writes a subset of settings back to config.json, preserving anything the user
 # put there by hand. Used by the settings window and the tray menu.
@@ -3267,7 +3268,7 @@ function Start-VoiceBridge {
         '--noise-sensitivity', ([int]$Config.voiceNoiseSensitivity),
         '--parent-pid', "$PID"
     )
-    $runtimeLanguage = if ($script:Lang -in @('en', 'ko', 'ja', 'zh-Hans')) {
+    $runtimeLanguage = if ($script:Lang -in $script:VoiceLanguages) {
         [string]$script:Lang
     } else { 'en' }
     $arguments += @('--language', $runtimeLanguage)
@@ -4194,6 +4195,7 @@ $script:SettingsWindow    = $null
 $script:SettingsAnimCheck = $null
 $script:SettingsChatTitleCheck = $null
 $script:SettingsLanguage = $null
+$script:SettingsVoiceLanguageHint = $null
 $script:SettingsSuppress  = $false
 $script:OpacitySaveTimer  = $null
 $script:OpacityPendingValue = 1.0
@@ -4376,7 +4378,7 @@ function Start-VoiceEnrollment {
         $script:SettingsVoiceEnrollStatus.Text = T 'Recording 5 phrases...'
     }
     try {
-        $enrollmentLanguage = if ($script:Lang -in @('en', 'ko', 'ja', 'zh-Hans')) {
+        $enrollmentLanguage = if ($script:Lang -in $script:VoiceLanguages) {
             [string]$script:Lang
         } else {
             'en'
@@ -4387,9 +4389,13 @@ function Start-VoiceEnrollment {
             '--runtime-dir', "`"$script:VoiceRuntimeDir`"",
             '--language', $enrollmentLanguage
         )
-        $script:VoiceEnrollmentProcess = Start-Process $enrollmentExecutable `
-            -ArgumentList $enrollmentArguments `
-            -WorkingDirectory $script:VoiceRuntimeDir -PassThru
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $enrollmentExecutable
+        $startInfo.Arguments = $enrollmentArguments -join ' '
+        $startInfo.WorkingDirectory = $script:VoiceRuntimeDir
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $script:VoiceEnrollmentProcess = [System.Diagnostics.Process]::Start($startInfo)
         if (-not $script:VoiceEnrollmentTimer) {
             $script:VoiceEnrollmentTimer = New-Object System.Windows.Threading.DispatcherTimer
             $script:VoiceEnrollmentTimer.Interval = [TimeSpan]::FromMilliseconds(300)
@@ -4633,7 +4639,7 @@ function Restart-CompanionForLanguage([string]$language) {
       <DockPanel Grid.Column="1" LastChildFill="False" Margin="12,0,0,0">
         <TextBlock Text="Language" Foreground="#FF9AA6BE"
                    VerticalAlignment="Center" Margin="0,0,8,0"/>
-        <ComboBox x:Name="LanguagePicker" Width="118" Height="26" Cursor="Hand"/>
+        <ComboBox x:Name="LanguagePicker" Width="170" Height="26" Cursor="Hand"/>
       </DockPanel>
     </Grid>
     <!-- Kept as a named element because the code swaps its text to explain when
@@ -4643,6 +4649,8 @@ function Restart-CompanionForLanguage([string]$language) {
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
     <TextBlock Style="{StaticResource Section}" Text="VOICE CONTROL"/>
+    <TextBlock x:Name="VoiceLanguageHint" Style="{StaticResource Hint}"
+               Margin="0,0,0,10" Visibility="Collapsed"/>
     <DockPanel LastChildFill="False">
       <CheckBox x:Name="VoiceCommandCheck"
                 Content="Run commands by voice"
@@ -4899,6 +4907,7 @@ function Show-SettingsWindow {
     $script:SettingsChatTitleCheck = $sw.FindName('ChatTitleCheck')
     $script:SettingsVoiceCommand = $sw.FindName('VoiceCommandCheck')
     $script:SettingsVoiceReply = $sw.FindName('VoiceReplyCheck')
+    $script:SettingsVoiceLanguageHint = $sw.FindName('VoiceLanguageHint')
     $script:SettingsVoiceSensitivity = $sw.FindName('VoiceSensitivitySlider')
     $script:SettingsVoiceSensitivityText = $sw.FindName('VoiceSensitivityValue')
     $script:SettingsNoiseSensitivity = $sw.FindName('NoiseSensitivitySlider')
@@ -4938,6 +4947,11 @@ function Show-SettingsWindow {
     $script:SettingsChatTitleCheck.IsChecked = [bool]$Config.showChatTitle
     $script:SettingsVoiceCommand.IsChecked = [bool]$Config.voiceCommandEnabled
     $script:SettingsVoiceReply.IsChecked = [bool]$Config.voiceReplyEnabled
+    if ($script:Lang -notin $script:VoiceLanguages) {
+        $script:SettingsVoiceLanguageHint.Text =
+            (T 'Set up voice recognition') + ': ' + (T 'English')
+        $script:SettingsVoiceLanguageHint.Visibility = 'Visible'
+    }
     $sensitivity = [Math]::Max(0, [Math]::Min(100, [int]$Config.voiceWakeSensitivity))
     $script:SettingsVoiceSensitivity.Value = $sensitivity
     $script:SettingsVoiceSensitivityText.Text = [string]$sensitivity
@@ -4961,10 +4975,21 @@ function Show-SettingsWindow {
     }
 
     $languageOptions = @(
-        [pscustomobject]@{ Id = 'en'; Label = (T 'English') },
-        [pscustomobject]@{ Id = 'ko'; Label = (T 'Korean') },
-        [pscustomobject]@{ Id = 'ja'; Label = (T 'Japanese') },
-        [pscustomobject]@{ Id = 'zh-Hans'; Label = (T 'Chinese (Simplified)') }
+        [pscustomobject]@{ Id = 'en'; Label = 'English' },
+        [pscustomobject]@{ Id = 'zh-Hans'; Label = '简体中文' },
+        [pscustomobject]@{ Id = 'zh-Hant'; Label = '繁體中文' },
+        [pscustomobject]@{ Id = 'fr'; Label = 'Français' },
+        [pscustomobject]@{ Id = 'de'; Label = 'Deutsch' },
+        [pscustomobject]@{ Id = 'it'; Label = 'Italiano' },
+        [pscustomobject]@{ Id = 'es'; Label = 'Español' },
+        [pscustomobject]@{ Id = 'ja'; Label = '日本語' },
+        [pscustomobject]@{ Id = 'ko'; Label = '한국어' },
+        [pscustomobject]@{ Id = 'ru'; Label = 'Русский' },
+        [pscustomobject]@{ Id = 'pt-BR'; Label = 'Português (Brasil)' },
+        [pscustomobject]@{ Id = 'tr'; Label = 'Türkçe' },
+        [pscustomobject]@{ Id = 'pl'; Label = 'Polski' },
+        [pscustomobject]@{ Id = 'cs'; Label = 'Čeština' },
+        [pscustomobject]@{ Id = 'hu'; Label = 'Magyar' }
     )
     $selectedLanguage = if ($Config.language -and $Config.language -ne 'auto') {
         [string]$Config.language
@@ -5262,6 +5287,7 @@ function Show-SettingsWindow {
         $script:SettingsAnimCheck = $null
         $script:SettingsChatTitleCheck = $null
         $script:SettingsLanguage = $null
+        $script:SettingsVoiceLanguageHint = $null
         $script:SettingsRememberPos = $null
         $script:SettingsBetaChk = $null
     })

@@ -1,14 +1,29 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+
 namespace ScoutVoiceEngine;
 
-internal sealed class EnrollmentForm : Form
+internal sealed class EnrollmentForm : Window, IDisposable
 {
+    private static readonly Brush WindowBackground = Brush("#FF1B1F2A");
+    private static readonly Brush PrimaryText = Brush("#FFE6EAF2");
+    private static readonly Brush MutedText = Brush("#FF9AA6BE");
+    private static readonly Brush SubtleText = Brush("#FF8A93A6");
+    private static readonly Brush ControlBorderBrush = Brush("#FF3A4358");
+    private static readonly Brush AccentBrush = Brush("#FF2F6FBF");
+
     private readonly EnrollmentOptions _options;
     private readonly BoundedLogger _logger;
     private readonly LanguageResources _text;
     private readonly ProgressBar _progress;
-    private readonly Label _stepLabel;
-    private readonly Label _phraseLabel;
-    private readonly Label _resultLabel;
+    private readonly TextBlock _stepLabel;
+    private readonly TextBlock _phraseLabel;
+    private readonly TextBlock _resultLabel;
     private readonly Button _recordButton;
     private readonly List<float[]> _embeddings = [];
     private readonly CancellationTokenSource _closing = new();
@@ -16,6 +31,7 @@ internal sealed class EnrollmentForm : Form
     private VoiceModels? _models;
     private int _modelUsers;
     private bool _closingRequested;
+    private bool _skipCloseConfirmation;
     private int _index;
 
     public EnrollmentForm(EnrollmentOptions options, BoundedLogger logger)
@@ -23,58 +39,138 @@ internal sealed class EnrollmentForm : Form
         _options = options;
         _logger = logger;
         _text = LanguageResources.All[options.Language];
-        Text = _text.Title;
-        ClientSize = new Size(720, 500);
-        MinimumSize = new Size(620, 440);
-        Font = new Font("Segoe UI", 10);
-        StartPosition = FormStartPosition.CenterScreen;
 
-        var heading = new Label
-        {
-            Text = _text.Heading,
-            Font = new Font("Segoe UI", 22, FontStyle.Bold),
-            AutoSize = true,
-            Location = new Point(28, 24),
-        };
-        var intro = NewWrappedLabel(_text.Intro, 28, 76, 650);
+        Title = _text.Title;
+        Width = 720;
+        MinWidth = 620;
+        SizeToContent = SizeToContent.Height;
+        ResizeMode = ResizeMode.NoResize;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        Background = WindowBackground;
+        Foreground = PrimaryText;
+        FontFamily = new FontFamily("Segoe UI, Malgun Gothic, Yu Gothic UI, Microsoft YaHei UI");
+        ShowInTaskbar = true;
+        ApplyCompanionIcon();
+
+        var content = new StackPanel { Margin = new Thickness(28, 24, 28, 24) };
+        Content = content;
+
+        content.Children.Add(NewText(_text.Heading, 22, FontWeights.Bold, PrimaryText,
+            new Thickness(0, 0, 0, 10)));
+        content.Children.Add(NewText(_text.Intro, 12.5, FontWeights.Normal, MutedText,
+            new Thickness(0, 0, 0, 18)));
+
         _progress = new ProgressBar
         {
-            Location = new Point(28, 130),
-            Size = new Size(650, 20),
+            Height = 8,
             Maximum = _text.Phrases.Length,
+            Foreground = AccentBrush,
+            Background = ControlBorderBrush,
+            BorderThickness = new Thickness(0),
+            Margin = new Thickness(0, 0, 0, 18),
         };
-        _stepLabel = NewWrappedLabel(_text.Loading, 28, 170, 650);
-        _phraseLabel = NewWrappedLabel("", 28, 210, 650);
-        _phraseLabel.Font = new Font(options.Language == "ko" ? "Malgun Gothic" : "Segoe UI",
-            17, FontStyle.Bold);
-        _resultLabel = NewWrappedLabel("", 28, 290, 650);
-        _resultLabel.ForeColor = Color.DimGray;
+        content.Children.Add(_progress);
+
+        _stepLabel = NewText(_text.Loading, 12.5, FontWeights.SemiBold, MutedText,
+            new Thickness(0, 0, 0, 8));
+        content.Children.Add(_stepLabel);
+
+        var phraseSurface = new Border
+        {
+            Background = Brush("#FF232838"),
+            BorderBrush = ControlBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(16, 14, 16, 14),
+            MinHeight = 82,
+            Margin = new Thickness(0, 0, 0, 14),
+        };
+        _phraseLabel = NewText("", 17, FontWeights.SemiBold, PrimaryText, new Thickness(0));
+        _phraseLabel.VerticalAlignment = VerticalAlignment.Center;
+        phraseSurface.Child = _phraseLabel;
+        content.Children.Add(phraseSurface);
+
+        _resultLabel = NewText("", 12, FontWeights.Normal, MutedText,
+            new Thickness(0, 0, 0, 14));
+        _resultLabel.MinHeight = 38;
+        content.Children.Add(_resultLabel);
+
         _recordButton = new Button
         {
-            Text = _text.Record,
-            Location = new Point(28, 350),
-            AutoSize = true,
-            Enabled = false,
+            Content = _text.Record,
+            MinWidth = 150,
+            Height = 32,
+            Padding = new Thickness(14, 0, 14, 0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = AccentBrush,
+            Foreground = Brushes.White,
+            BorderThickness = new Thickness(0),
+            Cursor = System.Windows.Input.Cursors.Hand,
+            IsEnabled = false,
+            Margin = new Thickness(0, 0, 0, 18),
         };
         _recordButton.Click += RecordClicked;
-        var privacy = NewWrappedLabel(_text.Privacy, 28, 420, 650);
-        privacy.ForeColor = Color.DimGray;
+        content.Children.Add(_recordButton);
 
-        Controls.AddRange([heading, intro, _progress, _stepLabel, _phraseLabel, _resultLabel,
-            _recordButton, privacy]);
-        FormClosing += OnFormClosing;
-        Shown += async (_, _) => await LoadModelsAsync();
+        content.Children.Add(new Border
+        {
+            Height = 1,
+            Background = Brush("#FF2A3142"),
+            Margin = new Thickness(0, 0, 0, 12),
+        });
+        content.Children.Add(NewText(_text.Privacy, 11, FontWeights.Normal, SubtleText,
+            new Thickness(0)));
+
+        Closing += OnFormClosing;
+        SourceInitialized += (_, _) => ApplyDarkTitleBar();
+        Loaded += async (_, _) => await LoadModelsAsync();
     }
 
     public bool Completed { get; private set; }
 
-    private static Label NewWrappedLabel(string text, int x, int y, int width) => new()
+    private static TextBlock NewText(
+        string text, double size, FontWeight weight, Brush foreground, Thickness margin) =>
+        new()
+        {
+            Text = text,
+            FontSize = size,
+            FontWeight = weight,
+            Foreground = foreground,
+            TextWrapping = TextWrapping.Wrap,
+            TextTrimming = TextTrimming.None,
+            LineStackingStrategy = LineStackingStrategy.MaxHeight,
+            Margin = margin,
+        };
+
+    private static SolidColorBrush Brush(string color)
     {
-        Text = text,
-        Location = new Point(x, y),
-        Size = new Size(width, 60),
-        AutoEllipsis = false,
-    };
+        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
+        brush.Freeze();
+        return brush;
+    }
+
+    private void ApplyCompanionIcon()
+    {
+        var iconPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "ScoutCompanion", "scout-companion.ico");
+        if (!File.Exists(iconPath))
+            return;
+        Icon = BitmapFrame.Create(new Uri(iconPath), BitmapCreateOptions.PreservePixelFormat,
+            BitmapCacheOption.OnLoad);
+    }
+
+    private void ApplyDarkTitleBar()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        var enabled = 1;
+        if (DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int)) != 0)
+            DwmSetWindowAttribute(handle, 19, ref enabled, sizeof(int));
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(
+        nint windowHandle, int attribute, ref int value, int valueSize);
 
     private async Task LoadModelsAsync()
     {
@@ -94,22 +190,23 @@ internal sealed class EnrollmentForm : Form
                     _models = loaded;
                 }
             });
-            if (_closingRequested || IsDisposed)
+            if (_closingRequested)
                 return;
             ShowPhrase();
         }
         catch (Exception exception)
         {
             _logger.Error("Enrollment initialization failed", exception);
-            if (_closingRequested || IsDisposed)
+            if (_closingRequested)
                 return;
             MessageBox.Show(this, exception.Message, _text.InitFailed,
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            _skipCloseConfirmation = true;
             Close();
         }
     }
 
-    private async void RecordClicked(object? sender, EventArgs eventArgs)
+    private async void RecordClicked(object sender, RoutedEventArgs eventArgs)
     {
         if (Completed)
         {
@@ -119,7 +216,7 @@ internal sealed class EnrollmentForm : Form
         if (!TryAcquireModels(out var models))
             return;
         var cancellationToken = _closing.Token;
-        _recordButton.Enabled = false;
+        _recordButton.IsEnabled = false;
         _stepLabel.Text = string.Format(_text.Listening, _index + 1);
         _resultLabel.Text = _text.Wait;
         try
@@ -152,8 +249,8 @@ internal sealed class EnrollmentForm : Form
                 _stepLabel.Text = _text.Complete;
                 _phraseLabel.Text = _text.Ready;
                 _resultLabel.Text = string.Format(_text.Threshold, profile.Threshold);
-                _recordButton.Text = _text.Finish;
-                _recordButton.Enabled = true;
+                _recordButton.Content = _text.Finish;
+                _recordButton.IsEnabled = true;
             }
             else
             {
@@ -167,11 +264,11 @@ internal sealed class EnrollmentForm : Form
         catch (Exception exception)
         {
             _logger.Error("Enrollment recording rejected", exception);
-            if (!_closingRequested && !IsDisposed)
+            if (!_closingRequested)
             {
                 _resultLabel.Text = exception.Message;
-                _recordButton.Text = _text.Retry;
-                _recordButton.Enabled = true;
+                _recordButton.Content = _text.Retry;
+                _recordButton.IsEnabled = true;
             }
         }
         finally
@@ -214,19 +311,20 @@ internal sealed class EnrollmentForm : Form
     {
         _stepLabel.Text = string.Format(_text.Prompt, _index + 1);
         _phraseLabel.Text = _text.Phrases[_index];
-        _recordButton.Text = _text.Record;
-        _recordButton.Enabled = true;
+        _recordButton.Content = _text.Record;
+        _recordButton.IsEnabled = true;
     }
 
-    private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
+    private void OnFormClosing(object? sender, CancelEventArgs eventArgs)
     {
-        if (!Completed && eCloseNeedsConfirmation(eventArgs.CloseReason) &&
+        if (!Completed && !_skipCloseConfirmation &&
             MessageBox.Show(this, _text.Cancel, _text.CancelTitle,
-                MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
         {
             eventArgs.Cancel = true;
             return;
         }
+
         VoiceModels? dispose = null;
         lock (_modelGate)
         {
@@ -241,13 +339,8 @@ internal sealed class EnrollmentForm : Form
         dispose?.Dispose();
     }
 
-    private static bool eCloseNeedsConfirmation(CloseReason reason) =>
-        reason == CloseReason.UserClosing;
-
-    protected override void Dispose(bool disposing)
+    public void Dispose()
     {
-        if (disposing)
-            _closing.Dispose();
-        base.Dispose(disposing);
+        _closing.Dispose();
     }
 }
