@@ -4305,8 +4305,13 @@ function Start-VoiceEnrollment {
         $script:SettingsVoiceEnrollStatus.Text = T 'Recording 5 phrases...'
     }
     try {
+        $enrollmentLanguage = if ($script:Lang -in @('en', 'ko', 'ja', 'zh-Hans')) {
+            [string]$script:Lang
+        } else {
+            'en'
+        }
         $script:VoiceEnrollmentProcess = Start-Process $pythonw `
-            -ArgumentList "`"$enrollment`"" `
+            -ArgumentList "`"$enrollment`"", '--language', $enrollmentLanguage `
             -WorkingDirectory $script:VoiceRuntimeDir -PassThru
         if (-not $script:VoiceEnrollmentTimer) {
             $script:VoiceEnrollmentTimer = New-Object System.Windows.Threading.DispatcherTimer

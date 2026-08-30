@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $App = Join-Path $Root 'scout-companion.ps1'
 $Config = Get-Content (Join-Path $Root 'config.sample.json') -Raw | ConvertFrom-Json
@@ -71,6 +71,48 @@ foreach ($tag in 'ko', 'ja', 'zh-Hans') {
     Assert-True ($missing.Count -eq 0) "$tag covers every settings label"
 }
 
+$allUiKeys = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($match in [regex]::Matches(
+        $Text, "(?:^|[^A-Za-z])T\s+'((?:[^']|'')*)'")) {
+    [void]$allUiKeys.Add($match.Groups[1].Value.Replace("''", "'"))
+}
+foreach ($name in 'xaml', 'settingsXaml') {
+    $uiMatch = [regex]::Match(
+        $Text, "(?s)\[xml\]\`$$name\s*=\s*@'(.*?)'@")
+    if (-not $uiMatch.Success) { continue }
+    [xml]$uiXml = $uiMatch.Groups[1].Value
+    foreach ($node in $uiXml.SelectNodes('//*')) {
+        foreach ($attribute in 'Text', 'Content', 'ToolTip', 'Title') {
+            $value = $node.GetAttribute($attribute)
+            if ($value -and $value -notmatch '^\{|^&#x|^\s*$|^-?$|^\d+%?$') {
+                [void]$allUiKeys.Add($value)
+            }
+        }
+        if ($node.LocalName -eq 'ToolTip' -and $node.InnerText.Trim()) {
+            [void]$allUiKeys.Add($node.InnerText.Trim())
+        }
+    }
+}
+foreach ($value in $dynamicSettingsKeys) { [void]$allUiKeys.Add($value) }
+$notLocalized = @('Scout Companion', 'MIC', '✕', '⚠ Permission requested')
+foreach ($tag in 'ko', 'ja', 'zh-Hans') {
+    $translation = Get-Content (Join-Path $Root "lang\$tag.json") -Raw |
+        ConvertFrom-Json
+    $translationKeys = @($translation.PSObject.Properties.Name)
+    $missing = @($allUiKeys |
+        Where-Object {
+            $notLocalized -notcontains $_ -and
+            $_.Length -gt 1 -and
+            $_ -notmatch 'Permission requested$' -and
+            $translationKeys -notcontains $_
+        } |
+        Sort-Object -Unique)
+    if ($missing.Count) {
+        Write-Host "       missing: $($missing -join ' | ')"
+    }
+    Assert-True ($missing.Count -eq 0) "$tag covers every localizable UI label"
+}
+
 Write-Host 'current conversation bridge'
 Assert-True ($Text -match 'SendUnicodeText\(\$request\.Command\)') 'types into Scout'
 Assert-True ($Text -match 'function Set-AgentMessageFocus') 'focus acquisition is guarded'
@@ -118,6 +160,11 @@ $required = @(
 foreach ($relative in $required) {
     Assert-True (Test-Path (Join-Path $Root $relative)) "$relative is packaged"
 }
+$Enrollment = Get-Content (Join-Path $Root 'voice\runtime\enrollment_gui.py') -Raw
+foreach ($language in '"en"', '"ko"', '"ja"', '"zh-Hans"') {
+    Assert-True ($Enrollment -match [regex]::Escape($language)) "voice enrollment supports $language"
+}
+Assert-True ($Text -match "'--language', \`$enrollmentLanguage") 'Companion passes its language to enrollment'
 $Build = Get-Content (Join-Path $Root 'Build-Release.ps1') -Raw
 Assert-True ($Build -match "'voice'") 'release zip includes voice'
 $Prepare = Get-Content (Join-Path $Root 'voice\Prepare-VoiceRuntime.ps1') -Raw
@@ -127,6 +174,8 @@ Assert-True ($Prepare -match "Python 3\.11 or later") 'supported Python version 
 $Agent = Get-Content (Join-Path $Root 'voice\runtime\agent.py') -Raw
 Assert-True ($Agent -match 'Rejected unverified command') 'unregistered speakers are rejected'
 Assert-True ($Agent -notmatch 'Executing verified M365 command with omitted wake word') 'wake word cannot be omitted'
+$VoiceRuntime = Get-Content (Join-Path $Root 'voice\runtime\voice_runtime.py') -Raw
+Assert-True ($VoiceRuntime -match '\\u4e00-\\u9fff') 'Chinese enrollment text survives normalization'
 Assert-True ($Agent -match 'cut = self\._snap_to_sentence') 'interrupted answers resume at a sentence'
 $Runtime = Get-Content (Join-Path $Root 'voice\runtime\voice_runtime.py') -Raw
 Assert-True ($Runtime -match 'def start_windows_speech') 'Windows TTS playback is tracked'

@@ -147,7 +147,9 @@ def load_profile() -> dict:
 
 def normalize_text(text: str) -> str:
     text = re.sub(r"<\|.*?\|>", "", text)
-    return re.sub(r"[^0-9a-zA-Z가-힣ぁ-んァ-ヶ]+", "", text).lower()
+    return re.sub(
+        r"[^0-9a-zA-Z가-힣ぁ-んァ-ヶ\u4e00-\u9fff]+", "", text
+    ).lower()
 
 
 def set_wake_sensitivity(value: int) -> None:
@@ -207,7 +209,7 @@ def split_wake_command(text: str) -> tuple[bool, str]:
 
 
 class VoiceModels:
-    def __init__(self) -> None:
+    def __init__(self, language: str = "ko") -> None:
         sense_dir = next(
             MODELS_DIR.glob("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-*"),
             None,
@@ -220,7 +222,7 @@ class VoiceModels:
             num_threads=2,
             sample_rate=SAMPLE_RATE,
             feature_dim=80,
-            language="ko",
+            language=language,
             use_itn=True,
             provider="cpu",
             debug=False,
