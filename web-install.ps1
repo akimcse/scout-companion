@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     One-line installer for Scout Companion.
 
@@ -25,9 +25,11 @@
     Also consider releases marked as pre-releases, and install one if it is
     newer than the newest finished release. Ignored when -Tag is given, since
     that names a release outright. Because a piped script cannot take
-    parameters, this needs the scriptblock form:
+    parameters, this needs the scriptblock form - and the download has to go
+    through WebClient rather than Invoke-RestMethod, which keeps a byte order
+    mark that the parser then reads as the first token:
 
-      & ([scriptblock]::Create((irm https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1))) -Beta
+      & ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1'))) -Beta
 
 .PARAMETER NoRun
     Install without starting the companion afterwards.
