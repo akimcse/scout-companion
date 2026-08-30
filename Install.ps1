@@ -241,6 +241,28 @@ foreach ($f in $Payload) {
         Copy-Item $source $destination -Force
     }
 }
+$dotnetSource = Join-Path $InstallDir 'voice\dotnet\ScoutVoiceEngine'
+foreach ($developmentFolder in 'bin', 'obj') {
+    $path = Join-Path $dotnetSource $developmentFolder
+    if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+}
+$publishTest = Join-Path $InstallDir 'voice\dotnet\publish-test'
+if (Test-Path $publishTest) { Remove-Item $publishTest -Recurse -Force }
+$installedDotNetRoot = Join-Path $InstallDir 'voice\dotnet'
+Get-ChildItem $installedDotNetRoot -Directory -Filter 'publish-*' `
+    -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+$publishRoot = Join-Path $InstallDir 'voice\dotnet\publish'
+$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+$keepRuntime = switch ($architecture) {
+    'arm64' { 'win-arm64' }
+    'x64'   { 'win-x64' }
+    default { $null }
+}
+if ($keepRuntime -and (Test-Path $publishRoot)) {
+    Get-ChildItem $publishRoot -Directory |
+        Where-Object { $_.Name -ne $keepRuntime } |
+        Remove-Item -Recurse -Force
+}
 Copy-Item (Join-Path $SourceDir 'lang') $InstallDir -Recurse -Force
 Write-Host ("  copied {0} files and {1} language files" -f $Payload.Count, (Get-ChildItem (Join-Path $InstallDir 'lang') -File).Count)
 
@@ -248,6 +270,22 @@ foreach ($f in $saved.Keys) {
     Set-Content -Path (Join-Path $InstallDir $f) -Value $saved[$f] -Encoding UTF8 -NoNewline
 }
 if ($saved.Count) { Write-Host ("  kept your {0}" -f (($saved.Keys | Sort-Object) -join ' and ')) }
+
+# v0.13 has one voice engine. Remove the short-lived migration selector while
+# preserving every other user setting.
+$installedConfig = Join-Path $InstallDir 'config.json'
+if (Test-Path $installedConfig) {
+    try {
+        $configObject = Get-Content $installedConfig -Raw | ConvertFrom-Json
+        if ($configObject.PSObject.Properties['voiceEngine']) {
+            $configObject.PSObject.Properties.Remove('voiceEngine')
+            ($configObject | ConvertTo-Json -Depth 6) |
+                Set-Content $installedConfig -Encoding UTF8
+        }
+    } catch {
+        Write-Warning "  could not migrate voice settings: $($_.Exception.Message)"
+    }
+}
 
 # Shortcuts, from the installed copy so they point at it rather than at the
 # folder this was run from. 6> because that script reports with Write-Host,
