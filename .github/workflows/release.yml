@@ -42,6 +42,10 @@ jobs:
       - name: Work out the next version
         id: bump
         shell: pwsh
+        env:
+          # For the gh lookup below. Only ever read from, and the value it
+          # returns is treated as data.
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Read the message out of the checked-out repository rather than
           # interpolating an Actions expression into this script. Pull requests
@@ -55,7 +59,29 @@ jobs:
           # evaluates the run block's text before pwsh ever sees it, so a
           # PowerShell comment is no shelter. That is what broke the first run.)
           $subject = git log -1 --pretty=%s
-          ./Bump-Version.ps1 -Subject $subject
+
+          # A squash merge keeps the pull request number and drops the branch
+          # name, so the prefix that decides the bump has to be looked up. This
+          # is done here rather than in Bump-Version.ps1 so that file stays a
+          # pure function over strings, and stays testable without a network.
+          #
+          # The branch arrives as data in a variable, never spliced into the
+          # text of this script - same reasoning as the subject above.
+          $branch = ''
+          if ($subject -notmatch '^Merge pull request #\d+ from ' -and
+              $subject -match '\(#(\d+)\)\s*$') {
+              $pr = $matches[1]
+              try {
+                  $branch = (gh pr view $pr --json headRefName --jq .headRefName) 2>$null
+                  Write-Host "  squash merge of #$pr, from branch '$branch'"
+              } catch {
+                  # Falling through with no branch means Bump-Version treats it
+                  # as an unprefixed one and releases a patch, which is the
+                  # conservative answer rather than releasing nothing.
+                  Write-Host "  squash merge of #$pr, branch lookup failed - patch"
+              }
+          }
+          ./Bump-Version.ps1 -Subject $subject -Branch $branch
 
           # Capture the body now, while HEAD is still the merge commit. The
           # publish step runs after the version has been committed and rebased,

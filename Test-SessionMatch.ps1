@@ -593,6 +593,28 @@ Same 'a direct push releases nothing' (Get-BumpKind 'Fix a typo in the readme') 
 Same 'and neither does nothing'       (Get-BumpKind '') ''
 Same 'nor a near-miss subject'        (Get-BumpKind 'Merge branch main into feat/x') ''
 
+# GitHub writes two different subjects for a merged pull request, and "Squash
+# and merge" sits one click from "Merge pull request" in the same dropdown. The
+# squash form keeps the number and drops the branch, and only the first shape
+# was matched - so a squash merge released nothing while the step that decided
+# so reported success. Measured on #48: merged, workflow green, no release, the
+# version line untouched. Silence is the worst way for work not to ship.
+Same 'a squash merge is a merge'     (Get-BumpKind 'Add a beta update ring (#48)' 'feat/beta-ring') 'minor'
+Same 'and reads its branch too'      (Get-BumpKind 'Stop the flicker (#31)' 'fix/flicker') 'patch'
+# Without a branch the shape is still a release - conservatively, as a patch -
+# because a merge that reaches nobody is worse than one released too small.
+Same 'no branch is still a patch'    (Get-BumpKind 'Add a beta update ring (#48)') 'patch'
+# A supplied branch wins over one the subject names, since that is the case the
+# parameter exists for; they agree anyway for a real merge commit.
+Same 'a given branch is used'        (Get-BumpKind 'Merge pull request #20 from akimcse/fix/x' 'feat/y') 'minor'
+# ...and a subject that merely mentions a number is not a merge.
+Same 'a bare number is not a merge'  (Get-BumpKind 'Bump the timeout to 30 seconds') ''
+Same 'nor is a number mid-sentence'  (Get-BumpKind 'Close (#12) properly later') ''
+
+Same 'the merge-commit number'       (Get-MergedPrNumber 'Merge pull request #20 from akimcse/feat/x') '20'
+Same 'the squash number'             (Get-MergedPrNumber 'Add a thing (#48)') '48'
+Same 'no number, not a merge'        (Get-MergedPrNumber 'Just a commit') ''
+
 Same 'a patch moves the last part'   (Get-NextVersion '0.8.2' 'patch') '0.8.3'
 Same 'a minor moves the middle'      (Get-NextVersion '0.8.2' 'minor') '0.9.0'
 Same 'and resets the patch'          (Get-NextVersion '0.8.9' 'minor') '0.9.0'
