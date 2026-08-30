@@ -149,53 +149,67 @@ Assert-True ($Text -match '\$script:VoiceReady = \$true') 'published state marks
 
 Write-Host 'portable runtime'
 $required = @(
-    'voice\companion_voice_host.py',
-    'voice\Prepare-VoiceRuntime.ps1',
-    'voice\runtime\agent.py',
-    'voice\runtime\voice_runtime.py',
-    'voice\runtime\enrollment_gui.py',
-    'voice\runtime\requirements.txt',
-    'voice\runtime\scout-listening.wav'
+    'voice\Ensure-VoiceModels.ps1',
+    'voice\Prepare-DotNetVoiceRuntime.ps1',
+    'voice\dotnet\ScoutVoiceEngine\ScoutVoiceEngine.csproj',
+    'voice\dotnet\ScoutVoiceEngine\VoiceEngine.cs',
+    'voice\dotnet\ScoutVoiceEngine\EnrollmentForm.cs',
+    'voice\dotnet\ScoutVoiceEngine\LanguageResources.cs',
+    'voice\dotnet\ScoutVoiceEngine\scout-listening.wav'
 )
 foreach ($relative in $required) {
     Assert-True (Test-Path (Join-Path $Root $relative)) "$relative is packaged"
 }
-$Enrollment = Get-Content (Join-Path $Root 'voice\runtime\enrollment_gui.py') -Raw
-foreach ($language in '"en"', '"ko"', '"ja"', '"zh-Hans"') {
+$Enrollment = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\LanguageResources.cs') -Raw
+foreach ($language in '["en"]', '["ko"]', '["ja"]', '["zh-Hans"]') {
     Assert-True ($Enrollment -match [regex]::Escape($language)) "voice enrollment supports $language"
 }
 Assert-True ($Text -match "'--language', \`$enrollmentLanguage") 'Companion passes its language to enrollment'
 $Build = Get-Content (Join-Path $Root 'Build-Release.ps1') -Raw
 Assert-True ($Build -match "'voice'") 'release zip includes voice'
-$Prepare = Get-Content (Join-Path $Root 'voice\Prepare-VoiceRuntime.ps1') -Raw
-Assert-True ($Prepare -match 'SHA-256') 'model downloads are verified'
-Assert-True ($Prepare -match "param\(\[string\]\`$InstallDir\)") 'custom runtime directory is accepted'
-Assert-True ($Prepare -match "Python 3\.11 or later") 'supported Python version is enforced'
-$Agent = Get-Content (Join-Path $Root 'voice\runtime\agent.py') -Raw
-Assert-True ($Agent -match 'Rejected unverified command') 'unregistered speakers are rejected'
-Assert-True ($Agent -notmatch 'Executing verified M365 command with omitted wake word') 'wake word cannot be omitted'
-$VoiceRuntime = Get-Content (Join-Path $Root 'voice\runtime\voice_runtime.py') -Raw
-Assert-True ($VoiceRuntime -match '\\u4e00-\\u9fff') 'Chinese enrollment text survives normalization'
-Assert-True ($Agent -match 'cut = self\._snap_to_sentence') 'interrupted answers resume at a sentence'
-$Runtime = Get-Content (Join-Path $Root 'voice\runtime\voice_runtime.py') -Raw
-Assert-True ($Runtime -match 'def start_windows_speech') 'Windows TTS playback is tracked'
-Assert-True ($Runtime -match '(?s)def close\(self\).*?self\.stop\(\)') 'speaker close stops playback'
-$HostText = Get-Content (Join-Path $Root 'voice\companion_voice_host.py') -Raw
-Assert-True ($HostText -match 'agent_module\.WorkIQSession =') 'WorkIQ is not required'
+$Prepare = Get-Content (Join-Path $Root 'voice\Prepare-DotNetVoiceRuntime.ps1') -Raw
+$ModelSetup = Get-Content (Join-Path $Root 'voice\Ensure-VoiceModels.ps1') -Raw
+Assert-True ($ModelSetup -match 'SHA-256') 'model downloads are verified'
+Assert-True ($ModelSetup -match "tokens\.txt") 'SenseVoice companion files are required'
+Assert-True ($ModelSetup -match "\.sensevoice-") 'SenseVoice extracts through a temporary directory'
+Assert-True ($Prepare -match "\[string\]\`$InstallDir") 'custom runtime directory is accepted'
+Assert-True ($Prepare -match "\[string\]\`$EngineDll") 'engine probe path is accepted'
+Assert-True ($Prepare -match 'windowsdesktop-runtime-8\.0\.30-win-arm64\.zip') 'ARM64 private runtime is pinned'
+Assert-True ($Prepare -match 'windowsdesktop-runtime-8\.0\.30-win-x64\.zip') 'x64 private runtime is pinned'
+Assert-True ($Prepare -match 'SHA512') 'private runtime download is verified'
+Assert-True ($Prepare -match '--probe') 'the .NET engine probes models before migration cleanup'
+Assert-True (-not $Config.PSObject.Properties['voiceEngine']) 'there is only one product voice engine'
+Assert-True ($Text -notmatch 'VoiceEnginePicker') 'no engine selector remains'
+Assert-True ($Text -match 'Get-DotNetVoiceEngineDirectory') 'architecture-specific .NET engine is resolved'
+Assert-True ($Build -match "'win-arm64', 'win-x64'") 'both Windows architectures are published'
+Assert-True ($Build -match 'voice package is incomplete') 'release build verifies engine assets'
+$Engine = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\VoiceEngine.cs') -Raw -Encoding UTF8
+Assert-True ($Engine -match 'Rejected unverified command') 'unregistered speakers are rejected'
+Assert-True ($Engine -match 'Explicit wake phrase interrupted TTS') 'only wake speech interrupts answers'
+Assert-True ($Engine -match 'scout-listening\.wav') 'accepted commands play the original sound'
+$Processing = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\TextProcessing.cs') -Raw -Encoding UTF8
+Assert-True ($Processing -match '一-鿿') 'Chinese enrollment text survives normalization'
+$Tts = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\WindowsTts.cs') -Raw -Encoding UTF8
+Assert-True ($Tts -match 'Kill\(entireProcessTree: true\)') 'TTS playback is stopped as a process tree'
+$Project = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\ScoutVoiceEngine.csproj') -Raw -Encoding UTF8
+Assert-True ($Project -match 'org\.k2fsa\.sherpa\.onnx') 'Sherpa ONNX is the .NET speech backend'
+Assert-True ($Project -match 'NAudio') 'NAudio is the Windows microphone backend'
 $Installer = Get-Content (Join-Path $Root 'Install.ps1') -Raw
 Assert-True ($Installer -match 'Stop-ProcessTree') 'installer stops the voice process tree'
+Assert-True ($Installer -match 'Remove-UpgradePath') 'installer retries locked upgrade files'
+Assert-True ($Installer -match 'Voice engine installation is incomplete') 'installer verifies the selected engine'
 Assert-True ($Text -match 'Stop-OwnedProcessTree') 'Companion stops setup and enrollment children'
 
-$python = Get-Command python -ErrorAction SilentlyContinue
-if ($python) {
-    & python -m py_compile `
-        (Join-Path $Root 'voice\companion_voice_host.py') `
-        (Join-Path $Root 'voice\runtime\agent.py') `
-        (Join-Path $Root 'voice\runtime\voice_runtime.py') `
-        (Join-Path $Root 'voice\runtime\enrollment_gui.py')
-    Assert-True ($LASTEXITCODE -eq 0) 'Python sources compile'
+$dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+if ($dotnet) {
+    $projectPath = Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\ScoutVoiceEngine.csproj'
+    & $dotnet.Source build $projectPath -c Release --nologo | Out-Null
+    Assert-True ($LASTEXITCODE -eq 0) '.NET engine builds'
+    $engineExe = Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\bin\Release\net8.0-windows\ScoutVoiceEngine.exe'
+    & $engineExe --self-test | Out-Null
+    Assert-True ($LASTEXITCODE -eq 0) '.NET engine self-tests pass'
 } else {
-    Write-Host '  skip Python compile (python not installed)'
+    Write-Host '  skip .NET build (SDK not installed)'
 }
 
 if ($failed) { throw "$failed voice control test(s) failed" }

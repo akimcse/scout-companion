@@ -10,6 +10,11 @@ rt.err
 *.err
 __pycache__/
 *.pyc
+bin/
+obj/
+voice/dotnet/publish-test/
+voice/dotnet/publish/
+voice/dotnet/publish-*/
 
 drafts/
 

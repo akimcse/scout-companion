@@ -79,9 +79,9 @@ you act on approvals in place.
   enrollment plus wake-word and ambient-noise sensitivity controls.
 - **🌍 Fifteen languages** — follows your Windows display language, or pin one.
   English, Korean, Japanese, and Simplified Chinese can be selected directly in Settings.
-- **🪶 Zero-config core** — the overlay is pure PowerShell + WPF with no build step or
-  binary assets; even the mascots are drawn at runtime. Voice control is optional and
-  prepares its own per-user Python environment on first enrollment.
+- **🪶 Zero-config core** — the overlay is pure PowerShell + WPF; even the mascots are
+  drawn at runtime. Voice control is optional and prepares a private per-user .NET runtime
+  on first enrollment without changing PATH or installing anything system-wide.
 
 ## Install & run
 
@@ -96,9 +96,12 @@ adds Start Menu entries, and registers it in **Settings → Apps**. Per-user thr
 admin rights, nothing in `Program Files` or `HKLM`. Installing over an existing copy keeps
 your settings and learned chat titles.
 
-Voice control is optional. It requires Python 3.11 or later and downloads about 200 MB of
-on-device speech models the first time **“헤이 스카웃” 음성 인식하기** is used. It does
-not enable itself or add a separate startup task.
+Voice control is optional and requires no preinstalled Python or .NET. The first use of
+**Set up voice recognition** downloads the current CPU's private .NET 8 Desktop Runtime
+(about 64 MB compressed) and about 194 MB of compressed on-device speech models. ARM64
+and Intel/AMD x64 are supported; only the current architecture is retained. Voice setup
+does not change PATH, install anything system-wide, enable itself, or add a separate
+startup task.
 
 **Or by hand** — download `ScoutCompanion-<version>.zip` from the
 [latest release](https://github.com/akimcse/scout-companion/releases/latest), unzip, and
@@ -425,7 +428,7 @@ Everything works out of the box; Settings covers the day-to-day knobs. To go fur
 | `voiceReplyEnabled` | `true` | Read the completed answer aloud when voice command input is enabled |
 | `voiceWakeSensitivity` | `65` | Wake-word matching sensitivity from 0–100 |
 | `voiceNoiseSensitivity` | `35` | Ambient-noise sensitivity from 0–100; lower rejects more background sound |
-| `voiceRuntimeDir` | `%LOCALAPPDATA%\ScoutVoiceAssistant` | Per-user Python environment, models, and encrypted speaker profile |
+| `voiceRuntimeDir` | `%LOCALAPPDATA%\ScoutVoiceAssistant` | Private .NET runtime, models, and encrypted speaker profile |
 | `mascot` | `quokka` | Which mascot to show. Also in Settings |
 | `language` | `auto` | UI language. `auto` follows Windows; set a tag from `lang/` to pin it |
 | `opacity` | `1.0` | Toast opacity, clamped 0.35–1.0. Also in Settings |
@@ -506,9 +509,9 @@ because YAML is not testable and this is — see `Test-SessionMatch.ps1`.
 
 - Reads only local session files and the local agent window. **No telemetry.**
 - The core overlay makes one anonymous GitHub release check a few times a day; set
-  `updateCheck` to `false` to disable it. Optional voice setup downloads speech models
-  from GitHub, and the default neural voice uses Microsoft Edge's online TTS service with
-  the Windows voice as fallback.
+  `updateCheck` to `false` to disable it. Optional voice setup downloads the official
+  Microsoft .NET Desktop Runtime and speech models from GitHub; all downloads are pinned
+  and hash-verified. Speech output uses the installed Windows voice.
 - Voice recordings are discarded after enrollment. Only a speaker embedding encrypted
   for the current Windows user is retained locally.
 - Clicking **Allow** here is exactly equivalent to clicking Allow in the agent — it forwards

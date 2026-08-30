@@ -3194,10 +3194,38 @@ $script:VoiceRequestPath = Join-Path $env:TEMP "scout-companion-voice-$PID.reque
 $script:VoiceResponsePath = Join-Path $env:TEMP "scout-companion-voice-$PID.response.json"
 $script:VoiceUiRequest = $null
 $script:VoiceLastRequestId = $null
+$script:VoiceActiveEngine = $null
 $script:VoiceRuntimeDir = if ($Config.voiceRuntimeDir) {
     [Environment]::ExpandEnvironmentVariables([string]$Config.voiceRuntimeDir)
 } else {
     Join-Path $env:LOCALAPPDATA 'ScoutVoiceAssistant'
+}
+
+function Get-DotNetVoiceEngineDirectory {
+    $architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    $runtime = switch ($architecture.ToLowerInvariant()) {
+        'arm64' { 'win-arm64' }
+        'x64'   { 'win-x64' }
+        default { return $null }
+    }
+    return Join-Path $ScriptDir "voice\dotnet\publish\$runtime"
+}
+
+function Get-PrivateDotNetPath {
+    return Join-Path $script:VoiceRuntimeDir 'dotnet\dotnet.exe'
+}
+
+function Test-VoiceModelsReady {
+    $models = Join-Path $script:VoiceRuntimeDir 'models'
+    if (-not (Test-Path (Join-Path $models 'silero_vad.int8.onnx'))) { return $false }
+    if (-not (Test-Path (Join-Path $models '3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx'))) {
+        return $false
+    }
+    return [bool](Get-ChildItem $models -Directory -Filter 'sherpa-onnx-sense-voice-*' `
+        -ErrorAction SilentlyContinue | Where-Object {
+            (Test-Path (Join-Path $_.FullName 'model.int8.onnx')) -and
+            (Test-Path (Join-Path $_.FullName 'tokens.txt'))
+        } | Select-Object -First 1)
 }
 
 function Start-VoiceBridge {
@@ -3207,19 +3235,28 @@ function Start-VoiceBridge {
             if (-not $script:VoiceProcess.HasExited) { return $true }
         } catch { }
     }
-    $python = Join-Path $script:VoiceRuntimeDir '.venv\Scripts\pythonw.exe'
     $voiceProfile = Join-Path $script:VoiceRuntimeDir 'voice-profile.dat'
-    $bridge = Join-Path $ScriptDir 'voice\companion_voice_host.py'
-    if (-not (Test-Path $python) -or -not (Test-Path $voiceProfile) -or -not (Test-Path $bridge)) {
-        Write-CompanionLog "voice unavailable: runtime, profile, or bridge is missing"
+    if (-not (Test-Path $voiceProfile) -or -not (Test-VoiceModelsReady)) {
+        Write-CompanionLog 'voice unavailable: profile or speech models are missing'
         return $false
     }
+    $engineDirectory = Get-DotNetVoiceEngineDirectory
+    $executable = Get-PrivateDotNetPath
+    $engineDll = if ($engineDirectory) {
+        Join-Path $engineDirectory 'ScoutVoiceEngine.dll'
+    } else { $null }
+    if (-not $engineDirectory -or -not (Test-Path $executable) -or
+            -not $engineDll -or -not (Test-Path $engineDll)) {
+        Write-CompanionLog 'voice runtime is not ready; starting private .NET preparation'
+        Start-VoiceRuntimePreparation
+        return $false
+    }
+    $arguments = @("`"$engineDll`"", '--run')
     Remove-Item $script:VoiceStatePath -Force -ErrorAction SilentlyContinue
     Remove-Item $script:VoiceStopPath -Force -ErrorAction SilentlyContinue
     Remove-Item $script:VoiceRequestPath -Force -ErrorAction SilentlyContinue
     Remove-Item $script:VoiceResponsePath -Force -ErrorAction SilentlyContinue
-    $arguments = @(
-        "`"$bridge`"",
+    $arguments += @(
         '--runtime-dir', "`"$script:VoiceRuntimeDir`"",
         '--state-file', "`"$script:VoiceStatePath`"",
         '--stop-file', "`"$script:VoiceStopPath`"",
@@ -3230,13 +3267,18 @@ function Start-VoiceBridge {
         '--noise-sensitivity', ([int]$Config.voiceNoiseSensitivity),
         '--parent-pid', "$PID"
     )
+    $runtimeLanguage = if ($script:Lang -in @('en', 'ko', 'ja', 'zh-Hans')) {
+        [string]$script:Lang
+    } else { 'en' }
+    $arguments += @('--language', $runtimeLanguage)
     try {
-        $script:VoiceProcess = Start-Process $python -ArgumentList $arguments `
+        $script:VoiceProcess = Start-Process $executable -ArgumentList $arguments `
             -WorkingDirectory $script:VoiceRuntimeDir -WindowStyle Hidden -PassThru
+        $script:VoiceActiveEngine = 'dotnet'
         $script:VoiceEnabled = $true
         $script:VoiceReady = $false
         $script:VoiceActivationUntil = [datetime]::UtcNow.AddSeconds(5)
-        Write-CompanionLog "voice bridge started pid=$($script:VoiceProcess.Id)"
+        Write-CompanionLog "voice bridge started engine=dotnet pid=$($script:VoiceProcess.Id)"
         return $true
     } catch {
         Write-CompanionLog "voice bridge failed to start: $_"
@@ -3292,6 +3334,7 @@ function Stop-VoiceBridge {
     $script:VoiceUiRequest = $null
     $script:VoiceEnabled = $false
     $script:VoiceReady = $false
+    $script:VoiceActiveEngine = $null
     $script:VoiceActivationUntil = [datetime]::MinValue
 }
 
@@ -3352,12 +3395,14 @@ function Set-VoiceCommandEnabled([bool]$on, [switch]$Persist) {
     }
     if ($on) {
         if (-not (Start-VoiceBridge)) {
-            [System.Windows.Forms.MessageBox]::Show(
-                (T 'The prepared Scout Voice runtime or voice profile was not found.'),
-                'Scout Companion',
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Warning
-            ) | Out-Null
+            if (-not $script:VoicePreparationProcess) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    (T 'The prepared Scout Voice runtime or voice profile was not found.'),
+                    'Scout Companion',
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                ) | Out-Null
+            }
         } else {
             $script:Hidden = $false
         }
@@ -4210,7 +4255,13 @@ function Complete-VoiceRuntimePreparation {
         }
         return
     }
-    Start-VoiceEnrollment
+    if ((Test-Path (Join-Path $script:VoiceRuntimeDir 'voice-profile.dat')) -and
+            [bool]$Config.voiceCommandEnabled) {
+        [void](Start-VoiceBridge)
+        Sync-VoiceControls
+    } else {
+        Start-VoiceEnrollment
+    }
 }
 
 function Start-VoiceRuntimePreparation {
@@ -4220,7 +4271,7 @@ function Start-VoiceRuntimePreparation {
             if (-not $script:VoicePreparationProcess.HasExited) { return }
         } catch { }
     }
-    $preparer = Join-Path $ScriptDir 'voice\Prepare-VoiceRuntime.ps1'
+    $preparer = Join-Path $ScriptDir 'voice\Prepare-DotNetVoiceRuntime.ps1'
     if (-not (Test-Path $preparer)) {
         if ($script:SettingsVoiceEnrollStatus) {
             $script:SettingsVoiceEnrollStatus.Text = T 'Voice runtime setup is missing'
@@ -4239,6 +4290,13 @@ function Start-VoiceRuntimePreparation {
             '-File', "`"$preparer`"",
             '-InstallDir', "`"$script:VoiceRuntimeDir`""
         )
+        $engineDirectory = Get-DotNetVoiceEngineDirectory
+        $engineDll = if ($engineDirectory) {
+            Join-Path $engineDirectory 'ScoutVoiceEngine.dll'
+        } else { $null }
+        if ($engineDll) {
+            $arguments += @('-EngineDll', "`"$engineDll`"")
+        }
         $script:VoicePreparationProcess = Start-Process powershell.exe `
             -ArgumentList $arguments -WindowStyle Hidden -PassThru
         if (-not $script:VoicePreparationTimer) {
@@ -4295,9 +4353,13 @@ function Start-VoiceEnrollment {
             if (-not $script:VoiceEnrollmentProcess.HasExited) { return }
         } catch { }
     }
-    $pythonw = Join-Path $script:VoiceRuntimeDir '.venv\Scripts\pythonw.exe'
-    $enrollment = Join-Path $script:VoiceRuntimeDir 'enrollment_gui.py'
-    if (-not (Test-Path $pythonw) -or -not (Test-Path $enrollment)) {
+    $engineDirectory = Get-DotNetVoiceEngineDirectory
+    $enrollmentExecutable = Get-PrivateDotNetPath
+    $engineDll = if ($engineDirectory) {
+        Join-Path $engineDirectory 'ScoutVoiceEngine.dll'
+    } else { $null }
+    if (-not (Test-VoiceModelsReady) -or -not (Test-Path $enrollmentExecutable) -or
+            -not $engineDll -or -not (Test-Path $engineDll)) {
         Start-VoiceRuntimePreparation
         return
     }
@@ -4319,8 +4381,14 @@ function Start-VoiceEnrollment {
         } else {
             'en'
         }
-        $script:VoiceEnrollmentProcess = Start-Process $pythonw `
-            -ArgumentList "`"$enrollment`"", '--language', $enrollmentLanguage `
+        $enrollmentArguments = @(
+            "`"$engineDll`"",
+            '--enroll',
+            '--runtime-dir', "`"$script:VoiceRuntimeDir`"",
+            '--language', $enrollmentLanguage
+        )
+        $script:VoiceEnrollmentProcess = Start-Process $enrollmentExecutable `
+            -ArgumentList $enrollmentArguments `
             -WorkingDirectory $script:VoiceRuntimeDir -PassThru
         if (-not $script:VoiceEnrollmentTimer) {
             $script:VoiceEnrollmentTimer = New-Object System.Windows.Threading.DispatcherTimer

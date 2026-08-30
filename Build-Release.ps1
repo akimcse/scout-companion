@@ -73,6 +73,39 @@ try {
         Remove-Item -Recurse -Force
     Get-ChildItem $stage -File -Filter '*.pyc' -Recurse |
         Remove-Item -Force
+    Get-ChildItem $stage -Directory -Recurse |
+        Where-Object { $_.Name -in @('bin', 'obj', 'publish-test') } |
+        Remove-Item -Recurse -Force
+    $stagedPublish = Join-Path $stage 'voice\dotnet\publish'
+    if (Test-Path $stagedPublish) {
+        Remove-Item $stagedPublish -Recurse -Force
+    }
+    Get-ChildItem (Join-Path $stage 'voice\dotnet') -Directory -Filter 'publish-*' `
+        -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+
+    $voiceProject = Join-Path $ScriptDir 'voice\dotnet\ScoutVoiceEngine\ScoutVoiceEngine.csproj'
+    if (-not (Test-Path $voiceProject)) {
+        throw 'The .NET voice engine project is missing.'
+    }
+    foreach ($runtime in 'win-arm64', 'win-x64') {
+        $publishDir = Join-Path $stage "voice\dotnet\publish\$runtime"
+        & dotnet publish $voiceProject -c Release -r $runtime `
+            --self-contained false -p:DebugType=None -o $publishDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not publish the .NET voice engine for $runtime."
+        }
+        foreach ($requiredFile in @(
+                'ScoutVoiceEngine.exe',
+                'ScoutVoiceEngine.dll',
+                'ScoutVoiceEngine.deps.json',
+                'ScoutVoiceEngine.runtimeconfig.json',
+                'sherpa-onnx-c-api.dll',
+                'scout-listening.wav')) {
+            if (-not (Test-Path (Join-Path $publishDir $requiredFile))) {
+                throw "The $runtime voice package is incomplete: $requiredFile is missing."
+            }
+        }
+    }
 
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
     $zip = Join-Path $OutDir ("ScoutCompanion-{0}.zip" -f $version)

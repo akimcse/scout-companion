@@ -39,6 +39,10 @@ jobs:
         with:
           fetch-depth: 0          # tags, so a release can be created
 
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Work out the next version
         id: bump
         shell: pwsh

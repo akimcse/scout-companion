@@ -1,5 +1,30 @@
 # Release notes
 
+## v0.13.0 — One .NET voice engine, no Python installation
+
+- Replace the Python voice process and enrollment window with one .NET 8 engine using
+  official Sherpa-ONNX C# bindings and Windows WASAPI through NAudio.
+- Support Windows ARM64 and Intel/AMD x64 with architecture-specific engine packages.
+- Install a private, SHA-512-verified Microsoft .NET Desktop Runtime under the current
+  user's profile; no administrator access, PATH change, or system-wide runtime is needed.
+- Keep the existing encrypted speaker profile and on-device speech models.
+- Remove the old Python virtual environment and source files only after the .NET runtime
+  and models are ready.
+- Install only the current CPU architecture and keep the runtime private to the current
+  Windows user.
+- Improve Korean short-command recognition after wake and TTS interruption, including
+  common SenseVoice errors for “지금 몇 시야?”.
+- Restore the original `scout-listening.wav` command-accepted sound and increase spoken
+  answer volume.
+- Wait for update-time process locks to clear and verify the selected engine package
+  before reporting installation success.
+
+### Rollback
+
+The complete Python implementation remains available at the signed `v0.12.0` release.
+The encrypted voice profile and models are format-compatible, so reinstalling that release
+and running its voice preparer restores the prior engine.
+
 ## v0.12.0 — Voice enrollment follows the selected language
 
 - Localize the separate five-phrase voice enrollment window in English, Korean, Japanese,

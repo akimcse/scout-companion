@@ -101,6 +101,27 @@ function Stop-ProcessTree([int]$RootId) {
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
     }
     Stop-Process -Id $RootId -Force -ErrorAction SilentlyContinue
+    foreach ($id in @($ids) + $RootId) {
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            if (-not (Get-Process -Id $id -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
+function Remove-UpgradePath([string]$Path) {
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try {
+            if (Test-Path $Path) {
+                Remove-Item $Path -Recurse -Force -ErrorAction Stop
+            }
+            if (-not (Test-Path $Path)) { return }
+        } catch {
+            if ($attempt -eq 9) { throw }
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "Could not replace $Path because it is still in use."
 }
 
 function Stop-Companion {
@@ -229,7 +250,7 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 # linger, but never touch anything held in $saved.
 if ($existing) {
     Get-ChildItem $InstallDir -Force | Where-Object { $UserState -notcontains $_.Name } |
-        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        ForEach-Object { Remove-UpgradePath $_.FullName }
 }
 
 foreach ($f in $Payload) {
@@ -241,6 +262,40 @@ foreach ($f in $Payload) {
         Copy-Item $source $destination -Force
     }
 }
+$dotnetSource = Join-Path $InstallDir 'voice\dotnet\ScoutVoiceEngine'
+foreach ($developmentFolder in 'bin', 'obj') {
+    $path = Join-Path $dotnetSource $developmentFolder
+    if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+}
+$publishTest = Join-Path $InstallDir 'voice\dotnet\publish-test'
+if (Test-Path $publishTest) { Remove-Item $publishTest -Recurse -Force }
+$installedDotNetRoot = Join-Path $InstallDir 'voice\dotnet'
+Get-ChildItem $installedDotNetRoot -Directory -Filter 'publish-*' `
+    -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+$publishRoot = Join-Path $InstallDir 'voice\dotnet\publish'
+$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+$keepRuntime = switch ($architecture) {
+    'arm64' { 'win-arm64' }
+    'x64'   { 'win-x64' }
+    default { $null }
+}
+if ($keepRuntime -and (Test-Path $publishRoot)) {
+    Get-ChildItem $publishRoot -Directory |
+        Where-Object { $_.Name -ne $keepRuntime } |
+        Remove-Item -Recurse -Force
+    $engineRoot = Join-Path $publishRoot $keepRuntime
+    foreach ($requiredFile in @(
+            'ScoutVoiceEngine.exe',
+            'ScoutVoiceEngine.dll',
+            'ScoutVoiceEngine.deps.json',
+            'ScoutVoiceEngine.runtimeconfig.json',
+            'sherpa-onnx-c-api.dll',
+            'scout-listening.wav')) {
+        if (-not (Test-Path (Join-Path $engineRoot $requiredFile))) {
+            throw "Voice engine installation is incomplete: $requiredFile is missing."
+        }
+    }
+}
 Copy-Item (Join-Path $SourceDir 'lang') $InstallDir -Recurse -Force
 Write-Host ("  copied {0} files and {1} language files" -f $Payload.Count, (Get-ChildItem (Join-Path $InstallDir 'lang') -File).Count)
 
@@ -248,6 +303,22 @@ foreach ($f in $saved.Keys) {
     Set-Content -Path (Join-Path $InstallDir $f) -Value $saved[$f] -Encoding UTF8 -NoNewline
 }
 if ($saved.Count) { Write-Host ("  kept your {0}" -f (($saved.Keys | Sort-Object) -join ' and ')) }
+
+# v0.13 has one voice engine. Remove the short-lived migration selector while
+# preserving every other user setting.
+$installedConfig = Join-Path $InstallDir 'config.json'
+if (Test-Path $installedConfig) {
+    try {
+        $configObject = Get-Content $installedConfig -Raw | ConvertFrom-Json
+        if ($configObject.PSObject.Properties['voiceEngine']) {
+            $configObject.PSObject.Properties.Remove('voiceEngine')
+            ($configObject | ConvertTo-Json -Depth 6) |
+                Set-Content $installedConfig -Encoding UTF8
+        }
+    } catch {
+        Write-Warning "  could not migrate voice settings: $($_.Exception.Message)"
+    }
+}
 
 # Shortcuts, from the installed copy so they point at it rather than at the
 # folder this was run from. 6> because that script reports with Write-Host,
