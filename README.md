@@ -379,8 +379,9 @@ the same thing:
 
 ```powershell
 irm https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1 | iex
-# or, for previews:
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1))) -Beta
+# or, for previews — the download has to go through WebClient, because
+# Invoke-RestMethod cannot pass arguments and iex cannot bind param():
+& ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1'))) -Beta
 ```
 
 **Two companions, one repository.** A .NET rewrite lives here too, and its releases are

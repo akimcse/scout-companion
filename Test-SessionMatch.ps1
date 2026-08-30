@@ -690,6 +690,31 @@ foreach ($f in (Get-ChildItem $PSScriptRoot -Filter *.ps1)) {
 }
 Same 'non-ASCII scripts carry a BOM' ($offenders -join ',') ''
 
+# web-install.ps1 is the exception, and it has to be: it is fetched over HTTP
+# and handed to the parser as a string, by the README's one-liner and by the
+# companion's own update path. A leading U+FEFF is not skipped there the way it
+# is when a file is opened - it becomes the first token.
+#
+# Measured, after a BOM was added to it in #48 and shipped in v0.12.1:
+#   irm ... | iex          ->  The term '<#' is not recognized as a name of a cmdlet
+#   [scriptblock]::Create  ->  the comment-based help block parses as code
+# The headline install command in the README was broken for everyone installing
+# fresh. Updates were not, only because Install-CompanionUpdate downloads with
+# WebClient.DownloadString, which strips a BOM where Invoke-RestMethod keeps it.
+#
+# So the file must stay pure ASCII, which also keeps it out of the rule above.
+$wiBytes = [System.IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'web-install.ps1'))
+Same 'the installer has no BOM' `
+    ([int]($wiBytes.Length -ge 3 -and $wiBytes[0] -eq 0xEF -and $wiBytes[1] -eq 0xBB -and $wiBytes[2] -eq 0xBF)) 0
+$wiHigh = 0
+foreach ($b in $wiBytes) { if ($b -gt 127) { $wiHigh++ } }
+Same 'and no non-ASCII to need one' $wiHigh 0
+# It must also survive being turned into a scriptblock from its own bytes,
+# which is what both callers do.
+$wiOk = $true
+try { [void][scriptblock]::Create([System.Text.Encoding]::UTF8.GetString($wiBytes)) } catch { $wiOk = $false }
+Same 'and parses when fetched as text' ([int]$wiOk) 1
+
 # Invoke-RestMethod writes a JSON array to the pipeline as a single object, so
 # @(Invoke-RestMethod ...) yields one element - the array - not its contents.
 # Measured against the live API: 21 releases direct, 1 when wrapped. Wrapped,
