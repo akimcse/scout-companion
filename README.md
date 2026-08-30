@@ -169,7 +169,7 @@ Right-click the tray icon → **Settings**, or click the ⚙ on the toast.
 | **This process** | Live working set, CPU, uptime and the running version. |
 | **Tell me when a long turn finishes** | A tray balloon past `notifyAfterSeconds`. Silent while the toast is up or the agent is in front. |
 | **The agent today** | Working time, turns and conversations — see [What the agent is doing](#what-the-agent-is-doing). |
-| **Check for new versions** / **Install automatically** / **Check now** | Update controls — see [Updates](#updates). |
+| **Check for new versions** / **Install automatically** / **Include beta builds** / **Check now** | Update controls — see [Updates](#updates). |
 
 Changes are written straight into `config.json`, merging rather than overwriting, so
 hand-written keys survive.
@@ -360,6 +360,7 @@ exists you get a tray balloon once, and an **Install update** item stays in the 
 |---|---|
 | **Check for new versions** | Whether to look at all. Off makes no network calls. |
 | **Install automatically** | Skip the offer and just do it. Off by default. |
+| **Include beta builds** | Also offer pre-releases. Off by default. |
 | **Check now** | Ask immediately; works even with checking off. |
 
 It **notifies rather than installing** by default because of what this program is — it
@@ -368,6 +369,27 @@ it at a moment nobody chose, dropping a prompt already on screen. **It will not 
 source checkout**: the installer overwrites its target wholesale, so a copy with a `.git`
 folder beside it, or running outside `%LOCALAPPDATA%\Programs\ScoutCompanion`, is told about
 the release and left alone.
+
+**Beta builds.** Pre-releases and finished releases share one list and are ordered against
+each other, so the beta ring is not a separate track you get stuck on: a beta is offered only
+while it is genuinely newer, and the stable release it led to supersedes it as soon as that
+is published. Turning the setting back off never downgrades you — you stop being offered
+previews and wait for the next stable release to catch up. The installer takes `-Beta` for
+the same thing:
+
+```powershell
+irm https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1 | iex
+# or, for previews:
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/akimcse/scout-companion/main/web-install.ps1))) -Beta
+```
+
+**Two companions, one repository.** A .NET rewrite lives here too, and its releases are
+tagged `net-v…` to keep them apart from this PowerShell build's plain `v…`. Both this app
+and the installer read the whole releases list and ignore tags that aren't theirs, rather
+than asking for `/releases/latest` — that endpoint returns whichever release is newest
+regardless of tag, so a `net-` release becoming latest would have left this build silently
+believing it was up to date for ever, and would have pointed the one-line installer at a
+.NET zip to unpack over a PowerShell install.
 
 </details>
 

@@ -347,6 +347,15 @@ $Config = [ordered]@{
     # Set true to install as soon as one is found, without asking. Only takes
     # effect for an installed copy, never a source checkout.
     autoUpdate          = $false
+    # Take pre-release builds as well as stable ones. GitHub marks a release as
+    # a prerelease when it is published, and there can be any number of them
+    # alongside the stable line - so this is the whole of what a "beta ring"
+    # needs: the same repository, the same version numbering, and this switch
+    # deciding whether those releases count.
+    #
+    # Off by default. Someone who has not asked for beta builds should not get
+    # one because it happened to be published most recently.
+    updateBeta          = $false
     exitWhenAgentGone   = $true
     exitGraceSeconds    = 30
 }
@@ -4774,6 +4783,13 @@ function Restart-CompanionForLanguage([string]$language) {
         <TextBlock Style="{StaticResource InfoGlyph}"/>
       </Border>
     </DockPanel>
+    <DockPanel LastChildFill="False" Margin="0,6,0,0">
+      <CheckBox x:Name="BetaRingChk" Content="Include beta builds" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Take pre-release builds as well as stable ones. Betas carry the version they are heading for with a suffix — 0.13.0-beta.1 comes after 0.12.0 and before 0.13.0 — so turning this off later leaves you on the beta until the stable release that supersedes it arrives. Betas are published less carefully than stable releases; expect the occasional broken one.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
     <TextBlock x:Name="AutoUpdateHint" Style="{StaticResource Hint}" Visibility="Collapsed"/>
     <DockPanel Margin="0,10,0,0">
       <Button x:Name="CheckUpdateBtn" Content="Check now" Width="96" Height="26" DockPanel.Dock="Left"
@@ -4834,6 +4850,7 @@ function Show-SettingsWindow {
     $script:SettingsOpacityText = $sw.FindName('OpacityValue')
     $script:SettingsUpdateChk   = $sw.FindName('UpdateCheckChk')
     $script:SettingsAutoUpdChk  = $sw.FindName('AutoUpdateChk')
+    $script:SettingsBetaChk     = $sw.FindName('BetaRingChk')
     $script:SettingsUpdStatus   = $sw.FindName('UpdateStatus')
     $script:SettingsInstallBtn  = $sw.FindName('InstallUpdateBtn')
     $checkUpdBtn                = $sw.FindName('CheckUpdateBtn')
@@ -4921,6 +4938,7 @@ function Show-SettingsWindow {
         $script:SettingsAutoUpdChk.IsEnabled = [bool]$Config.updateCheck
         $script:SettingsNotifyChk.IsChecked  = [bool]$Config.notifyOnFinish
         $script:SettingsRememberPos.IsChecked = [bool]$Config.rememberPosition
+        $script:SettingsBetaChk.IsChecked     = [bool]$Config.updateBeta
     } finally { $script:SettingsSuppress = $false }
     Sync-UpdateStatusText
 
@@ -4990,6 +5008,25 @@ function Show-SettingsWindow {
     }
     $script:SettingsAutoUpdChk.Add_Checked($onAutoUpdate)
     $script:SettingsAutoUpdChk.Add_Unchecked($onAutoUpdate)
+
+    $onBetaRing = {
+        if ($script:SettingsSuppress) { return }
+        $on = [bool]$script:SettingsBetaChk.IsChecked
+        $Config.updateBeta = $on
+        Save-Setting @{ updateBeta = $on }
+        # Changing rings changes the answer, so ask again rather than leaving a
+        # stale one on screen. Clearing UpdateAvail matters in both directions:
+        # switching off must retract a beta that was being offered, and
+        # switching on must not be blocked by an already-known stable release.
+        $script:UpdateCheckUtc = [datetime]::MinValue
+        $script:UpdateAvail    = $null
+        $script:UpdateError    = $null
+        $script:UpdateAnnounce = $true
+        Sync-UpdateStatusText
+        Update-CheckForRelease
+    }
+    $script:SettingsBetaChk.Add_Checked($onBetaRing)
+    $script:SettingsBetaChk.Add_Unchecked($onBetaRing)
     if ($script:SettingsInstallBtn) {
         $script:SettingsInstallBtn.Add_Click({
             Install-CompanionUpdate
@@ -5158,6 +5195,7 @@ function Show-SettingsWindow {
         $script:SettingsChatTitleCheck = $null
         $script:SettingsLanguage = $null
         $script:SettingsRememberPos = $null
+        $script:SettingsBetaChk = $null
     })
 
     # Match the dark body with a dark title bar instead of leaving a bright
@@ -5210,6 +5248,12 @@ function Write-CompanionLog([string]$msg) {
 #
 # [version] alone will not do: it throws on a leading "v", on a pre-release
 # suffix, and on a bare "1", all three of which appear in real release tags.
+#
+# The suffix is not merely stripped. It was, and that was fine while there were
+# no prereleases - but with a beta ring it made 0.13.0-beta.1 equal to both
+# 0.13.0-beta.2 and 0.13.0, so a beta user would never be offered the next beta
+# nor the stable release that superseded it. semver's rule applies: a version
+# with a pre-release suffix comes before the same version without one.
 function Compare-CompanionVersion([string]$a, [string]$b) {
     function Split-V([string]$v) {
         if (-not $v) { return @(0, 0, 0) }
@@ -5222,14 +5266,131 @@ function Compare-CompanionVersion([string]$a, [string]$b) {
         while ($parts.Count -lt 3) { $parts += 0 }
         return $parts
     }
+    # The pre-release part, or '' for a release. Build metadata (+...) is not
+    # part of precedence, so it is dropped rather than compared.
+    function Pre-V([string]$v) {
+        if (-not $v) { return '' }
+        $v = ([string]$v).Trim().TrimStart('v', 'V')
+        $v = ($v -split '\+')[0]
+        $i = $v.IndexOf('-')
+        if ($i -lt 0) { return '' }
+        return $v.Substring($i + 1)
+    }
     $x = Split-V $a
     $y = Split-V $b
     for ($i = 0; $i -lt 3; $i++) {
         if ($x[$i] -gt $y[$i]) { return 1 }
         if ($x[$i] -lt $y[$i]) { return -1 }
     }
+
+    # Same numbers: a pre-release loses to the release it precedes.
+    $pa = Pre-V $a
+    $pb = Pre-V $b
+    if ($pa -eq $pb) { return 0 }
+    if (-not $pa) { return 1 }
+    if (-not $pb) { return -1 }
+
+    # Both pre-releases: dot-separated identifiers, numeric ones compared as
+    # numbers so beta.10 comes after beta.9 rather than before it.
+    $ax = $pa -split '\.'
+    $bx = $pb -split '\.'
+    $n = [Math]::Max($ax.Count, $bx.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        # A shorter identifier list precedes a longer one that starts the same:
+        # beta comes before beta.1.
+        if ($i -ge $ax.Count) { return -1 }
+        if ($i -ge $bx.Count) { return 1 }
+        $l = $ax[$i]; $r = $bx[$i]
+        $ln = 0; $rn = 0
+        $lNum = [int]::TryParse($l, [ref]$ln)
+        $rNum = [int]::TryParse($r, [ref]$rn)
+        if ($lNum -and $rNum) {
+            if ($ln -gt $rn) { return 1 }
+            if ($ln -lt $rn) { return -1 }
+        } elseif ($lNum) { return -1 }   # numeric identifiers rank lowest
+        elseif ($rNum)   { return 1 }
+        else {
+            $c = [string]::CompareOrdinal($l, $r)
+            if ($c -gt 0) { return 1 }
+            if ($c -lt 0) { return -1 }
+        }
+    }
     return 0
 }
+
+# Which release tags belong to this build, and which of them is newest.
+#
+# There are two companions in this repository now: this one, and a .NET rewrite
+# whose releases are tagged "net-v...". They share a repository, so they share
+# the releases list, and each has to ignore the other's.
+#
+# /releases/latest cannot do that - it returns whichever release is newest
+# regardless of tag - so the caller reads /releases and this picks. Without it,
+# a "net-" release becoming latest would leave this build silently believing it
+# was up to date forever, and would point the one-line installer at a .NET zip
+# to unpack over a PowerShell install.
+#
+# This build owns bare "v0.12.0". Anything with a prefix belongs to someone
+# else, whatever that prefix turns out to be.
+function Test-OwnReleaseTag([string]$tag) {
+    if (-not $tag) { return $false }
+    # The suffix is restricted to what semver actually permits - dot-separated
+    # runs of letters, digits and hyphens - rather than ".*".
+    #
+    # ".*" was not merely sloppy. Install-CompanionUpdate builds a command
+    # string with the chosen tag inside single quotes, and git happily accepts
+    # a tag named  v1.0.0-'; <anything>; '  which closes that quote. Measured:
+    # the tag passed this check, and the payload ran. Whoever can push a tag to
+    # the configured updateRepo could then run code on every machine that
+    # checked for an update - and updateRepo is documented as something you
+    # change to point at your own fork.
+    return [bool]($tag -match '^[vV]?\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]*)?$')
+}
+
+# The newest tag this build owns, out of a releases list.
+#
+# Takes objects with .tag_name and .prerelease so it can be fed the API's
+# response directly. Prereleases are skipped unless asked for, which is what
+# keeps a beta ring separate from the stable one - GitHub marks them, and this
+# is the only place that decides whether they count.
+function Select-LatestTag($releases, [bool]$includePrerelease = $false) {
+    $best = $null
+    foreach ($r in @($releases)) {
+        if (-not $r) { continue }
+        $tag = [string]$r.tag_name
+        if (-not (Test-OwnReleaseTag $tag)) { continue }
+        if ($r.prerelease -and -not $includePrerelease) { continue }
+        # By version, not by position. The API returns newest-first by creation
+        # date, which is not the same thing: a patch to an older line published
+        # after a newer release would otherwise win.
+        if (-not $best -or (Compare-CompanionVersion $tag $best) -gt 0) { $best = $tag }
+    }
+    return $best
+}
+
+# The three functions the runspace needs, as source text.
+#
+# Lifted out of this file by name rather than written out again, so the copy the
+# background check runs is the copy the tests exercise. Duplicating them would
+# work until one side was edited and the other was not, and the symptom would be
+# an update check quietly disagreeing with everything else.
+$script:SelectorSource = $null
+try {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $PSCommandPath, [ref]$null, [ref]$null)
+    $wanted = @('Compare-CompanionVersion', 'Test-OwnReleaseTag', 'Select-LatestTag')
+    $found = @{}
+    foreach ($f in $ast.FindAll({
+        param($x) $x -is [System.Management.Automation.Language.FunctionDefinitionAst]
+    }, $true)) {
+        if ($wanted -contains $f.Name) { $found[$f.Name] = $f.Extent.Text }
+    }
+    # All or nothing: a partial set would define Select-LatestTag without the
+    # comparer it calls, and fail inside the runspace where nothing reports it.
+    if ($found.Count -eq $wanted.Count) {
+        $script:SelectorSource = ($wanted | ForEach-Object { $found[$_] }) -join "`n`n"
+    }
+} catch { }
 
 # Whether an update may be installed over this copy.
 #
@@ -5314,16 +5475,30 @@ function Update-CheckForRelease {
     $script:UpdateBusy = $true
     $ps = [powershell]::Create()
     [void]$ps.AddScript({
-        param($repo)
+        param($repo, $includePrerelease, $selector)
         try {
             $ProgressPreference = 'SilentlyContinue'
             try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
-            $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" `
+            # /releases, not /releases/latest. This repository also holds a .NET
+            # rewrite tagged "net-v...", and /latest returns whichever release is
+            # newest regardless of tag - so once one of those was newest, this
+            # build would read it, fail to parse a version out of it, and decide
+            # it was up to date forever.
+            #
+            # 30 is enough to reach back past a run of the other build's
+            # releases without paging.
+            $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=30" `
                 -Headers @{ 'User-Agent' = 'scout-companion' } -TimeoutSec 15
-            if ($r -and $r.tag_name) { return [string]$r.tag_name }
+            # The selection functions are defined in the main script, which this
+            # runspace cannot see, so they are passed in as text and defined
+            # here. One definition, used in both places.
+            . ([scriptblock]::Create($selector))
+            return Select-LatestTag $r ([bool]$includePrerelease)
         } catch { }
         return $null
-    }).AddArgument([string]$Config.updateRepo)
+    }).AddArgument([string]$Config.updateRepo).
+       AddArgument([bool]$Config.updateBeta).
+       AddArgument($script:SelectorSource)
     $script:UpdatePs     = $ps
     $script:UpdateHandle = $ps.BeginInvoke()
 }
@@ -5400,13 +5575,29 @@ function Install-CompanionUpdate {
     # The installer stops the running companion, so the companion cannot be the
     # thing that runs it. Hand it to a detached shell and get out of the way.
     #
-    # No tag is passed: web-install defaults to the latest release, which is
-    # exactly what was detected. Setting $Tag beforehand would not work anyway -
-    # the downloaded script opens with param(), so iex binds nothing and the
-    # parameter's own empty default would win.
+    # The tag is now passed explicitly. It could not be before - the downloaded
+    # script opens with param(), so iex binds nothing and the parameter's own
+    # default won - and while "latest" was the same answer that no longer holds:
+    # a beta ring wants the release this build actually found, not whatever the
+    # installer would pick on its own. Downloading to a scriptblock and invoking
+    # it with an argument is what makes param() bind.
+    # An empty -Tag would send the installer looking for a release named "",
+    # so fall back to letting it choose when there is somehow nothing to name.
     $cmd = "`$ProgressPreference='SilentlyContinue'; " +
            "[Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; " +
-           "iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/$($Config.updateRepo)/main/web-install.ps1'))"
+           "`$s=[scriptblock]::Create((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/$($Config.updateRepo)/main/web-install.ps1')); "
+    if ($script:UpdateAvail) {
+        # Doubled for the single-quoted string this lands in. Test-OwnReleaseTag
+        # already rejects anything that could close the quote, so this is the
+        # second lock rather than the first - but the tag is text off the network
+        # and the two guards are independent.
+        $safeTag = ([string]$script:UpdateAvail) -replace "'", "''"
+        $cmd += "& `$s -Tag '$safeTag'"
+    } elseif ($Config.updateBeta) {
+        $cmd += "& `$s -Beta"
+    } else {
+        $cmd += "& `$s"
+    }
     try {
         Write-CompanionLog "installing update $($script:UpdateAvail)"
         $script:UpdateInstalling = $true

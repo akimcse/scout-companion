@@ -102,6 +102,9 @@
   "autoUpdate": false,
   "_autoUpdate": "Install a new release as soon as one is found, instead of offering it in the tray menu. Off by default on purpose: this companion's job is to click Allow on security prompts, and replacing it mid-approval would restart it at an unpredictable moment and could drop a prompt that was already on screen. Either way it only ever updates a copy installed by Install.ps1 - a source checkout is left alone, because the installer overwrites its target wholesale and would throw away uncommitted work.",
 
+  "updateBeta": false,
+  "_updateBeta": "Also offer releases marked as pre-releases on GitHub, not just finished ones. Off by default, so nothing changes unless you ask for it. Betas and stable releases live in the same list and are ordered properly against each other, so turning this on moves you to a beta only while one is genuinely newer: once the stable release it led to is published, that wins and you come back to the normal ring without doing anything. Turning it off does not downgrade you - you simply stop being offered previews and wait for the next stable release to catch up. Also toggleable from the settings window.",
+
   "exitWhenAgentGone": true,
   "_exitWhenAgentGone": "Automatically close the companion shortly after the agent app quits. Pair with Watch-Scout.ps1 (in the Startup folder) to tie the companion's lifetime to Scout: it opens when Scout starts and closes when Scout exits.",
 
