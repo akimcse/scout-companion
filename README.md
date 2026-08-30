@@ -77,8 +77,9 @@ you act on approvals in place.
 - **🎙️ Optional voice control** — say “Hey Scout”, dictate into the conversation already
   open in Scout, and optionally hear that turn's final answer. Includes five-phrase
   enrollment plus wake-word and ambient-noise sensitivity controls.
-- **🌍 Fifteen languages** — follows your Windows display language, or pin one.
-  English, Korean, Japanese, and Simplified Chinese can be selected directly in Settings.
+- **🌍 Fifteen languages** — follows your Windows display language, or select any supported
+  language directly in Settings. Voice recognition supports English, Korean, Japanese, and
+  Simplified Chinese; the other UI languages clearly fall back to English voice recognition.
 - **🪶 Zero-config core** — the overlay is pure PowerShell + WPF; even the mascots are
   drawn at runtime. Voice control is optional and prepares a private per-user .NET runtime
   on first enrollment without changing PATH or installing anything system-wide.
@@ -199,7 +200,8 @@ Français, Deutsch, Italiano, Español, 日本語, 한국어, Русский, Po
 Polski, Čeština, Magyar.
 
 It follows your Windows display language by default, walking the culture's parent chain
-(so `zh-CN` finds `zh-Hans`). Pin one in `config.json`:
+(so `zh-CN` finds `zh-Hans`). Select any of the fifteen languages in Settings, or pin one
+in `config.json`:
 
 ```json
 { "language": "ko" }

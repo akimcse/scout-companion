@@ -1,5 +1,12 @@
 # Release notes
 
+## v0.14.0 — Select every supported UI language
+
+- Make all fifteen translated UI languages available directly in Settings.
+- Show language names in their native form so they remain recognizable after switching.
+- Clearly indicate when voice recognition falls back to English for a UI language that the
+  speech engine does not support.
+
 ## v0.13.0 — One .NET voice engine, no Python installation
 
 - Replace the Python voice process and enrollment window with one .NET 8 engine using

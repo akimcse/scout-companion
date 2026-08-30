@@ -51,11 +51,33 @@ internal static class App
 
     private static int RunEnrollment(EnrollmentOptions options)
     {
-        ApplicationConfiguration.Initialize();
-        using var logger = new BoundedLogger(Path.Combine(options.RuntimeDirectory, "dotnet-voice.log"));
-        using var form = new EnrollmentForm(options, logger);
-        Application.Run(form);
-        return form.Completed ? 0 : 1;
+        var result = 1;
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var logger = new BoundedLogger(
+                    Path.Combine(options.RuntimeDirectory, "dotnet-voice.log"));
+                using var form = new EnrollmentForm(options, logger);
+                var application = new System.Windows.Application
+                {
+                    ShutdownMode = System.Windows.ShutdownMode.OnMainWindowClose,
+                };
+                application.Run(form);
+                result = form.Completed ? 0 : 1;
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        return result;
     }
 
     private static string MutexName(string runtimeDirectory)
