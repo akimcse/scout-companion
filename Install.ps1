@@ -101,6 +101,27 @@ function Stop-ProcessTree([int]$RootId) {
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
     }
     Stop-Process -Id $RootId -Force -ErrorAction SilentlyContinue
+    foreach ($id in @($ids) + $RootId) {
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            if (-not (Get-Process -Id $id -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
+
+function Remove-UpgradePath([string]$Path) {
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        try {
+            if (Test-Path $Path) {
+                Remove-Item $Path -Recurse -Force -ErrorAction Stop
+            }
+            if (-not (Test-Path $Path)) { return }
+        } catch {
+            if ($attempt -eq 9) { throw }
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "Could not replace $Path because it is still in use."
 }
 
 function Stop-Companion {
@@ -229,7 +250,7 @@ New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 # linger, but never touch anything held in $saved.
 if ($existing) {
     Get-ChildItem $InstallDir -Force | Where-Object { $UserState -notcontains $_.Name } |
-        ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        ForEach-Object { Remove-UpgradePath $_.FullName }
 }
 
 foreach ($f in $Payload) {
@@ -262,6 +283,18 @@ if ($keepRuntime -and (Test-Path $publishRoot)) {
     Get-ChildItem $publishRoot -Directory |
         Where-Object { $_.Name -ne $keepRuntime } |
         Remove-Item -Recurse -Force
+    $engineRoot = Join-Path $publishRoot $keepRuntime
+    foreach ($requiredFile in @(
+            'ScoutVoiceEngine.exe',
+            'ScoutVoiceEngine.dll',
+            'ScoutVoiceEngine.deps.json',
+            'ScoutVoiceEngine.runtimeconfig.json',
+            'sherpa-onnx-c-api.dll',
+            'scout-listening.wav')) {
+        if (-not (Test-Path (Join-Path $engineRoot $requiredFile))) {
+            throw "Voice engine installation is incomplete: $requiredFile is missing."
+        }
+    }
 }
 Copy-Item (Join-Path $SourceDir 'lang') $InstallDir -Recurse -Force
 Write-Host ("  copied {0} files and {1} language files" -f $Payload.Count, (Get-ChildItem (Join-Path $InstallDir 'lang') -File).Count)

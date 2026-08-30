@@ -44,7 +44,7 @@ internal sealed class VoiceModels : IDisposable
         var vadConfig = new VadModelConfig();
         vadConfig.SileroVad.Model = Path.Combine(modelsDirectory, "silero_vad.int8.onnx");
         vadConfig.SileroVad.Threshold = 0.80F - (Math.Clamp(noiseSensitivity, 0, 100) * 0.006F);
-        vadConfig.SileroVad.MinSilenceDuration = 0.55F;
+        vadConfig.SileroVad.MinSilenceDuration = 0.85F;
         vadConfig.SileroVad.MinSpeechDuration = 0.25F;
         vadConfig.SileroVad.MaxSpeechDuration = 12.0F;
         vadConfig.SileroVad.WindowSize = 512;

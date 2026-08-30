@@ -5,7 +5,8 @@ namespace ScoutVoiceEngine;
 
 internal sealed class WindowsTts : IDisposable
 {
-    private const string Script =
+    internal const int ConfiguredVolume = 70;
+    private static readonly string Script =
         "Add-Type -AssemblyName System.Speech;" +
         "$t=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:SCOUT_TTS_TEXT));" +
         "$c=[Globalization.CultureInfo]::GetCultureInfo($env:SCOUT_TTS_CULTURE);" +
@@ -14,7 +15,7 @@ internal sealed class WindowsTts : IDisposable
         "[System.Speech.Synthesis.VoiceAge]::Adult,0," +
         "$c)}catch{try{$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::NotSet," +
         "[System.Speech.Synthesis.VoiceAge]::NotSet,0,$c)}catch{}};" +
-        "$s.Rate=1;$s.Speak($t);$s.Dispose()";
+        "$s.Rate=1;$s.Volume=" + ConfiguredVolume + ";$s.Speak($t);$s.Dispose()";
 
     private readonly BoundedLogger _logger;
     private readonly string _culture;

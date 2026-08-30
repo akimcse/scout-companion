@@ -12,6 +12,12 @@
   and models are ready.
 - Install only the current CPU architecture and keep the runtime private to the current
   Windows user.
+- Improve Korean short-command recognition after wake and TTS interruption, including
+  common SenseVoice errors for “지금 몇 시야?”.
+- Restore the original `scout-listening.wav` command-accepted sound and increase spoken
+  answer volume.
+- Wait for update-time process locks to clear and verify the selected engine package
+  before reporting installation success.
 
 ### Rollback
 

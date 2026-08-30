@@ -14,4 +14,8 @@
     <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.5" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="scout-listening.wav" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

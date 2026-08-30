@@ -17,6 +17,7 @@ internal sealed class VoiceEngine
     private CancellationTokenSource? _commandCancellation;
     private CancellationTokenSource? _speechCancellation;
     private volatile bool _speaking;
+    private bool _awaitingWithRelaxedSpeakerThreshold;
 
     public VoiceEngine(RunOptions options, BoundedLogger logger)
     {
@@ -164,14 +165,19 @@ internal sealed class VoiceEngine
         var text = models.Transcribe(samples);
         if (string.IsNullOrWhiteSpace(text))
             return;
+        var displayText = TextProcessing.CanonicalizeWakeForDisplay(
+            text, _options.Language, _options.WakeSensitivity);
         var (verified, score) = Verify(samples, models, profile, liveThreshold);
-        _logger.Info($"Segment speakerScore={score:F3}, verified={verified}, text='{Truncate(text, 100)}'.");
-        _state.Transcript(text);
+        _logger.Info(
+            $"Segment language={_options.Language}, speakerScore={score:F3}, " +
+            $"verified={verified}, text='{Truncate(displayText, 100)}'.");
+        _state.Transcript(displayText);
         var now = DateTimeOffset.UtcNow;
 
         if (_speaking)
         {
-            var wake = TextProcessing.SplitWakeCommand(text, _options.WakeSensitivity);
+            var wake = TextProcessing.SplitWakeCommand(
+                text, _options.WakeSensitivity, prefixOnly: true);
             if (wake.Detected)
             {
                 _logger.Info("Explicit wake phrase interrupted TTS.");
@@ -179,7 +185,17 @@ internal sealed class VoiceEngine
                     _speechCancellation?.Cancel();
                 tts.Stop();
                 _state.Wake();
-                _awaitingCommandUntil = now.AddSeconds(10);
+                if (TextProcessing.HasMeaningfulCommand(wake.Command) &&
+                    AcceptSpeaker(verified, score, afterInterrupt: true))
+                {
+                    _awaitingWithRelaxedSpeakerThreshold = false;
+                    DispatchCommand(wake.Command, false, tts, stoppingToken);
+                }
+                else
+                {
+                    _awaitingWithRelaxedSpeakerThreshold = true;
+                    _awaitingCommandUntil = now.AddSeconds(10);
+                }
             }
             return;
         }
@@ -209,19 +225,21 @@ internal sealed class VoiceEngine
         if (now <= _awaitingCommandUntil)
         {
             var wake = TextProcessing.SplitWakeCommand(text, _options.WakeSensitivity);
-            if (wake.Detected && string.IsNullOrWhiteSpace(wake.Command))
+            if (wake.Detected && !TextProcessing.HasMeaningfulCommand(wake.Command))
             {
                 _awaitingCommandUntil = now.AddSeconds(10);
                 _state.Status(_text.Runtime.SpeakCommand, "listening");
                 return;
             }
             _awaitingCommandUntil = DateTimeOffset.MinValue;
-            if (!verified)
+            if (!AcceptSpeaker(verified, score, _awaitingWithRelaxedSpeakerThreshold))
             {
                 _logger.Warning($"Rejected unverified command score={score:F3}.");
                 Track(SpeakStatusAsync(_text.Runtime.UnverifiedSpeaker, tts, stoppingToken));
+                _awaitingWithRelaxedSpeakerThreshold = false;
                 return;
             }
+            _awaitingWithRelaxedSpeakerThreshold = false;
             DispatchCommand(wake.Detected ? wake.Command : text, false, tts, stoppingToken);
             return;
         }
@@ -230,8 +248,9 @@ internal sealed class VoiceEngine
         if (!detected.Detected)
             return;
         _state.Wake();
-        if (string.IsNullOrWhiteSpace(detected.Command))
+        if (!TextProcessing.HasMeaningfulCommand(detected.Command))
         {
+            _awaitingWithRelaxedSpeakerThreshold = true;
             _awaitingCommandUntil = now.AddSeconds(10);
             return;
         }
@@ -258,10 +277,13 @@ internal sealed class VoiceEngine
         }
     }
 
+    internal static bool AcceptSpeaker(bool verified, float score, bool afterInterrupt) =>
+        verified || (afterInterrupt && score >= 0.35f);
+
     private void DispatchCommand(
         string command, bool confirmed, WindowsTts tts, CancellationToken stoppingToken)
     {
-        command = command.Trim();
+        command = TextProcessing.CorrectCommonRecognition(command, _options.Language).Trim();
         if (string.IsNullOrWhiteSpace(command))
         {
             Track(SpeakStatusAsync(_text.Runtime.NoCommand, tts, stoppingToken));
@@ -305,6 +327,7 @@ internal sealed class VoiceEngine
     {
         try
         {
+            PlayCommandAcceptedSound();
             _state.Command(command);
             var answer = await _bridge.AskAsync(command, TimeSpan.FromMinutes(10), cancellation.Token);
             _state.Answer(answer);
@@ -322,6 +345,23 @@ internal sealed class VoiceEngine
             _logger.Error("Voice command failed", exception);
             await SpeakStatusAsync(_text.Runtime.Failed, tts,
                 cancellation.Token);
+        }
+    }
+
+    private void PlayCommandAcceptedSound()
+    {
+        try
+        {
+            var soundPath = Path.Combine(AppContext.BaseDirectory, "scout-listening.wav");
+            if (!File.Exists(soundPath))
+                throw new FileNotFoundException("Command sound is missing.", soundPath);
+            using var player = new System.Media.SoundPlayer(soundPath);
+            player.PlaySync();
+            _logger.Info("Played command accepted sound.");
+        }
+        catch (Exception exception)
+        {
+            _logger.Error("Command accepted sound failed", exception);
         }
     }
 
@@ -360,6 +400,10 @@ internal sealed class VoiceEngine
         try
         {
             await tts.SpeakAsync(text, speechCancellation.Token);
+        }
+        catch (OperationCanceledException) when (speechCancellation.IsCancellationRequested)
+        {
+            _logger.Info("TTS answer interrupted by wake phrase.");
         }
         finally
         {

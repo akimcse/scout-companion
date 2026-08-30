@@ -58,7 +58,8 @@ internal static partial class TextProcessing
         return NonSpeechTextRegex().Replace(text, "").ToLowerInvariant();
     }
 
-    public static (bool Detected, string Command) SplitWakeCommand(string text, int sensitivity)
+    public static (bool Detected, string Command) SplitWakeCommand(
+        string text, int sensitivity, bool prefixOnly = false)
     {
         foreach (var regex in new[]
                  {
@@ -66,7 +67,8 @@ internal static partial class TextProcessing
                  })
         {
             var match = regex.Match(text);
-            if (match.Success)
+            if (match.Success &&
+                (!prefixOnly || Normalize(text[..match.Index]).Length <= 1))
                 return (true, text[(match.Index + match.Length)..].TrimStart(' ', ',', '.', '!', '?', '，', '。'));
         }
 
@@ -74,9 +76,42 @@ internal static partial class TextProcessing
         foreach (var variant in WakeVariants)
         {
             var index = compact.IndexOf(variant, StringComparison.Ordinal);
-            if (index >= 0)
+            if (index >= 0 && (!prefixOnly || index <= 1))
                 return (true, compact[(index + variant.Length)..]);
         }
+
+        // During TTS, the owner's wake phrase is often mixed with speaker echo
+        // and loses one syllable (for example 헤이스웃). It still begins the
+        // captured segment. Fuzzy-match only that prefix so similar words in
+        // the answer body cannot interrupt playback.
+        var fuzzyThreshold = Math.Max(
+            0.60, 0.80 - (Math.Clamp(sensitivity, 0, 100) * 0.004));
+        var bestScore = 0.0;
+        var bestLength = 0;
+        foreach (var variant in WakeVariants)
+        {
+            var lengths = new List<int> { variant.Length };
+            // A shorter prefix is only valid when text remains as a command.
+            // Otherwise a misspelled standalone wake phrase would become more
+            // permissive merely because we discarded its final character.
+            if (compact.Length > variant.Length)
+                lengths.Add(variant.Length - 1);
+            if (compact.Length > variant.Length + 1)
+                lengths.Add(variant.Length + 1);
+            foreach (var length in lengths.Distinct())
+            {
+                if (length < 2 || length > compact.Length)
+                    continue;
+                var score = Similarity(compact[..length], variant);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestLength = length;
+                }
+            }
+        }
+        if (bestScore >= fuzzyThreshold)
+            return (true, compact[bestLength..]);
 
         if (compact.Length is > 0 and <= 10)
         {
@@ -112,6 +147,32 @@ internal static partial class TextProcessing
     }
 
     public static bool IsRiskyCommand(string text) => RiskyRegex().IsMatch(text);
+
+    public static bool HasMeaningfulCommand(string text) => Normalize(text).Length >= 2;
+
+    public static string CorrectCommonRecognition(string text, string language)
+    {
+        if (!language.Equals("ko", StringComparison.OrdinalIgnoreCase))
+            return text;
+        return Normalize(text) switch
+        {
+            "지금몇" or "지금몇야" or "지금러시아" => "지금 몇 시야?",
+            _ => text,
+        };
+    }
+
+    public static string CanonicalizeWakeForDisplay(
+        string text, string language, int sensitivity)
+    {
+        if (!language.Equals("ko", StringComparison.OrdinalIgnoreCase))
+            return text;
+        var wake = SplitWakeCommand(text, sensitivity);
+        if (!wake.Detected)
+            return text;
+        return HasMeaningfulCommand(wake.Command)
+            ? $"헤이 스카웃 {wake.Command}"
+            : "헤이 스카웃";
+    }
 
     public static bool IsConfirmation(string text)
     {

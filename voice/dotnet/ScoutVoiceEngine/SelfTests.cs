@@ -11,11 +11,14 @@ internal static class SelfTests
             ("text normalization", () => Sync(() =>
                 Equal("heyscout東京일정", TextProcessing.Normalize("<|ko|> Hey, Scout! 東京 일정")))),
             ("wake splitting and sensitivity", () => Sync(TestWake)),
+            ("Korean command recognition correction", () => Sync(TestKoreanCommandCorrection)),
             ("cosine similarity and profile serialization", () => Sync(TestProfile)),
             ("risky command detection", () => Sync(TestRisk)),
             ("language resources completeness", () => Sync(TestLanguages)),
             ("run language configuration", () => Sync(TestRunLanguage)),
             ("localized voice state", () => Sync(TestLocalizedState)),
+            ("interrupt speaker threshold", () => Sync(TestInterruptSpeakerThreshold)),
+            ("audible TTS volume", () => Sync(TestTtsVolume)),
             ("bounded lifecycle shutdown", TestBoundedShutdownAsync),
             ("response bridge protocol", TestBridgeAsync),
         };
@@ -47,14 +50,31 @@ internal static class SelfTests
     private static void TestWake()
     {
         var korean = TextProcessing.SplitWakeCommand("헤이 스카웃, 오늘 일정 알려줘", 65);
-        True(korean.Detected && korean.Command == "오늘 일정 알려줘");
+        True(korean.Detected && korean.Command == "오늘 일정 알려줘", "Korean wake");
         var english = TextProcessing.SplitWakeCommand("Hey Scout, weather", 65);
-        True(english.Detected && english.Command == "weather");
-        True(TextProcessing.SplitWakeCommand("ヘイ スカウト、予定を教えて", 65).Detected);
-        True(TextProcessing.SplitWakeCommand("嘿 Scout，查看日程", 65).Detected);
-        True(!TextProcessing.SplitWakeCommand("heyscotx", 0).Detected);
-        True(TextProcessing.SplitWakeCommand("heyscotx", 100).Detected);
-        True(!TextProcessing.SplitWakeCommand("ambient conversation", 100).Detected);
+        True(english.Detected && english.Command == "weather", "English wake");
+        True(TextProcessing.SplitWakeCommand("ヘイ スカウト、予定を教えて", 65).Detected,
+            "Japanese wake");
+        var mixed = TextProcessing.SplitWakeCommand("헤이스웃 다음 주 일정 알려줘", 85);
+        True(mixed.Detected && mixed.Command.Contains("다음주일정알려줘"),
+            $"mixed TTS wake: detected={mixed.Detected}, command={mixed.Command}");
+        True(!TextProcessing.SplitWakeCommand(
+            "월요일 일정 중 헤이스카웃 비슷한 소리", 85, prefixOnly: true).Detected,
+            "mid-answer wake text");
+        var mixedScriptWake = TextProcessing.SplitWakeCommand("ヘ이スカ웃？", 85);
+        True(mixedScriptWake.Detected &&
+             !TextProcessing.HasMeaningfulCommand(mixedScriptWake.Command),
+            $"mixed-script wake residue: {mixedScriptWake.Command}");
+        Equal("헤이 스카웃", TextProcessing.CanonicalizeWakeForDisplay(
+            "へイスカ？", "ko", 85));
+        Equal("へイスカ？", TextProcessing.CanonicalizeWakeForDisplay(
+            "へイスカ？", "ja", 85));
+        True(TextProcessing.SplitWakeCommand("嘿 Scout，查看日程", 65).Detected,
+            "Chinese wake");
+        True(!TextProcessing.SplitWakeCommand("heyscotx", 0).Detected, "strict fuzzy wake");
+        True(TextProcessing.SplitWakeCommand("heyscotx", 100).Detected, "tolerant fuzzy wake");
+        True(!TextProcessing.SplitWakeCommand("ambient conversation", 100).Detected,
+            "ambient speech");
     }
 
     private static void TestProfile()
@@ -92,6 +112,31 @@ internal static class SelfTests
         True(TextProcessing.IsConfirmation("確認並執行"));
         True(TextProcessing.IsCancellation("取消"));
         True(!TextProcessing.IsRiskyCommand("오늘 일정 알려줘"));
+    }
+
+    private static void TestInterruptSpeakerThreshold()
+    {
+        True(!VoiceEngine.AcceptSpeaker(false, 0.42f, false),
+            "normal commands keep the enrolled threshold");
+        True(VoiceEngine.AcceptSpeaker(false, 0.384f, true),
+            "barge-in commands allow speech mixed with TTS");
+        True(!VoiceEngine.AcceptSpeaker(false, 0.34f, true),
+            "barge-in still rejects low-confidence speakers");
+    }
+
+    private static void TestKoreanCommandCorrection()
+    {
+        Equal("지금 몇 시야?", TextProcessing.CorrectCommonRecognition("지금 몇.", "ko"));
+        Equal("지금 몇 시야?", TextProcessing.CorrectCommonRecognition("지금 몇야?", "ko"));
+        Equal("지금 몇 시야?", TextProcessing.CorrectCommonRecognition("지금 러시아.", "ko"));
+        Equal("지금 러시아 상황 알려줘",
+            TextProcessing.CorrectCommonRecognition("지금 러시아 상황 알려줘", "ko"));
+        Equal("지금 러시아.", TextProcessing.CorrectCommonRecognition("지금 러시아.", "en"));
+    }
+
+    private static void TestTtsVolume()
+    {
+        Equal(70, WindowsTts.ConfiguredVolume);
     }
 
     private static void TestLanguages()
@@ -226,10 +271,10 @@ internal static class SelfTests
         True(completed);
     }
 
-    private static void True(bool value)
+    private static void True(bool value, string? message = null)
     {
         if (!value)
-            throw new InvalidOperationException("Assertion failed.");
+            throw new InvalidOperationException(message ?? "Assertion failed.");
     }
 
     private static void Equal<T>(T expected, T actual) where T : IEquatable<T>

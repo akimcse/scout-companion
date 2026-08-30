@@ -94,8 +94,16 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw "Could not publish the .NET voice engine for $runtime."
         }
-        if (-not (Test-Path (Join-Path $publishDir 'ScoutVoiceEngine.exe'))) {
-            throw "The $runtime .NET voice engine executable is missing."
+        foreach ($requiredFile in @(
+                'ScoutVoiceEngine.exe',
+                'ScoutVoiceEngine.dll',
+                'ScoutVoiceEngine.deps.json',
+                'ScoutVoiceEngine.runtimeconfig.json',
+                'sherpa-onnx-c-api.dll',
+                'scout-listening.wav')) {
+            if (-not (Test-Path (Join-Path $publishDir $requiredFile))) {
+                throw "The $runtime voice package is incomplete: $requiredFile is missing."
+            }
         }
     }
 

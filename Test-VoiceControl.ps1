@@ -154,7 +154,8 @@ $required = @(
     'voice\dotnet\ScoutVoiceEngine\ScoutVoiceEngine.csproj',
     'voice\dotnet\ScoutVoiceEngine\VoiceEngine.cs',
     'voice\dotnet\ScoutVoiceEngine\EnrollmentForm.cs',
-    'voice\dotnet\ScoutVoiceEngine\LanguageResources.cs'
+    'voice\dotnet\ScoutVoiceEngine\LanguageResources.cs',
+    'voice\dotnet\ScoutVoiceEngine\scout-listening.wav'
 )
 foreach ($relative in $required) {
     Assert-True (Test-Path (Join-Path $Root $relative)) "$relative is packaged"
@@ -181,9 +182,11 @@ Assert-True (-not $Config.PSObject.Properties['voiceEngine']) 'there is only one
 Assert-True ($Text -notmatch 'VoiceEnginePicker') 'no engine selector remains'
 Assert-True ($Text -match 'Get-DotNetVoiceEngineDirectory') 'architecture-specific .NET engine is resolved'
 Assert-True ($Build -match "'win-arm64', 'win-x64'") 'both Windows architectures are published'
+Assert-True ($Build -match 'voice package is incomplete') 'release build verifies engine assets'
 $Engine = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\VoiceEngine.cs') -Raw -Encoding UTF8
 Assert-True ($Engine -match 'Rejected unverified command') 'unregistered speakers are rejected'
 Assert-True ($Engine -match 'Explicit wake phrase interrupted TTS') 'only wake speech interrupts answers'
+Assert-True ($Engine -match 'scout-listening\.wav') 'accepted commands play the original sound'
 $Processing = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\TextProcessing.cs') -Raw -Encoding UTF8
 Assert-True ($Processing -match '一-鿿') 'Chinese enrollment text survives normalization'
 $Tts = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\WindowsTts.cs') -Raw -Encoding UTF8
@@ -193,6 +196,8 @@ Assert-True ($Project -match 'org\.k2fsa\.sherpa\.onnx') 'Sherpa ONNX is the .NE
 Assert-True ($Project -match 'NAudio') 'NAudio is the Windows microphone backend'
 $Installer = Get-Content (Join-Path $Root 'Install.ps1') -Raw
 Assert-True ($Installer -match 'Stop-ProcessTree') 'installer stops the voice process tree'
+Assert-True ($Installer -match 'Remove-UpgradePath') 'installer retries locked upgrade files'
+Assert-True ($Installer -match 'Voice engine installation is incomplete') 'installer verifies the selected engine'
 Assert-True ($Text -match 'Stop-OwnedProcessTree') 'Companion stops setup and enrollment children'
 
 $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
