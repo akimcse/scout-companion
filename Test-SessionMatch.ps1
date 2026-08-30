@@ -24,7 +24,8 @@ foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-Ch
                  'Format-Idle', 'Group-SessionRows',
                  'Compare-CompanionVersion', 'Test-UpdatableInstall',
                  'ConvertTo-EventTime', 'Format-Duration', 'Get-ElapsedLabel',
-                 'Test-ShouldNotifyFinish', 'Get-RestoredPosition')) {
+                 'Test-ShouldNotifyFinish', 'Get-RestoredPosition',
+                 'Test-OwnReleaseTag', 'Select-LatestTag')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -381,7 +382,21 @@ Same 'major beats minor'               (Compare-CompanionVersion '1.0.0' '0.9.9'
 # 10 > 9 only if these are numbers, not text.
 Same 'numbers, not text'               (Compare-CompanionVersion '0.10.0' '0.9.0') 1
 Same 'a short tag is padded'           (Compare-CompanionVersion '1' '1.0.0')      0
-Same 'a pre-release suffix is ignored' (Compare-CompanionVersion 'v0.4.0-beta.1' '0.4.0') 0
+# A pre-release comes before the version it is heading for. This was stripped
+# and treated as equal until a beta ring needed the order - at which point
+# 0.13.0-beta.1 equalled both 0.13.0-beta.2 and 0.13.0, so a beta user would
+# never have been offered the next beta nor the stable release superseding it.
+Same 'a beta precedes its release'    (Compare-CompanionVersion 'v0.4.0-beta.1' '0.4.0') -1
+Same 'and the release follows it'     (Compare-CompanionVersion '0.4.0' 'v0.4.0-beta.1') 1
+Same 'betas order among themselves'   (Compare-CompanionVersion '0.4.0-beta.2' '0.4.0-beta.1') 1
+# Numerically, so 10 comes after 9 rather than sorting as text.
+Same 'and count past nine'            (Compare-CompanionVersion '0.4.0-beta.10' '0.4.0-beta.9') 1
+Same 'a bare beta precedes beta.1'    (Compare-CompanionVersion '0.4.0-beta' '0.4.0-beta.1') -1
+Same 'identical betas are equal'      (Compare-CompanionVersion '0.4.0-beta.1' '0.4.0-beta.1') 0
+# Build metadata is not part of precedence.
+Same 'build metadata is ignored'      (Compare-CompanionVersion '0.4.0+abc' '0.4.0') 0
+# And the numbers still outrank any of it.
+Same 'a newer beta beats an older release' (Compare-CompanionVersion '0.5.0-beta.1' '0.4.0') 1
 Same 'junk does not throw'             (Compare-CompanionVersion 'not-a-version' '0.3.0') -1
 Same 'nothing is not newer'            (Compare-CompanionVersion $null '0.3.0')   -1
 
@@ -416,6 +431,136 @@ Same 'it is three components'          ([bool]($declared -match '^\d+\.\d+\.\d+$
 Same 'and not four'                    ([bool]($declared -match '^\d+\.\d+\.\d+\.\d+')) $false
 # The guard is only worth having if a fourth component really does vanish.
 Same 'a build number would be unseen'  (Compare-CompanionVersion "$declared.1" $declared) 0
+
+Write-Host "`nTest-OwnReleaseTag"
+# This repository now holds two companions: this one and a .NET rewrite, whose
+# releases are tagged "net-v...". They share a releases list, so each has to
+# ignore the other's - and this build owns the bare tags.
+Same 'a plain tag is ours'             (Test-OwnReleaseTag 'v0.12.0') $true
+Same 'without the v as well'           (Test-OwnReleaseTag '0.12.0')  $true
+Same 'and a beta of ours'              (Test-OwnReleaseTag 'v0.13.0-beta.1') $true
+Same 'a net- tag is not'               (Test-OwnReleaseTag 'net-v0.1.0') $false
+Same 'nor a net- beta'                 (Test-OwnReleaseTag 'net-v0.2.0-beta.1') $false
+# Any prefix at all belongs to somebody else, whatever it turns out to be.
+Same 'nor any other prefix'            (Test-OwnReleaseTag 'cli-v1.0.0') $false
+Same 'junk is not a tag'               (Test-OwnReleaseTag 'nightly') $false
+Same 'nor is nothing'                  (Test-OwnReleaseTag '') $false
+
+# The tag is text off the network, and Install-CompanionUpdate puts the chosen
+# one inside a single-quoted PowerShell string. Git accepts a tag named
+#   v1.0.0-'; <anything>; '
+# which closes that quote. It was accepted here - the suffix pattern was ".*" -
+# and the payload ran; measured with a stub installer that printed the tag it
+# received, and the injected command executed after it. Anyone able to push a
+# tag to the configured updateRepo had code execution on every machine that
+# checked for an update, and updateRepo is documented as something you change
+# to point at your own fork. The suffix is now semver's own alphabet.
+Same 'a quote cannot ride in on a tag' (Test-OwnReleaseTag "v1.0.0-'; echo x; '") $false
+Same 'nor a semicolon'                 (Test-OwnReleaseTag 'v1.0.0-a;b') $false
+Same 'nor a space and a switch'        (Test-OwnReleaseTag 'v1.0.0- -NoRun') $false
+Same 'nor a double quote'              (Test-OwnReleaseTag 'v1.0.0-a"b') $false
+Same 'nor a subexpression'             (Test-OwnReleaseTag 'v1.0.0-$(calc)') $false
+Same 'nor a backtick'                  (Test-OwnReleaseTag 'v1.0.0-a`b') $false
+# ...while everything semver actually allows still passes.
+Same 'dotted identifiers still pass'   (Test-OwnReleaseTag 'v1.0.0-beta.1') $true
+Same 'hyphens in a suffix still pass'  (Test-OwnReleaseTag 'v1.0.0-rc-2') $true
+Same 'build metadata still passes'     (Test-OwnReleaseTag 'v1.0.0+build.5') $true
+Same 'both together still pass'        (Test-OwnReleaseTag 'v1.0.0-beta.1+build.5') $true
+
+# And the interpolation itself doubles the quote, so the two guards are
+# independent rather than one guard written twice.
+$upd = Get-Content (Join-Path $PSScriptRoot 'scout-companion.ps1') -Raw
+Same 'the tag is escaped where it is used' `
+    ([int][bool]($upd -match "UpdateAvail\) -replace ""'"", ""''""")) 1
+
+Write-Host "`nSelect-LatestTag"
+function Rel($tag, $pre) { [pscustomobject]@{ tag_name = $tag; prerelease = $pre } }
+
+# The case this exists for: a .NET release is newest, and /releases/latest would
+# have returned it. Reading that, this build could parse no version out of it
+# and would have believed itself up to date forever - and the one-line installer
+# would have unpacked a .NET zip over a PowerShell install.
+$mixed = @( (Rel 'net-v0.3.0' $false), (Rel 'v0.12.0' $false), (Rel 'net-v0.2.0' $false) )
+Same 'the other build is ignored'      (Select-LatestTag $mixed) 'v0.12.0'
+
+# Stable ring: prereleases do not count.
+$ring = @( (Rel 'v0.13.0-beta.2' $true), (Rel 'v0.12.0' $false), (Rel 'v0.13.0-beta.1' $true) )
+Same 'stable skips prereleases'        (Select-LatestTag $ring $false) 'v0.12.0'
+Same 'beta ring takes the newest beta' (Select-LatestTag $ring $true)  'v0.13.0-beta.2'
+
+# A stable release supersedes the betas that led to it, so a beta user moves on
+# rather than being stranded on the last preview. Checked in both list orders:
+# the first version of this passed only because the stable one happened to come
+# first, back when the comparer called them equal.
+$after = @( (Rel 'v0.13.0' $false), (Rel 'v0.13.0-beta.2' $true) )
+Same 'stable wins once it exists'      (Select-LatestTag $after $true) 'v0.13.0'
+$afterRev = @( (Rel 'v0.13.0-beta.2' $true), (Rel 'v0.13.0' $false) )
+Same 'whatever order they arrive in'   (Select-LatestTag $afterRev $true) 'v0.13.0'
+
+# By version, not by position. GitHub returns newest-published first, which is
+# not the same thing - a patch to an older line published later would win.
+$outOfOrder = @( (Rel 'v0.9.9' $false), (Rel 'v0.12.0' $false) )
+Same 'order in the list does not win'  (Select-LatestTag $outOfOrder) 'v0.12.0'
+
+Same 'nothing usable, nothing chosen'  (Select-LatestTag @( (Rel 'net-v1.0.0' $false) )) $null
+Same 'an empty list is fine'           (Select-LatestTag @()) $null
+
+# None of the above matters if the caller asks the wrong endpoint. /releases/latest
+# returns a single release, and it is the wrong one twice over: it skips
+# prereleases outright, so the beta ring can never see a beta; and it does not
+# look at tag names at all, so a net- release published from the .NET rewrite
+# comes back as "latest" and gets unpacked over a PowerShell install. Both call
+# sites have to read the list and choose from it.
+#
+# Found by reintroducing the bug: every other regression here was caught, this
+# one was not, and reverting the endpoint left all 211 tests green.
+#
+# Matched against the built URL, not any mention of it. The first version looked
+# for the bare text and failed on the comments that explain why the endpoint is
+# avoided - the same trap as a ${{ }} inside a workflow comment: what a file says
+# about a thing is not the thing.
+foreach ($f in @('scout-companion.ps1', 'web-install.ps1')) {
+    $p = Join-Path $PSScriptRoot $f
+    $s = if (Test-Path $p) { Get-Content $p -Raw } else { '' }
+    Same "$f asks for the release list"  ([int][bool]($s -match 'repos/\$\w+/releases\?per_page=')) 1
+    Same "$f does not ask for /latest"   ([int][bool]($s -match 'repos/\$\w+/releases/latest'))     0
+}
+
+# The installer is fetched and run on its own, so it cannot borrow the app's
+# comparison and carries a second copy. Two copies drift; this is what stops
+# them doing it quietly. Both were wrong the same way to begin with - suffix
+# stripped - and fixing only the app would have left -Beta picking by list
+# position while the app picked properly.
+$wi = Join-Path $PSScriptRoot 'web-install.ps1'
+if (Test-Path $wi) {
+    $wiAst = [System.Management.Automation.Language.Parser]::ParseFile($wi, [ref]$null, [ref]$null)
+    $cmp = $wiAst.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Compare-Tag'
+    }, $true) | Select-Object -First 1
+    Same 'the installer has a comparison'  ([int][bool]$cmp) 1
+    if ($cmp) {
+        Invoke-Expression $cmp.Extent.Text
+        $pairs = @(
+            @('v0.13.0',        'v0.13.0-beta.2'),
+            @('v0.13.0-beta.2', 'v0.13.0'),
+            @('0.13.0-beta.2',  '0.13.0-beta.1'),
+            @('0.13.0-beta.10', '0.13.0-beta.9'),
+            @('0.13.0-beta',    '0.13.0-beta.1'),
+            @('0.5.0-beta.1',   '0.4.0'),
+            @('0.4.0+abc',      '0.4.0'),
+            @('v0.12.0',        '0.12.0'),
+            @('1',              '0.9.9'),
+            @('0.13.0-beta.1',  '0.13.0-beta.1')
+        )
+        $disagreed = @()
+        foreach ($p in $pairs) {
+            $app = Compare-CompanionVersion $p[0] $p[1]
+            $ins = Compare-Tag $p[0] $p[1]
+            if ($app -ne $ins) { $disagreed += ("{0}<>{1} app={2} installer={3}" -f $p[0], $p[1], $app, $ins) }
+        }
+        Same 'installer orders as the app does' ($disagreed -join '; ') ''
+    }
+}
 
 Write-Host "`nbumping the version on merge"
 # Releasing by hand meant the version and the work drifted apart: two pull
@@ -522,6 +667,20 @@ foreach ($f in (Get-ChildItem $PSScriptRoot -Filter *.ps1)) {
     if ($nonAscii -and -not $hasBom) { $offenders += $f.Name }
 }
 Same 'non-ASCII scripts carry a BOM' ($offenders -join ',') ''
+
+# Invoke-RestMethod writes a JSON array to the pipeline as a single object, so
+# @(Invoke-RestMethod ...) yields one element - the array - not its contents.
+# Measured against the live API: 21 releases direct, 1 when wrapped. Wrapped,
+# the sole element's tag_name is "System.Object[]", Test-OwnReleaseTag rejects
+# it, Select-LatestTag returns nothing, and the companion reports no update
+# available for ever without an error anywhere. Assign it, then wrap.
+$wrapped = @()
+foreach ($f in @('scout-companion.ps1', 'web-install.ps1')) {
+    $p = Join-Path $PSScriptRoot $f
+    if (-not (Test-Path $p)) { continue }
+    if ((Get-Content $p -Raw) -match '@\(\s*Invoke-RestMethod') { $wrapped += $f }
+}
+Same 'no @() around Invoke-RestMethod' ($wrapped -join ',') ''
 
 # ...and the release process must not undo that.
 #

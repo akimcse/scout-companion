@@ -97,7 +97,7 @@ try {
     # the behaviour, and the convention the behaviour depends on.
     # ------------------------------------------------------------------
     Write-Host "`nthe update checkboxes answer to more than a mouse"
-    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'NotifyFinishChk', 'RememberPosCheck')) {
+    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'NotifyFinishChk', 'RememberPosCheck', 'BetaRingChk')) {
         $cb = $w.FindName($n)
         if (-not $cb) {
             $script:Fail++; Write-Host ("  FAIL missing control {0}" -f $n); continue
@@ -125,7 +125,8 @@ try {
     # both use Checked/Unchecked; a control that quietly used Click instead
     # would behave differently for reasons no reader could see.
     Write-Host "`nand are wired the same way as the rest of the window"
-    foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk', 'SettingsNotifyChk', 'SettingsRememberPos')) {
+    foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk', 'SettingsNotifyChk', 'SettingsRememberPos',
+                     'SettingsBetaChk')) {
         $usesToggle = $text -match [regex]::Escape("`$script:$n.Add_Checked")
         $usesClick  = $text -match [regex]::Escape("`$script:$n.Add_Click")
         Check "$n subscribes to Checked"   ([int][bool]$usesToggle) 1
@@ -137,7 +138,7 @@ try {
     Write-Host "`nthe controls the update code binds all exist"
     foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'CheckUpdateBtn', 'UpdateStatus', 'VerText',
                      'NotifyFinishChk', 'AgentTimeText', 'AgentTurnsText', 'AgentSessText',
-                     'InstallUpdateBtn')) {
+                     'InstallUpdateBtn', 'BetaRingChk')) {
         Check "$n is present" ([int][bool]($w.FindName($n))) 1
     }
 

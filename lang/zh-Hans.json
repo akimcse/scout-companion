@@ -139,5 +139,7 @@
     "Check for new versions automatically":  "自动检查新版本",
     "Whether to check GitHub for a newer release on a timer, a few times a day. Off makes no network calls. The 'Check now' button below always works regardless.":  "每天定时在 GitHub 检查几次新版本。关闭后不会发起网络请求。下方的“立即检查”始终可用。",
     "Update failed":  "更新失败",
-    "Update failed:":  "更新失败："
+    "Update failed:":  "更新失败：",
+    "Include beta builds":  "包含 Beta 版本",
+    "Take pre-release builds as well as stable ones. Betas carry the version they are heading for with a suffix — 0.13.0-beta.1 comes after 0.12.0 and before 0.13.0 — so turning this off later leaves you on the beta until the stable release that supersedes it arrives. Betas are published less carefully than stable releases; expect the occasional broken one.":  "除稳定版外，也接收预发布版本。Beta 版本以后缀标明其目标版本，因此 0.13.0-beta.1 排在 0.12.0 之后、0.13.0 之前。所以以后关闭此选项时，在能取代当前 Beta 的稳定版发布之前，你仍会停留在该 Beta 版本上。Beta 版本的发布不如稳定版审慎，偶尔可能出问题。"
 }

@@ -139,5 +139,7 @@
     "Check for new versions automatically":  "新しいバージョンを自動確認",
     "Whether to check GitHub for a newer release on a timer, a few times a day. Off makes no network calls. The 'Check now' button below always works regardless.":  "1日に数回 GitHub で新しいリリースを確認します。オフにするとネットワーク通信を行いません。下の「今すぐ確認」は設定に関係なく使用できます。",
     "Update failed":  "更新に失敗しました",
-    "Update failed:":  "更新に失敗しました:"
+    "Update failed:":  "更新に失敗しました:",
+    "Include beta builds":  "ベータ ビルドを含める",
+    "Take pre-release builds as well as stable ones. Betas carry the version they are heading for with a suffix — 0.13.0-beta.1 comes after 0.12.0 and before 0.13.0 — so turning this off later leaves you on the beta until the stable release that supersedes it arrives. Betas are published less carefully than stable releases; expect the occasional broken one.":  "安定版に加えてプレリリース版も受け取ります。ベータには目指すバージョンが接尾辞として付いており、0.13.0-beta.1 は 0.12.0 の後、0.13.0 の前になります。そのため後でこの設定をオフにしても、今のベータを置き換える安定版が出るまではそのまま残ります。ベータは安定版ほど入念に公開されないため、まれに不具合があります。"
 }
