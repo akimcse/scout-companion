@@ -575,6 +575,7 @@ function Get-WindowHandler([string]$eventName) {
 }
 
 $sizeChanged = Get-WindowHandler 'Add_SizeChanged'
+$appTextForHandlers = Get-CodeOnly $astT.Extent
 Same 'the SizeChanged handler was found' ([int][bool]$sizeChanged) 1
 
 # $e does not exist in a PowerShell event handler. Measured: it is $null and the
@@ -600,6 +601,78 @@ Same 'a drop snaps to a near edge'      ([int][bool]($mouseDown -match 'Get-Snap
 # rememberPosition off means the toast returns to the corner on the next content
 # change anyway, so nothing here may invent a position behind the setting's back.
 Same 'and respects rememberPosition'    ([int][bool]($mouseDown -match 'rememberPosition')) 1
+
+Write-Host "`nanswering an approval"
+# The toast presses the approval button that is visible in Scout. With one
+# conversation the request on the card and the request on screen are the same
+# one. With several they are not: the card comes from the first session the
+# companion discovered, Scout shows whichever chat you last looked at. So Allow
+# either did nothing - which is what "Allow doesn't work with multiple
+# sessions" looks like - or answered a conversation you were not reading.
+#
+# Measured on a live Scout window: 501 buttons in the tree, 71 on screen, so
+# IsOffscreen really does pick out the chat in front. The button pressed was a
+# real one; it just belonged to the wrong conversation.
+$answer = ''
+$fn = $funcs | Where-Object { $_.Name -eq 'Answer-Approval' } | Select-Object -First 1
+if ($fn) { $answer = Get-CodeOnly $fn.Extent }
+Same 'there is one answering path'      ([int][bool]$fn) 1
+# The guard: press directly only while a single request is outstanding.
+Same 'it counts what is outstanding'    ([int][bool]($answer -match '\$State\.PendingPerms\.Count\s*-le\s*1')) 1
+Same 'and only then presses a button'   ([int][bool]($answer -match 'Invoke-AgentButton')) 1
+# Otherwise it goes to the conversation that asked rather than guessing.
+Same 'otherwise it opens that chat'     ([int][bool]($answer -match 'Focus-AgentSession')) 1
+
+# Both buttons must go through it. Either one calling Invoke-AgentButton
+# directly would put the blind press straight back.
+$allowClick = ''
+$m = [regex]::Match($appTextForHandlers, '(?m)^\$AllowBtn\.Add_Click\(.*$')
+if ($m.Success) { $allowClick = $m.Value }
+$denyClick = ''
+$m = [regex]::Match($appTextForHandlers, '(?m)^\$DenyBtn\.Add_Click\(.*$')
+if ($m.Success) { $denyClick = $m.Value }
+Same 'Allow answers through it'         ([int][bool]($allowClick -match 'Answer-Approval')) 1
+Same 'Deny answers through it'          ([int][bool]($denyClick  -match 'Answer-Approval')) 1
+Same 'Allow does not press directly'    ([int][bool]($allowClick -match 'Invoke-AgentButton')) 0
+Same 'Deny does not press directly'     ([int][bool]($denyClick  -match 'Invoke-AgentButton')) 0
+
+Write-Host "`nconfig.sample.json describes the app it ships with"
+# The sample tells you to copy it to config.json, so anything wrong in it
+# becomes wrong on the machine that follows it. It listed processNames as
+# "Microsoft Scout", "OpenClaw", "Claw", "Copilot" - and Scout runs as a
+# process named "scout", which none of those match as a substring. What
+# "Copilot" did match was eleven unrelated Windows Copilot processes. Measured:
+# following the sample found zero Scout windows and eleven wrong pids.
+$sampleFile = Join-Path $PSScriptRoot 'config.sample.json'
+Same 'the sample is there'              ([int](Test-Path $sampleFile)) 1
+$sample = $null
+try { $sample = Get-Content $sampleFile -Raw | ConvertFrom-Json } catch { }
+Same 'and it is valid JSON'             ([int][bool]$sample) 1
+if ($sample) {
+    # The defaults, lifted from the app rather than retyped.
+    $cfgAst = $ast.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $n.Left.Extent.Text -eq '$Config' }, $true) | Select-Object -First 1
+    Same 'the app declares its defaults'  ([int][bool]$cfgAst) 1
+    if ($cfgAst) {
+        Invoke-Expression $cfgAst.Extent.Text
+        # Every list the sample repeats has to say what the app says. Setting one
+        # of these replaces the app's list rather than adding to it, so a stale
+        # entry here is not a cosmetic difference - it is the agent going
+        # undetected on a machine that did what the file said.
+        $drift = @()
+        foreach ($k in @('processNames','windowHints','allowLabels','denyLabels','askToolNames')) {
+            if (-not $sample.PSObject.Properties[$k]) { continue }
+            $a = (@($Config[$k]) -join '|')
+            $b = (@($sample.$k) -join '|')
+            if ($a -ne $b) { $drift += $k }
+        }
+        Same 'the lists it repeats match'  ($drift -join ',') ''
+        # And the one that actually bit: the real process name is in there.
+        Same 'the real process name is listed' `
+            ([int][bool](@($sample.processNames) -contains 'scout')) 1
+    }
+}
 
 # The grid alignment only happens if the real scale is handed to the geometry.
 # It defaults to off so the pure tests can work in WPF units, which means a call

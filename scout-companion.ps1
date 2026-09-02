@@ -3750,16 +3750,51 @@ function Set-ToastOpacity([double]$v) {    if ($v -lt 0.35) { $v = 0.35 }
 $Config.opacity = Set-ToastOpacity ([double]$Config.opacity)
 Set-Theme 'idle'
 
-$AllowBtn.Add_Click({
-    if (Invoke-AgentButton $Config.allowLabels) {
-        foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
-    } else { Focus-Agent }
-})
-$DenyBtn.Add_Click({
-    if (Invoke-AgentButton $Config.denyLabels) {
-        foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
-    } else { Focus-Agent }
-})
+# Answering the request the toast is SHOWING - not whichever one happens to be
+# on screen in Scout.
+#
+# Invoke-AgentButton presses the approval button that is visible in Scout. With
+# one conversation running, the request on the card and the request on screen
+# are necessarily the same one, and pressing it is exactly right. With several
+# they come apart: the card is taken from the first session the companion
+# discovered, while Scout shows whichever chat you last looked at. So Allow
+# either did nothing at all - the chat in front had no prompt, which is what
+# "Allow doesn't work with multiple sessions" looks like from the outside - or,
+# worse, answered a different conversation's request than the one being read.
+#
+# Measured against a live Scout window: 501 buttons in its automation tree, 71
+# of them on screen. IsOffscreen does correctly single out the chat in front,
+# so the button that gets pressed is a real one. That is the problem - it is a
+# real button belonging to a conversation you may not be looking at.
+#
+# One outstanding request is unambiguous: whatever prompt is on screen has to
+# be that one, so it is pressed directly and the common case is unchanged.
+# Beyond one, this refuses to guess. Approving something you have not read is a
+# worse failure than not approving it, and this companion exists to answer
+# security prompts - so it goes to the conversation that asked and leaves the
+# decision there.
+function Answer-Approval([string[]]$labels) {
+    if ($State.PendingPerms.Count -le 1) {
+        if (Invoke-AgentButton $labels) {
+            # Clear the card straight away rather than waiting for the
+            # permission.completed event to come back round the tick. This is
+            # only the displayed copy - Merge-SessionState rebuilds it from the
+            # sessions every tick - so anything still genuinely outstanding
+            # reappears by itself.
+            foreach ($k in @($State.PendingPerms.Keys)) { $State.PendingPerms.Remove($k) }
+            return
+        }
+    }
+    # Not answerable from here: either more than one request is outstanding, or
+    # the one being shown is not the one in front. Both mean the same thing -
+    # go to the conversation that asked, so the prompt on screen is the prompt
+    # on the card. Focus-AgentSession picks that conversation from the same
+    # pending request the card was built from.
+    Focus-AgentSession
+}
+
+$AllowBtn.Add_Click({ Answer-Approval $Config.allowLabels })
+$DenyBtn.Add_Click({ Answer-Approval $Config.denyLabels })
 $HeaderArea.Add_MouseLeftButtonDown({ $args[1].Handled = $true; Focus-AgentSession })
 $AnswerBtn.Add_Click({ Focus-AgentSession })
 $CloseBtn.Add_Click({ $script:Hidden = $true; $script:Pinned = $false; $Window.Hide() })
