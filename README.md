@@ -62,8 +62,8 @@ you act on approvals in place.
   two unrelated jobs never interleave into one nonsensical list. Working rows come first.
   Scheduled automation runs are left off entirely — they run headless and aren't something
   you'd open.
-- **👆 Click to open** — clicking a row (or the header) steers Scout's sidebar to that
-  conversation, not just raises the window.
+- **👆 Click to open** — clicking a row (or the header) steers Scout's Activity
+  sidebar or Co-create workspace to that conversation, not just raises the window.
 - **✅ One-click approvals** — clicks the real Allow/Deny button inside the agent window
   via UI Automation, without bringing it to the foreground. The toast turns **yellow**.
 - **❓ Handles questions** — parks like an approval, turns **cyan**, shows the question and
@@ -251,7 +251,8 @@ decides. **If nothing plausible comes back, nothing is clicked.** Set `openMatch
 to `false` to skip this entirely.
 
 Covered by `Test-SessionMatch.ps1` (the picker, including the lagging-timestamp case),
-`Test-ButtonSearch.ps1` (where Allow/Deny get clicked) and `Test-TitleLearning.ps1`.
+`Test-ButtonSearch.ps1` (where Allow/Deny get clicked), `Test-CoCreateRouting.ps1`
+(Activity/Co-create classification and both view transitions) and `Test-TitleLearning.ps1`.
 
 </details>
 

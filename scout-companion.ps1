@@ -558,6 +558,8 @@ function New-SessionRecord([string]$dir, [string]$events) {
         Topic        = $null
         Subject      = $null      # the latest thing asked for, used as a title
         ChatTitle    = $null      # Scout's own name for this chat, once learnt
+        Workspace    = $null      # Co-create workspace, when this session has one
+        WorkspaceRead = $false
         Offset       = [long]0
         Saying       = $null
         Steps        = New-Object System.Collections.ArrayList
@@ -820,6 +822,35 @@ function Get-AgentWindow {
         }
     }
     return $null
+}
+
+function Prepare-ActivitySidebar($root, [IntPtr]$hwnd) {
+    $openedSidebar = $false
+    if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) {
+        $show = Find-UiaByName $root 'Show sidebar' $UiaType::Button
+        if ($show -and (Invoke-UiaElement $show)) {
+            $openedSidebar = $true
+            Start-Sleep -Milliseconds 350
+            try { $root = $UiaEl::FromHandle($hwnd) } catch {
+                Hide-AgentSidebar $hwnd
+                return $null
+            }
+        }
+    }
+
+    $root = Enter-ActivityView $root $hwnd
+    if (-not $root) {
+        if ($openedSidebar) { Hide-AgentSidebar $hwnd }
+        return $null
+    }
+    return [pscustomobject]@{ Root = $root; OpenedSidebar = $openedSidebar }
+}
+
+function Hide-AgentSidebar([IntPtr]$hwnd) {
+    try {
+        $root = $UiaEl::FromHandle($hwnd)
+        [void](Invoke-UiaElement (Find-UiaByName $root 'Hide sidebar' $UiaType::Button))
+    } catch { }
 }
 
 # Lightweight presence check (process only, no window). Used to decide when Scout
@@ -2020,6 +2051,7 @@ function Split-ChatRow([string]$raw) {
 function ConvertTo-AgeMinutes([string]$when) {
     if (-not $when) { return $null }
     if ($when -eq 'Just now')      { return 0.0 }
+    if ($when -eq 'Yesterday')     { return 1440.0 }
     if ($when -match '^(\d+)s ago$') { return [double]$Matches[1] / 60.0 }
     if ($when -match '^(\d+)m ago$') { return [double]$Matches[1] }
     if ($when -match '^(\d+)h ago$') { return [double]$Matches[1] * 60 }
@@ -2062,6 +2094,164 @@ function Get-ChatRows($root) {
         [void]$out.Add([pscustomobject]@{ Y = [int]$r.Y; Title = $p.Title; When = $p.When; El = $b })
     }
     return @($out | Sort-Object Y)
+}
+
+# A Co-create conversation records its workspace folder as cwd. Ordinary chats
+# run from the parent Scout folder or another directory, so verify the leaf
+# against Scout's own workspace registry before routing away from Activity.
+function Get-SessionWorkspace($rec) {
+    if (-not $rec) { return $null }
+    if ($rec.WorkspaceRead) { return $rec.Workspace }
+
+    $yaml = Join-Path $rec.Dir 'workspace.yaml'
+    if (-not (Test-Path $yaml)) {
+        $rec.WorkspaceRead = $true
+        return $null
+    }
+    $cwd = $null
+    try {
+        foreach ($line in (Get-Content $yaml -Encoding UTF8 -ErrorAction Stop)) {
+            if ($line -match '^cwd:\s*(.+?)\s*$') { $cwd = $Matches[1]; break }
+        }
+    } catch { return $null }
+    if (-not $cwd -or -not (Test-Path $cwd)) { return $null }
+
+    $leaf = $null
+    try { $leaf = Split-Path $cwd -Leaf } catch { return $null }
+    if (-not $leaf) { return $null }
+    if (-not (Test-KnownWorkspace $leaf) -and
+            -not (Test-KnownWorkspace $leaf -Refresh)) { return $null }
+    $rec.Workspace = $leaf
+    $rec.WorkspaceRead = $true
+    return $leaf
+}
+
+$script:WorkspaceNames    = $null
+$script:WorkspaceNamesUtc = [datetime]::MinValue
+function Test-KnownWorkspace([string]$name, [switch]$Refresh) {
+    if (-not $name) { return $false }
+    if ($Refresh -or -not $script:WorkspaceNames -or
+            ([datetime]::UtcNow - $script:WorkspaceNamesUtc).TotalMinutes -gt 10) {
+        $script:WorkspaceNamesUtc = [datetime]::UtcNow
+        $set = @{}
+        $path = Join-Path $env:USERPROFILE '.scout\m-sessions\workspaces.json'
+        if (Test-Path $path) {
+            try {
+                $doc = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
+                $list = $doc.workspaces
+                $entries = if ($list -is [System.Array]) { $list } else { $list.PSObject.Properties.Value }
+                foreach ($workspace in $entries) {
+                    if ($workspace -and $workspace.displayName) {
+                        $set[[string]$workspace.displayName] = $true
+                    }
+                }
+            } catch { }
+        }
+        $script:WorkspaceNames = $set
+    }
+    return $script:WorkspaceNames.ContainsKey($name)
+}
+
+function Test-ChatSidebarPresent($root) {
+    if (-not $root) { return $false }
+    if (Find-UiaByName $root 'Search chats' $UiaType::Edit) { return $true }
+    if (Find-UiaByName $root 'Search chats' $UiaType::Button) { return $true }
+    return $false
+}
+
+function Enter-ActivityView($root, [IntPtr]$hwnd) {
+    if (Test-ChatSidebarPresent $root) { return $root }
+    $activity = Find-UiaByName $root 'Activity' $UiaType::Button
+    if (-not $activity -or -not (Invoke-UiaElement $activity)) { return $null }
+    for ($i = 0; $i -lt 25; $i++) {
+        Start-Sleep -Milliseconds 100
+        try { $root = $UiaEl::FromHandle($hwnd) } catch { return $null }
+        if (Test-ChatSidebarPresent $root) { return $root }
+    }
+    return $null
+}
+
+# Co-create conversation rows live in the right-hand panel as Groups. Their
+# title and timestamp are separate Text descendants, unlike Activity rows.
+function Get-CoCreateChatRows($root) {
+    $out = New-Object System.Collections.ArrayList
+    if (-not $root) { return @() }
+
+    $newChat = $null
+    $parent = $null
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $cond = New-Object System.Windows.Automation.AndCondition(
+        (New-Object System.Windows.Automation.PropertyCondition($UiaEl::NameProperty, 'New chat')),
+        (New-Object System.Windows.Automation.PropertyCondition($UiaEl::ControlTypeProperty, $UiaType::Button)))
+    foreach ($button in $root.FindAll($UiaTree::Descendants, $cond)) {
+        try { $rect = $button.Current.BoundingRectangle } catch { continue }
+        if ([double]::IsInfinity($rect.X)) { continue }
+        $candidateParent = $null
+        try { $candidateParent = $walker.GetParent($button) } catch { }
+        if (-not $candidateParent) { continue }
+        $parentName = $null
+        try { $parentName = $candidateParent.Current.Name } catch { }
+        if ($parentName -eq 'Main navigation') { continue }
+        $newChat = $button
+        $parent = $candidateParent
+        break
+    }
+    if (-not $newChat) { return @() }
+    $anchor = $newChat.Current.BoundingRectangle
+
+    $textCond = New-Object System.Windows.Automation.PropertyCondition(
+        $UiaEl::ControlTypeProperty, $UiaType::Text)
+    $child = $null
+    try { $child = $walker.GetFirstChild($parent) } catch { }
+    while ($child) {
+        $current = $null
+        try { $current = $child.Current } catch { $child = $null; continue }
+        try {
+            $rect = $current.BoundingRectangle
+            if (-not [double]::IsInfinity($rect.X) -and -not $current.IsOffscreen -and
+                    $current.ControlType -eq $UiaType::Group -and
+                    $rect.Y -gt $anchor.Y -and
+                    [Math]::Abs($rect.X - ($anchor.X - 12)) -lt 40 -and
+                    $rect.Height -ge 24 -and $rect.Height -le 80) {
+                $texts = @()
+                foreach ($text in $child.FindAll($UiaTree::Descendants, $textCond)) {
+                    $value = $null
+                    try { $value = $text.Current.Name } catch { continue }
+                    if ($value) { $texts += (($value -replace '\s+', ' ').Trim()) }
+                }
+                if ($texts.Count -ge 1) {
+                    $when = @($texts | Where-Object {
+                        $_ -match 'ago$' -or
+                        $_ -match '^\d{1,2}/\d{1,2}/\d{4}$' -or
+                        $_ -match '^(Just now|Yesterday)$'
+                    })[0]
+                    [void]$out.Add([pscustomobject]@{
+                        Y = [int]$rect.Y
+                        Title = $texts[0]
+                        When = $when
+                        El = $child
+                    })
+                }
+            }
+        } catch { }
+        try { $child = $walker.GetNextSibling($child) } catch { $child = $null }
+    }
+    return @($out | Sort-Object Y)
+}
+
+function Enter-CoCreateView([IntPtr]$hwnd) {
+    $root = $null
+    try { $root = $UiaEl::FromHandle($hwnd) } catch { return $null }
+    if (@(Get-CoCreateChatRows $root).Count -gt 0) { return $root }
+
+    $coCreate = Find-UiaByName $root 'Co-create' $UiaType::Button
+    if (-not $coCreate -or -not (Invoke-UiaElement $coCreate)) { return $null }
+    for ($i = 0; $i -lt 25; $i++) {
+        Start-Sleep -Milliseconds 100
+        try { $root = $UiaEl::FromHandle($hwnd) } catch { return $null }
+        if (@(Get-CoCreateChatRows $root).Count -gt 0) { return $root }
+    }
+    return $null
 }
 
 # Something the session has talked about, short enough that the search stays
@@ -2554,7 +2744,73 @@ function Get-RaisingSession {
     return $best
 }
 
+function Open-CoCreateSession($rec, [IntPtr]$hwnd, [switch]$Exact) {
+    if (-not $rec) { return $false }
+    $rows = @(Get-CoCreateChatRows ($UiaEl::FromHandle($hwnd)))
+    if ($rows.Count -eq 0) { return $false }
+
+    if ($rec.ChatTitle) {
+        $exactRow = @($rows | Where-Object { $_.Title -eq $rec.ChatTitle })[0]
+        if ($exactRow) { return (Invoke-CoCreateRow $rec $exactRow) }
+        # A named conversation absent from the list is already open.
+        return $true
+    }
+    if ($Exact) { return $false }
+
+    $stamp = Get-LastMessageUtc $rec.Events
+    if (-not $stamp) { $stamp = $rec.LastEventUtc }
+    if (-not $stamp) { return $false }
+    $topic = $rec.Topic
+    if (-not $topic) { $topic = Get-SessionQuery $rec }
+    if (-not $topic) { return $false }
+
+    $pick = Select-ChatRowForSession $rows $topic ([double]([datetime]::UtcNow - $stamp).TotalMinutes)
+    if (-not $pick) { return $false }
+    # Activity search narrows its candidates; Co-create has no search field, so
+    # require meaningful title overlap before clicking an unfiltered row.
+    if ((Get-TitleTopicOverlap $topic $pick.Title) -lt 0.34) { return $false }
+    return (Invoke-CoCreateRow $rec $pick)
+}
+
+function Invoke-CoCreateRow($rec, $row) {
+    if ($row.Title) {
+        $rec.ChatTitle = $row.Title
+        Set-LearnedTitle $rec.Dir $row.Title
+        try { Resolve-SessionLabels } catch { }
+    }
+    $navigated = Invoke-UiaElement $row.El
+    if ($navigated) { Start-Sleep -Milliseconds 500 }
+    return $navigated
+}
+
+function Select-Workspace([IntPtr]$hwnd, [string]$name) {
+    if (-not $name) { return $false }
+    $root = $UiaEl::FromHandle($hwnd)
+    if (-not $root) { return $false }
+    $button = Find-UiaByName $root "Workspace $name" $UiaType::Button
+    if (-not $button -or -not (Invoke-UiaElement $button)) { return $false }
+    Start-Sleep -Milliseconds 700
+    return $true
+}
+
 function Open-AgentSession($rec, [switch]$Exact) {
+    $workspace = Get-SessionWorkspace $rec
+    if (-not $workspace) { return (Open-SidebarSession $rec -Exact:$Exact) }
+
+    $win = Get-AgentWindow
+    if (-not $win) { return $false }
+    $root = Enter-CoCreateView $win.Hwnd
+    if (-not $root) { return $false }
+
+    # The active workspace exposes "Workspace <name>" in the panel. Avoid
+    # reloading its conversation list when it is already selected.
+    if (-not (Find-UiaByName $root "Workspace $workspace" $UiaType::Button)) {
+        if (-not (Select-Workspace $win.Hwnd $workspace)) { return $false }
+    }
+    return (Open-CoCreateSession $rec $win.Hwnd -Exact:$Exact)
+}
+
+function Open-SidebarSession($rec, [switch]$Exact) {
     # Returns $true only when the sidebar was actually driven to this session.
     if (-not $rec) { return $false }
     if (-not $Config.openMatchingSession) { return $false }
@@ -2576,19 +2832,14 @@ function Open-AgentSession($rec, [switch]$Exact) {
     # The sidebar and its search field are both collapsible, and whatever was
     # closed on the way in gets closed again on the way out - this is the
     # user's window, not ours.
-    $openedSidebar = $false
+    $prepared = Prepare-ActivitySidebar $root $win.Hwnd
+    if (-not $prepared) { return $false }
+    $root = $prepared.Root
+    $openedSidebar = $prepared.OpenedSidebar
     $openedSearch  = $false
     $typed         = $false
     $navigated     = $false
     try {
-        if (-not (Find-UiaByName $root 'Hide sidebar' $UiaType::Button)) {
-            if (Invoke-UiaElement (Find-UiaByName $root 'Show sidebar' $UiaType::Button)) {
-                $openedSidebar = $true
-                Start-Sleep -Milliseconds 350
-                $root = $UiaEl::FromHandle($win.Hwnd)
-            }
-        }
-
         $opened = Show-ChatSearchBox $root $win.Hwnd
         if (-not $opened) { return $false }
         $box = $opened.Box

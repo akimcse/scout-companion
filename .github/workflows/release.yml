@@ -99,7 +99,7 @@ jobs:
         shell: pwsh
         run: |
           $fail = 0
-          foreach ($t in 'Test-SessionMatch.ps1', 'Test-TitleLearning.ps1', 'Test-VoiceControl.ps1') {
+          foreach ($t in 'Test-SessionMatch.ps1', 'Test-TitleLearning.ps1', 'Test-VoiceControl.ps1', 'Test-CoCreateRouting.ps1') {
             Write-Host "== $t"
             powershell -NoProfile -File ".\$t"
             if ($LASTEXITCODE -ne 0) { $fail++ }
