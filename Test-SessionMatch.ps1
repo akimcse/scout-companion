@@ -25,7 +25,9 @@ foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-Ch
                  'Compare-CompanionVersion', 'Test-UpdatableInstall',
                  'ConvertTo-EventTime', 'Format-Duration', 'Get-ElapsedLabel',
                  'Test-ShouldNotifyFinish', 'Get-RestoredPosition',
-                 'Test-OwnReleaseTag', 'Select-LatestTag')) {
+                 'Test-OwnReleaseTag', 'Select-LatestTag',
+                 'Test-NearEdge', 'Get-ClampedPosition', 'Get-CurrentWorkArea',
+                 'Get-SnappedPosition', 'Get-ResizedPosition', 'Get-BottomRightPosition')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -322,6 +324,289 @@ Same 'hanging off the edge is allowed' ($edge.Left) 1700
 # But a sliver is not enough to grab with a mouse.
 Same 'a sliver is not'                 (Get-RestoredPosition (Pos 1890 400) $one 380 300) $null
 Same 'nor a sliver at the bottom'      (Get-RestoredPosition (Pos 800 1070) $one 380 300) $null
+
+Write-Host "`nedge snapping"
+# Rectangles the way the app builds them.
+function Rect([double]$l, [double]$t, [double]$w, [double]$h) {
+    [pscustomobject]@{ Left = $l; Top = $t; Right = $l + $w; Bottom = $t + $h }
+}
+function Area([double]$l, [double]$t, [double]$r, [double]$b) {
+    [pscustomobject]@{ Left = $l; Top = $t; Right = $r; Bottom = $b }
+}
+
+# This machine, measured: a 1843.2 x 1228.8 screen in WPF units with a 48-unit
+# taskbar, so the work area stops at 1181.
+$wa = Area 0 0 1843 1181
+
+# --- the regression this exists for --------------------------------------
+# The position that was actually in config.json - windowLeft 1463, windowTop 974
+# - with the toast 207 tall, so its bottom sat exactly on the taskbar. Growing
+# it to 320 used to leave the bottom at 1294, which is 113 units under the
+# taskbar and climbing with every session row.
+$parked = Rect 1463 974 380 207
+Same 'a bottom-parked toast grows up'  (Get-ResizedPosition $parked 380 320 $wa).Top 861
+# The point of the whole feature, stated as the thing that must be true.
+Same 'and its bottom stays put'        ((Get-ResizedPosition $parked 380 320 $wa).Top + 320) 1181
+# Shrinking again walks it back down rather than leaving a gap.
+Same 'shrinking comes back down'       (Get-ResizedPosition $parked 380 120 $wa).Top 1061
+
+# A toast that is near the edge but not quite on it is pulled flush by a
+# resize, rather than keeping its own gap. Keeping the gap was the first
+# version and it reads better, but the gap has to be measured from the window's
+# last position, which is also this function's own last output - and the pixel
+# grid rounding below only rounds one way. Measured: 19 grow-and-shrink cycles
+# walked the toast 7 device pixels up the screen and were still climbing.
+$almost = Rect 1463 964 380 207
+Same 'a near edge is pulled flush'      ((Get-ResizedPosition $almost 380 320 $wa).Top + 320) 1181
+# The property that costs: the same height always gives the same answer, so
+# repeated resizes cannot accumulate.
+$once  = Get-ResizedPosition $almost 380 320 $wa
+$twice = Get-ResizedPosition (Rect $once.Left $once.Top 380 320) 380 320 $wa
+Same 'and resizing twice does not drift' $twice.Top $once.Top
+
+# --- the other three edges ------------------------------------------------
+$right = Rect 1463 400 380 207
+Same 'a right-parked toast grows left' (Get-ResizedPosition $right 500 207 $wa).Left 1343
+Same 'and its right edge stays put'    ((Get-ResizedPosition $right 500 207 $wa).Left + 500) 1843
+$topLeft = Rect 0 0 380 207
+Same 'a top-left toast holds its left' (Get-ResizedPosition $topLeft 500 320 $wa).Left 0
+Same 'and holds its top'               (Get-ResizedPosition $topLeft 500 320 $wa).Top  0
+
+# --- and the case that must not change ------------------------------------
+# A toast in open space is not anchored to anything, so growing it must leave
+# the top-left exactly where the user put it. Getting this wrong is the old bug
+# coming back: a moved toast walking home on every content change.
+$open = Rect 700 500 380 207
+Same 'open space keeps its left'       (Get-ResizedPosition $open 380 320 $wa).Left 700
+Same 'open space keeps its top'        (Get-ResizedPosition $open 380 320 $wa).Top  500
+
+# --- a taskbar that is not at the bottom ----------------------------------
+# Docking the taskbar left, right or top moves the work area's origin, and
+# anything that assumed 0,0 would push the toast underneath it.
+$topBar = Area 0 48 1843 1229
+$underTop = Rect 700 48 380 207
+Same 'a top taskbar is not covered'    (Get-ResizedPosition $underTop 380 400 $topBar).Top 48
+$leftBar = Area 60 0 1843 1181
+$atLeft = Rect 60 400 380 207
+Same 'a left taskbar is not covered'   (Get-ResizedPosition $atLeft 500 207 $leftBar).Left 60
+$rightBar = Area 0 0 1783 1181
+$atRight = Rect 1403 400 380 207
+Same 'a right taskbar is not covered'  ((Get-ResizedPosition $atRight 500 207 $rightBar).Left + 500) 1783
+
+# --- dropping it ----------------------------------------------------------
+# Let go within the threshold and it lines up; let go outside it and it stays
+# exactly where it was put.
+Same 'a near drop snaps flush'         (Get-SnappedPosition (Rect 1455 400 380 207) $wa).Left 1463
+Same 'a near bottom drop snaps flush'  ((Get-SnappedPosition (Rect 700 966 380 207) $wa).Top + 207) 1181
+Same 'exactly on the threshold snaps'  (Get-SnappedPosition (Rect 16 400 380 207) $wa).Left 0
+Same 'one past it does not'            (Get-SnappedPosition (Rect 17 400 380 207) $wa).Left 17
+Same 'a far drop is left alone'        (Get-SnappedPosition (Rect 700 500 380 207) $wa).Left 700
+Same 'and keeps its top too'           (Get-SnappedPosition (Rect 700 500 380 207) $wa).Top  500
+
+# --- nothing may be placed outside the work area --------------------------
+# Dropping a toast half off the screen used to be allowed to persist; the snap
+# pulls it back so the position that gets remembered is always one that can be
+# reached again.
+Same 'a drop off the right is pulled in' (Get-SnappedPosition (Rect 1700 400 380 207) $wa).Left 1463
+Same 'a drop off the bottom too'         (Get-SnappedPosition (Rect 700 1100 380 207) $wa).Top 974
+# A toast taller than the work area cannot fit. The clamp has to give up
+# downwards, not upwards: overflowing the bottom loses the least useful part,
+# while overflowing the top takes the drag area and the buttons off screen.
+Same 'an oversized toast keeps its top' (Get-ClampedPosition 700 500 380 2000 $wa).Top 0
+Same 'and is not pushed off the left'   (Get-ClampedPosition 700 500 4000 207 $wa).Left 0
+Same 'oversized resize stays reachable' (Get-ResizedPosition (Rect 700 1100 380 207) 380 2000 $wa).Top 0
+
+# --- the device pixel grid ------------------------------------------------
+# WPF puts a window on the device pixel grid, rounding to the nearest, so a
+# position that is correct in WPF units can still be applied one pixel out.
+# Measured at 125% (one device pixel = 0.8 WPF units): a bottom-anchored toast
+# computed a top of 975.8, WPF applied 976, and the bottom landed at device 1477
+# with the taskbar starting at 1476. Small, but it is the same edge the whole
+# feature exists to stay off.
+$dpi125 = [pscustomobject]@{ X = 0.8; Y = 0.8 }
+Same 'a top is put on the pixel grid'    (Get-ClampedPosition 700 975.8 380 205 $wa $dpi125).Top 975.2
+Same 'and rounds towards the inside'     ([int]((Get-ClampedPosition 700 975.8 380 205 $wa $dpi125).Top -lt 975.8)) 1
+# A value already on the grid must not be moved. 940.8 / 0.8 is
+# 1175.9999999999998 in binary floating point, so a plain floor would walk it
+# down a whole pixel every time this ran.
+Same 'a value on the grid stays put'     (Get-ClampedPosition 700 940.8 380 240 $wa $dpi125).Top 940.8
+Same 'and so does a work area edge'      (Get-ClampedPosition 0 0 380 205 $wa $dpi125).Top 0
+# Without a scale the geometry is left in WPF units, which is what the rest of
+# these tests measure.
+Same 'no scale, no rounding'             (Get-ClampedPosition 700 975.8 380 205 $wa).Top 975.8
+Same 'a zero scale is ignored too'       (Get-ClampedPosition 700 975.8 380 205 $wa ([pscustomobject]@{X=0;Y=0})).Top 975.8
+# The anchor still holds after alignment: the bottom may move up by less than a
+# pixel, never down.
+$aligned = Get-ResizedPosition $parked 380 205 $wa $dpi125
+Same 'an aligned anchor never overshoots' ([int](($aligned.Top + 205) -le 1181)) 1
+Same 'and stays within a pixel of it'     ([int](($aligned.Top + 205) -gt (1181 - 0.8))) 1
+
+# The drift this feature introduced and then had to fix. Rounding down on every
+# resize loses up to a pixel each time, and if the next answer is derived from
+# the last one those losses add up: measured live, 19 grow-and-shrink cycles
+# walked the toast 7 device pixels up the screen. Anchoring to the work area
+# instead of to the window's own edge makes each answer depend only on the
+# height, so the same height always lands in the same place however many times
+# it has been resized.
+$heights = @(205, 242, 285, 335, 392, 456, 527, 605, 690, 782, 881)
+$cur = $parked
+$tops = @{}
+for ($round = 1; $round -le 3; $round++) {
+    foreach ($h in $heights) {
+        $p = Get-ResizedPosition $cur 380 $h $wa $dpi125
+        $cur = [pscustomobject]@{ Left = $p.Left; Top = $p.Top; Right = $p.Left + 380; Bottom = $p.Top + $h }
+        if (-not $tops.ContainsKey($h)) { $tops[$h] = @() }
+        $tops[$h] += $p.Top
+    }
+    foreach ($h in ($heights[($heights.Count - 1)..0])) {
+        $p = Get-ResizedPosition $cur 380 $h $wa $dpi125
+        $cur = [pscustomobject]@{ Left = $p.Left; Top = $p.Top; Right = $p.Left + 380; Bottom = $p.Top + $h }
+        $tops[$h] += $p.Top
+    }
+}
+$drifted = @($tops.Keys | Where-Object { (@($tops[$_] | Sort-Object -Unique)).Count -ne 1 })
+Same 'sixty-six resizes do not drift'      ($drifted -join ',') ''
+# ...and none of them ever crossed the edge on the way.
+$over = @($tops.Keys | Where-Object { ($tops[$_][0] + $_) -gt 1181 })
+Same 'and none of them crossed the edge'   ($over -join ',') ''
+
+# --- the default corner ---------------------------------------------------
+Same 'the corner sits inside the edge' (Get-BottomRightPosition 380 207 $wa).Left 1447
+Same 'and above the taskbar'           ((Get-BottomRightPosition 380 207 $wa).Top + 207) 1165
+# The corner is measured from the work area, so a docked taskbar moves it - but
+# only the two edges it is actually measured from. A taskbar on the left does
+# not move a bottom-right corner, and claiming it did would be a test that
+# passes without proving anything.
+Same 'a right taskbar moves the corner' (Get-BottomRightPosition 380 207 $rightBar).Left 1387
+Same 'a left one does not'              (Get-BottomRightPosition 380 207 $leftBar).Left 1447
+Same 'a top taskbar moves it too'       (Get-BottomRightPosition 380 1200 $topBar).Top 48
+
+Write-Host "`nGet-CurrentWorkArea"
+# SystemParameters::WorkArea only ever describes the primary screen, so a toast
+# on a second monitor would have been measured against the primary monitor's
+# taskbar - which is somewhere else entirely, and usually not even on that
+# screen. Two 1920x1080 monitors side by side, the right one with the taskbar.
+$left1  = Area 0 0 1920 1080
+$right1 = Area 1920 0 3840 1040
+$two = @($left1, $right1)
+Same 'a window picks the screen it is on' (Get-CurrentWorkArea (Rect 2000 100 380 207) $two).Left 1920
+Same 'and the other one when it moves'    (Get-CurrentWorkArea (Rect 100 100 380 207) $two).Left 0
+# Straddling both: most of it is on the right, so that is the one whose taskbar
+# it has to respect.
+Same 'straddling goes with the majority' (Get-CurrentWorkArea (Rect 1820 100 380 207) $two).Left 1920
+Same 'and the other way round'           (Get-CurrentWorkArea (Rect 1720 100 380 207) $two).Left 0
+# Overlapping neither - a monitor was unplugged while it was there - still has
+# to answer with something, or the toast can never be placed again.
+Same 'overlapping nothing still answers' (Get-CurrentWorkArea (Rect 100 5000 380 207) $two).Left 0
+Same 'no rectangle yet takes the first'  (Get-CurrentWorkArea $null $two).Left 0
+Same 'no screens, no answer'             (Get-CurrentWorkArea (Rect 0 0 380 207) @()) $null
+
+Write-Host "`nthe handlers that use all of that"
+# These are event handlers, not functions, so they cannot be lifted and called.
+# What can be checked is that they still read the things they have to read - and
+# each of these was a way for the feature to do nothing while looking correct.
+#
+# Comments are blanked out first. Matching raw source matches the comments too,
+# and the comment warning that $e is null necessarily contains the word $args -
+# so a check for $args passed while the code underneath used $e. Measured:
+# reintroducing that exact bug left all 291 tests green. Same trap as a source
+# check that matched the comment explaining why an endpoint is avoided.
+$tokens = $null
+$astT = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$tokens, [ref]$null)
+
+function Get-CodeOnly($extent) {
+    $text = $extent.Text
+    $start = $extent.StartOffset
+    $sb = New-Object System.Text.StringBuilder $text
+    foreach ($tk in $tokens) {
+        if ($tk.Kind -ne 'Comment') { continue }
+        $s = $tk.Extent.StartOffset - $start
+        $e2 = $tk.Extent.EndOffset - $start
+        if ($s -lt 0 -or $e2 -gt $text.Length) { continue }
+        for ($i = $s; $i -lt $e2; $i++) { [void]$sb.Replace($sb[$i], ' ', $i, 1) }
+    }
+    return $sb.ToString()
+}
+
+# The handler body attached to $Window for a given event, comments stripped.
+function Get-WindowHandler([string]$eventName) {
+    $call = $astT.FindAll({ param($n)
+        $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $n.Member.Value -eq $eventName -and
+        $n.Expression -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $n.Expression.VariablePath.UserPath -eq 'Window'
+    }, $true) | Select-Object -First 1
+    if (-not $call -or $call.Arguments.Count -lt 1) { return '' }
+    return Get-CodeOnly $call.Arguments[0].Extent
+}
+
+$sizeChanged = Get-WindowHandler 'Add_SizeChanged'
+Same 'the SizeChanged handler was found' ([int][bool]$sizeChanged) 1
+
+# $e does not exist in a PowerShell event handler. Measured: it is $null and the
+# arguments arrive as $args. Written as $e.PreviousSize the previous rectangle
+# would be zero-sized, no edge would ever test as near, and SizeChanged would
+# hold nothing while appearing to hold everything.
+Same 'SizeChanged reads the event args' ([int][bool]($sizeChanged -match '\$args\[1\]')) 1
+Same 'and not a variable that is null'  ([int][bool]($sizeChanged -match '\$e\b')) 0
+Same 'it holds the previous size'       ([int][bool]($sizeChanged -match 'PreviousSize')) 1
+
+# The early return that stopped a moved toast walking home is also what left it
+# growing under the taskbar: it skipped every resize once a position was saved.
+# It has to branch now, not return.
+Same 'it no longer skips a moved toast' `
+    ([int][bool]($sizeChanged -match 'if \(\$script:SavedPosition\)\s*\{\s*return')) 0
+Same 'it re-places an unmoved one'      ([int][bool]($sizeChanged -match 'Place-BottomRight')) 1
+Same 'and anchors a moved one'          ([int][bool]($sizeChanged -match 'Get-ResizedPosition')) 1
+
+# Dropping the toast is the only place a snap can be chosen deliberately.
+$mouseDown = Get-WindowHandler 'Add_MouseLeftButtonDown'
+Same 'the drag handler was found'       ([int][bool]$mouseDown) 1
+Same 'a drop snaps to a near edge'      ([int][bool]($mouseDown -match 'Get-SnappedPosition')) 1
+# rememberPosition off means the toast returns to the corner on the next content
+# change anyway, so nothing here may invent a position behind the setting's back.
+Same 'and respects rememberPosition'    ([int][bool]($mouseDown -match 'rememberPosition')) 1
+
+# The grid alignment only happens if the real scale is handed to the geometry.
+# It defaults to off so the pure tests can work in WPF units, which means a call
+# site that forgot it would compile, pass every unit test, and quietly put the
+# toast a pixel into the taskbar again.
+$placeFn = Get-CodeOnly (($funcs | Where-Object { $_.Name -eq 'Place-BottomRight' } | Select-Object -First 1).Extent)
+Same 'the corner is put on the grid'    ([int][bool]($placeFn -match 'Get-DeviceScale')) 1
+Same 'and so is a resize'               ([int][bool]($sizeChanged -match 'Get-DeviceScale')) 1
+Same 'and so is a drop'                 ([int][bool]($mouseDown -match 'Get-DeviceScale')) 1
+
+# SystemParameters::WorkArea describes the primary screen and nothing else, so
+# placement cannot be built on it. It survives in exactly one place - the
+# fallback for when the DPI scale is not known yet - and nowhere else.
+$primaryOnly = $funcs | Where-Object {
+    $_.Name -in @('Place-BottomRight', 'Get-MonitorRects', 'Get-WorkAreaRects', 'New-WindowRect') -and
+    $_.Extent.Text -match 'SystemParameters\]::WorkArea'
+} | ForEach-Object { $_.Name }
+Same 'placement is not primary-only'    ($primaryOnly -join ',') ''
+$fallback = $funcs | Where-Object { $_.Name -eq 'Get-PlacementAreas' } | Select-Object -First 1
+Same 'the documented fallback is there' ([int][bool]($fallback -and $fallback.Extent.Text -match 'SystemParameters\]::WorkArea')) 1
+
+# WinForms measures in device pixels and WPF places in its own units, so a work
+# area that skipped the transform would be 2304 wide where the window can only
+# reach 1843 - no edge would ever be near, and the default corner would land off
+# the screen. Measured on this machine at 125%.
+#
+# The conversion lives in Get-DeviceScale and Get-MonitorRects applies it, so
+# both halves are checked rather than one function that happens to mention it.
+$scaleFn = $funcs | Where-Object { $_.Name -eq 'Get-DeviceScale' } | Select-Object -First 1
+Same 'there is a device-to-WPF scale' `
+    ([int][bool]($scaleFn -and $scaleFn.Extent.Text -match 'TransformFromDevice')) 1
+$rects = $funcs | Where-Object { $_.Name -eq 'Get-MonitorRects' } | Select-Object -First 1
+Same 'and the monitors are put through it' `
+    ([int][bool]($rects -and $rects.Extent.Text -match 'Get-DeviceScale')) 1
+Same 'every edge of them, not just some' `
+    ([regex]::Matches($rects.Extent.Text, '\$scale\.[XY]')).Count 4
+# ...and it is WorkingArea, not Bounds, that leaves the taskbar out.
+Same 'and the work area excludes the taskbar' `
+    ([int][bool]($rects -and $rects.Extent.Text -match 'WorkingArea')) 1
+
+
 
 Write-Host "`nConvertTo-EventTime"
 # Turn timing has to come from the event, never the clock. The companion reads a
