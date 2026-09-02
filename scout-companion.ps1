@@ -129,6 +129,17 @@ if (-not ('ScoutNative' -as [type])) {
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern int GetWindowTextLength(System.IntPtr hWnd);
 
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+        public static string WindowTitle(System.IntPtr hWnd) {
+            int length = GetWindowTextLength(hWnd);
+            if (length <= 0) return "";
+            var text = new System.Text.StringBuilder(length + 1);
+            GetWindowText(hWnd, text, text.Capacity);
+            return text.ToString();
+        }
+
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint pid);
 
@@ -744,10 +755,19 @@ function Complete-Step($sess, [string]$id, [string]$reqId) {
     }
 }
 
+function Test-AgentPrimaryWindowTitle([string]$title) {
+    return $title -and $title -notlike '* Mini Mode' -and $title -ne 'Chrome Legacy Window'
+}
+
+function Test-AgentPrimaryWindow([IntPtr]$hwnd) {
+    if ($hwnd -eq [IntPtr]::Zero -or -not [ScoutNative]::IsWindow($hwnd)) { return $false }
+    return Test-AgentPrimaryWindowTitle ([ScoutNative]::WindowTitle($hwnd))
+}
+
 function Get-AgentWindow {
     # Fast path: the handle found last time is almost always still valid, so a
     # cheap IsWindow check replaces a full process enumeration on most ticks.
-    if ($script:WinCache -and [ScoutNative]::IsWindow($script:WinCache.Hwnd)) {
+    if ($script:WinCache -and (Test-AgentPrimaryWindow $script:WinCache.Hwnd)) {
         # One process, several windows. If the window in front belongs to the
         # same process, that is the one the user is looking at, and holding on
         # to a stale sibling would make the toast think the agent is in the
@@ -756,7 +776,7 @@ function Get-AgentWindow {
         if ($fg -ne [IntPtr]::Zero -and $fg -ne $script:WinCache.Hwnd) {
             $owner = [uint32]0
             [void][ScoutNative]::GetWindowThreadProcessId($fg, [ref]$owner)
-            if ($owner -eq [uint32]$script:WinCache.Pid) {
+            if ($owner -eq [uint32]$script:WinCache.Pid -and (Test-AgentPrimaryWindow $fg)) {
                 $script:WinCache = @{ Hwnd = $fg; Pid = [int]$owner }
             }
         }
@@ -772,7 +792,7 @@ function Get-AgentWindow {
         try { $ps = [System.Diagnostics.Process]::GetProcessesByName($name) } catch { continue }
         try {
             foreach ($p in $ps) {
-                if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+                if (Test-AgentPrimaryWindow $p.MainWindowHandle) {
                     $script:WinCache = @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id }
                     return $script:WinCache
                 }
@@ -803,7 +823,9 @@ function Get-AgentWindow {
     #    Substring match on the process name first, so a partial name in
     #    config.json (e.g. "Claw" for "Clawpilot") keeps working.
     foreach ($name in $Config.processNames) {
-        $p = $procs | Where-Object { $_.ProcessName -like "*$name*" } | Select-Object -First 1
+        $p = $procs | Where-Object {
+            $_.ProcessName -like "*$name*" -and (Test-AgentPrimaryWindow $_.MainWindowHandle)
+        } | Select-Object -First 1
         if ($p) {
             $script:WinCache = @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id }
             return $script:WinCache
@@ -813,7 +835,9 @@ function Get-AgentWindow {
     #    instead of the real app window.
     $nonBrowser = $procs | Where-Object { $_.ProcessName -notin $Config.browserProcs }
     foreach ($hint in $Config.windowHints) {
-        $p = $nonBrowser | Where-Object { $_.MainWindowTitle -like "*$hint*" } | Select-Object -First 1
+        $p = $nonBrowser | Where-Object {
+            $_.MainWindowTitle -like "*$hint*" -and (Test-AgentPrimaryWindow $_.MainWindowHandle)
+        } | Select-Object -First 1
         if ($p) {
             $script:WinCache = @{ Hwnd = $p.MainWindowHandle; Pid = $p.Id }
             return $script:WinCache
@@ -1553,12 +1577,58 @@ function Get-AgentPids {
 }
 
 function Get-AgentWindows {
-    # Every visible top-level agent window, not one per process. Electron keeps
-    # several windows inside a single process, so asking the process for its
-    # "main" window finds one of them and quietly ignores the rest.
+    # Every primary top-level agent window, not one per process. Electron keeps
+    # several windows inside a single process, including Mini-mode and input
+    # helper windows that must not be treated as conversation windows.
     $pids = Get-AgentPids
     if ($pids.Count -eq 0) { return @() }
-    try { return @([ScoutNative]::TopLevelWindows($pids)) } catch { return @() }
+    try {
+        return @([ScoutNative]::TopLevelWindows($pids) | Where-Object {
+            Test-AgentPrimaryWindow $_
+        })
+    } catch { return @() }
+}
+
+function Get-AgentMiniWindow {
+    $pids = Get-AgentPids
+    if ($pids.Count -eq 0) { return [IntPtr]::Zero }
+    try {
+        foreach ($hwnd in [ScoutNative]::TopLevelWindows($pids)) {
+            if ([ScoutNative]::WindowTitle($hwnd) -like '* Mini Mode') {
+                return $hwnd
+            }
+        }
+    } catch { }
+    return [IntPtr]::Zero
+}
+
+function Show-AgentFromMini([IntPtr]$hwnd) {
+    if ($hwnd -eq [IntPtr]::Zero) { return $false }
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        if (-not $root) { return $false }
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+            'mini-button')
+        $button = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+        if (-not $button) { return $false }
+        $button.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+        return $true
+    } catch { return $false }
+}
+
+function Wait-AgentMainWindow([int]$timeoutMs = 2500) {
+    $deadline = [datetime]::UtcNow.AddMilliseconds($timeoutMs)
+    do {
+        $win = Get-AgentWindow
+        if ($win -and
+                -not [ScoutNative]::IsIconic($win.Hwnd) -and
+                [ScoutNative]::IsWindowVisible($win.Hwnd)) {
+            return $win
+        }
+        Start-Sleep -Milliseconds 50
+    } while ([datetime]::UtcNow -lt $deadline)
+    return $null
 }
 
 function Find-AgentButton([IntPtr]$hwnd, [string[]]$labels) {
@@ -1631,6 +1701,19 @@ function Invoke-AgentButton([string[]]$labels) {
 
 function Focus-Agent {
     $win = Get-AgentWindow
+    $mini = Get-AgentMiniWindow
+
+    # Mini mode must own the transition back to the main window. Restoring its
+    # HWND directly bypasses Scout's hidden-to-tray state change, leaving a
+    # visible window whose renderer does not accept input.
+    if ($mini -ne [IntPtr]::Zero -and (
+            -not $win -or
+            [ScoutNative]::IsIconic($win.Hwnd) -or
+            -not [ScoutNative]::IsWindowVisible($win.Hwnd))) {
+        if (-not (Show-AgentFromMini $mini)) { return }
+        $win = Wait-AgentMainWindow
+    }
+
     if (-not $win) { return }
     # SW_RESTORE, and only for a window that is actually minimized. It used to be
     # called unconditionally, which is the one case where "restore" does harm:
@@ -1642,7 +1725,7 @@ function Focus-Agent {
     #
     # A window minimized from a maximized state is restored to maximized by
     # SW_RESTORE, so the minimized case needs no special handling.
-    if ([ScoutNative]::IsIconic($win.Hwnd)) {
+    if ($mini -eq [IntPtr]::Zero -and [ScoutNative]::IsIconic($win.Hwnd)) {
         [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
     }
     [void][ScoutNative]::SetForegroundWindow($win.Hwnd)

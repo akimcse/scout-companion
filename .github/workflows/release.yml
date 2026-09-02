@@ -107,7 +107,7 @@ jobs:
           # These build real windows, so they need -STA and somewhere to put a
           # window. If a hosted runner cannot do that, they say so and this
           # fails loudly rather than releasing untested.
-          foreach ($t in 'Test-ButtonSearch.ps1', 'Test-SettingsUi.ps1') {
+          foreach ($t in 'Test-ButtonSearch.ps1', 'Test-SettingsUi.ps1', 'Test-MiniMode.ps1') {
             Write-Host "== $t"
             powershell -NoProfile -STA -File ".\$t"
             if ($LASTEXITCODE -ne 0) { $fail++ }

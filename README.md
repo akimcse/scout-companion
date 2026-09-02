@@ -251,7 +251,8 @@ decides. **If nothing plausible comes back, nothing is clicked.** Set `openMatch
 to `false` to skip this entirely.
 
 Covered by `Test-SessionMatch.ps1` (the picker, including the lagging-timestamp case),
-`Test-ButtonSearch.ps1` (where Allow/Deny get clicked) and `Test-TitleLearning.ps1`.
+`Test-ButtonSearch.ps1` (where Allow/Deny get clicked), `Test-MiniMode.ps1`
+(restoring through Scout's own Mini control) and `Test-TitleLearning.ps1`.
 
 </details>
 
