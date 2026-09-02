@@ -27,7 +27,8 @@ foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-Ch
                  'Test-ShouldNotifyFinish', 'Get-RestoredPosition',
                  'Test-OwnReleaseTag', 'Select-LatestTag',
                  'Test-NearEdge', 'Get-ClampedPosition', 'Get-CurrentWorkArea',
-                 'Get-SnappedPosition', 'Get-ResizedPosition', 'Get-BottomRightPosition')) {
+                 'Get-SnappedPosition', 'Get-ResizedPosition', 'Get-BottomRightPosition',
+                 'Get-EdgeGap')) {
     $f = $funcs | Where-Object { $_.Name -eq $n } | Select-Object -First 1
     if (-not $f) { Write-Host "MISSING FUNCTION: $n"; exit 1 }
     Invoke-Expression $f.Extent.Text
@@ -350,15 +351,23 @@ Same 'and its bottom stays put'        ((Get-ResizedPosition $parked 380 320 $wa
 # Shrinking again walks it back down rather than leaving a gap.
 Same 'shrinking comes back down'       (Get-ResizedPosition $parked 380 120 $wa).Top 1061
 
-# A toast that is near the edge but not quite on it is pulled flush by a
-# resize, rather than keeping its own gap. Keeping the gap was the first
-# version and it reads better, but the gap has to be measured from the window's
-# last position, which is also this function's own last output - and the pixel
-# grid rounding below only rounds one way. Measured: 19 grow-and-shrink cycles
-# walked the toast 7 device pixels up the screen and were still climbing.
+# A toast near an edge keeps its distance from it rather than being pulled
+# flush. Snapping flush is tidier and shorter, but the default corner sits
+# exactly 16 units off both edges and the snap threshold is also 16 - so every
+# toast that had never been moved got yanked hard into the corner of the screen
+# the first time its content changed, shadow clipped. Found on a fresh install:
+# placed at 3044,1072 and measured at 3060,1088.
 $almost = Rect 1463 964 380 207
-Same 'a near edge is pulled flush'      ((Get-ResizedPosition $almost 380 320 $wa).Top + 320) 1181
-# The property that costs: the same height always gives the same answer, so
+Same 'a near edge keeps its gap'       ((Get-ResizedPosition $almost 380 320 $wa).Top + 320) 1171
+# The default corner is the case that matters: 16 off both edges, and it has to
+# stay 16 off both edges however tall the toast gets.
+$corner = Rect 1447 958 380 207
+Same 'the default corner keeps its inset'  ((Get-ResizedPosition $corner 380 320 $wa).Top + 320) 1165
+Same 'and its inset on the right too'      ((Get-ResizedPosition $corner 500 320 $wa).Left + 500) 1827
+# A toast hanging over the edge is pulled back to it rather than kept there.
+$over = Rect 1463 990 380 207
+Same 'an overhang is pulled back'      ((Get-ResizedPosition $over 380 320 $wa).Top + 320) 1181
+# The property that costs: the same input always gives the same answer, so
 # repeated resizes cannot accumulate.
 $once  = Get-ResizedPosition $almost 380 320 $wa
 $twice = Get-ResizedPosition (Rect $once.Left $once.Top 380 320) 380 320 $wa
@@ -467,8 +476,33 @@ for ($round = 1; $round -le 3; $round++) {
 $drifted = @($tops.Keys | Where-Object { (@($tops[$_] | Sort-Object -Unique)).Count -ne 1 })
 Same 'sixty-six resizes do not drift'      ($drifted -join ',') ''
 # ...and none of them ever crossed the edge on the way.
-$over = @($tops.Keys | Where-Object { ($tops[$_][0] + $_) -gt 1181 })
-Same 'and none of them crossed the edge'   ($over -join ',') ''
+$over2 = @($tops.Keys | Where-Object { ($tops[$_][0] + $_) -gt 1181 })
+Same 'and none of them crossed the edge'   ($over2 -join ',') ''
+
+# The same, starting from the default corner rather than flush, because that is
+# the gap that has to survive: 16 units off the edge, quantised onto the pixel
+# grid and fed back in sixty-six times.
+$cur2 = Rect 1447 958 380 207
+$tops2 = @{}
+for ($round = 1; $round -le 3; $round++) {
+    foreach ($h in ($heights + $heights[($heights.Count - 1)..0])) {
+        $p = Get-ResizedPosition $cur2 380 $h $wa $dpi125
+        $cur2 = [pscustomobject]@{ Left = $p.Left; Top = $p.Top; Right = $p.Left + 380; Bottom = $p.Top + $h }
+        if (-not $tops2.ContainsKey($h)) { $tops2[$h] = @() }
+        $tops2[$h] += $p.Top
+    }
+}
+$drifted2 = @($tops2.Keys | Where-Object { (@($tops2[$_] | Sort-Object -Unique)).Count -ne 1 })
+Same 'the corner inset does not drift either' ($drifted2 -join ',') ''
+# And it stays an inset rather than collapsing onto the screen edge. The gap is
+# not exactly 16 every time - the pixel grid moves it by up to one device pixel
+# depending on the height - but it never falls below the inset and never grows
+# past it by a whole pixel, which is what "does not drift" means here.
+$gaps = @($tops2.Keys | ForEach-Object { 1181 - ($tops2[$_][0] + $_) })
+$badLow  = @($gaps | Where-Object { $_ -lt 16 - 0.001 })
+$badHigh = @($gaps | Where-Object { $_ -gt 16 + 0.8 })
+Same 'and it never touches the edge'          ($badLow.Count)  0
+Same 'nor drifts a pixel away from it'        ($badHigh.Count) 0
 
 # --- the default corner ---------------------------------------------------
 Same 'the corner sits inside the edge' (Get-BottomRightPosition 380 207 $wa).Left 1447

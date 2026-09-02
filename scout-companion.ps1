@@ -3173,19 +3173,48 @@ function Get-SnappedPosition($rect, $workArea, [double]$threshold = 16, $scale =
     return Get-ClampedPosition $left $top $width $height $workArea $scale
 }
 
+# How far a window sits from an edge, rounded down to a whole device pixel.
+#
+# Quantising is what stops the anchor drifting. The position it produces is
+# rounded down onto the pixel grid when it is applied, and feeding that back in
+# unrounded loses a fraction of a pixel on every resize - measured, 19 grow and
+# shrink cycles walked the toast 7 device pixels up the screen. Flooring the gap
+# absorbs exactly that loss, so the same gap comes back out every time.
+#
+# A negative gap means the window already hangs over the edge, and preserving
+# that is not worth doing: it is pulled flush instead.
+function Get-EdgeGap([double]$gap, [double]$pixel) {
+    if ($gap -le 0) { return 0 }
+    if ($pixel -le 0) { return $gap }
+    return [Math]::Floor(($gap / $pixel) + 1e-6) * $pixel
+}
+
 # Where a window should sit after its content changed size, holding whichever
 # edge it was already against. $rect is the window as it was BEFORE the resize.
 #
-# The held edge is the work area's, not the window's own. Holding the window's
-# own edge reads better - it would keep a toast sitting 10 units clear of the
-# taskbar exactly 10 units clear - but it feeds each result back in as the next
-# input, and the pixel grid rounding in Get-ClampedPosition only ever rounds one
-# way. Measured: growing and shrinking a toast 19 times walked it 7 device
-# pixels up the screen, and it would have kept going. The work area's edge does
-# not move, so the same height always gives the same position.
+# The gap to the held edge is kept, not closed. Snapping flush instead looks
+# tidier and is one line shorter, but the default corner sits exactly 16 units
+# off both edges and the snap threshold is also 16 - so every toast that had
+# never been moved was pulled flush into the corner of the screen the first time
+# its content changed. Measured on a fresh install: placed at 3044,1072 and
+# found at 3060,1088, hard against both edges with its shadow clipped.
 function Get-ResizedPosition($rect, [double]$width, [double]$height, $workArea, $scale = $null) {
-    $left = if (Test-NearEdge $rect.Right  $workArea.Right)  { $workArea.Right  - $width }  else { $rect.Left }
-    $top  = if (Test-NearEdge $rect.Bottom $workArea.Bottom) { $workArea.Bottom - $height } else { $rect.Top }
+    $px = 0.0; $py = 0.0
+    if ($scale -and $scale.X -gt 0 -and $scale.Y -gt 0) { $px = $scale.X; $py = $scale.Y }
+    # Nearness is judged on the gap that will actually be used, not the raw one.
+    # Rounding the position onto the pixel grid pushes the window off the edge by
+    # up to a pixel, so a corner sitting exactly on the threshold reads as 16.6
+    # on the next pass, fails the test, loses its anchor, and gets pulled flush
+    # by the clamp. Measured: the default corner held its inset for two resizes
+    # and then collapsed onto the screen edge.
+    $gapRight  = Get-EdgeGap ($workArea.Right  - $rect.Right)  $px
+    $gapBottom = Get-EdgeGap ($workArea.Bottom - $rect.Bottom) $py
+    $left = if (Test-NearEdge ($workArea.Right  - $gapRight)  $workArea.Right)  {
+        $workArea.Right - $gapRight - $width
+    } else { $rect.Left }
+    $top = if (Test-NearEdge ($workArea.Bottom - $gapBottom) $workArea.Bottom) {
+        $workArea.Bottom - $gapBottom - $height
+    } else { $rect.Top }
     # A left or top anchor outranks the opposite edge. Against both, the window
     # is bigger than the work area, and overflowing right or bottom beats
     # overflowing left or top where the drag area and the buttons live.
