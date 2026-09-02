@@ -3061,36 +3061,231 @@ function Get-RestoredPosition($saved, $screens, [double]$width, [double]$height)
     return $null
 }
 
-function Place-BottomRight {
-    $wa = [System.Windows.SystemParameters]::WorkArea
-    $Window.Left = $wa.Right - $Window.ActualWidth - 16
-    $Window.Top  = $wa.Bottom - $Window.ActualHeight - 16
+# --- Edge snapping -----------------------------------------------------------
+#
+# The toast is SizeToContent, and WPF grows a window downwards from its top-left
+# corner, so every session row, step line and approval card pushes the bottom
+# edge further down. Measured: a toast parked flush on the work area at height
+# 100 - bottom exactly on the taskbar - and grown to 320 ends up 275px inside
+# the taskbar and off the screen.
+#
+# The answer is to hold whichever edge the window is already sitting against, so
+# a toast at the bottom grows upwards instead. These functions work that out.
+#
+# They are pure - rectangles in, a position out - so the rules can be tested
+# without a desktop. Rectangles are [pscustomobject] with Left/Top/Right/Bottom,
+# the same shape Get-RestoredPosition uses.
+
+# Two different 16s appear below, and they are separate parameters rather than
+# one shared constant on purpose: one is "close enough to count as touching this
+# edge", the other is "how far off the corner the default position sits". They
+# agree today; tying them together would make changing either silently change
+# the other.
+function Test-NearEdge([double]$value, [double]$edge, [double]$threshold = 16) {
+    return [Math]::Abs($value - $edge) -le $threshold
 }
 
-# The screens as plain rectangles, for Get-RestoredPosition. WinForms reports
-# these in device pixels while WPF positions in device-independent ones, so they
-# have to be scaled or a remembered position is judged against the wrong
-# coordinate space on any display that is not at 100%.
-function Get-ScreenRects {
+# Keep a position inside the work area.
+#
+# Max guards the lower bound because a window can be taller than the work area -
+# a long approval card on a short screen - and without it the clamp would shove
+# the top above the work area while trying to drag the bottom inside, which
+# takes the drag handle off the screen with it.
+#
+# $scale is one device pixel in WPF units, and it is what makes the result
+# survive being applied. WPF puts a window on the device pixel grid, rounding to
+# the nearest: measured at 125%, a top of 975.8 is applied as 976, and a window
+# anchored to the bottom edge lands one device pixel inside the taskbar.
+#
+# Rounding down to the grid here fixes that for every path, because every path
+# ends in this function, and it is safe for all three kinds of value it sees:
+# the work area's own edges came from whole device pixels so they do not move at
+# all; an edge minus the window's size moves inwards, which is the direction
+# that helps; and any other position moves by less than a pixel while staying in
+# bounds. Passing no scale skips it, which is what the pure tests do.
+#
+# The epsilon is not decoration. 940.8 / 0.8 is 1175.9999999999998 in binary
+# floating point, and flooring that would give away a whole pixel for nothing.
+function Get-ClampedPosition([double]$left, [double]$top, [double]$width, [double]$height, $workArea, $scale = $null) {
+    $maxLeft = [Math]::Max($workArea.Left, $workArea.Right  - $width)
+    $maxTop  = [Math]::Max($workArea.Top,  $workArea.Bottom - $height)
+    $l = [Math]::Min([Math]::Max($left, $workArea.Left), $maxLeft)
+    $t = [Math]::Min([Math]::Max($top,  $workArea.Top),  $maxTop)
+    if ($scale -and $scale.X -gt 0 -and $scale.Y -gt 0) {
+        $l = [Math]::Floor(($l / $scale.X) + 1e-6) * $scale.X
+        $t = [Math]::Floor(($t / $scale.Y) + 1e-6) * $scale.Y
+    }
+    return [pscustomobject]@{ Left = $l; Top = $t }
+}
+
+# Which monitor's work area a window is on.
+#
+# Not SystemParameters::WorkArea, which only ever describes the primary screen:
+# on a second monitor that would measure the toast against the primary screen's
+# taskbar, which is somewhere else entirely.
+#
+# Largest overlap wins, so a window straddling two screens belongs to whichever
+# is showing most of it. Distance between centres breaks ties, and answers the
+# case of a window that overlaps nothing at all.
+function Get-CurrentWorkArea($rect, $workAreas) {
+    $all = @($workAreas)
+    if ($all.Count -eq 0) { return $null }
+    # No rectangle - the window has not been placed yet - so the primary screen
+    # is the only sensible answer, and AllScreens lists it first.
+    if (-not $rect) { return $all[0] }
+
+    $best = $null
+    $bestOverlap  = -1.0
+    $bestDistance = [double]::MaxValue
+    foreach ($wa in $all) {
+        $w = [Math]::Min($rect.Right,  $wa.Right)  - [Math]::Max($rect.Left, $wa.Left)
+        $h = [Math]::Min($rect.Bottom, $wa.Bottom) - [Math]::Max($rect.Top,  $wa.Top)
+        $overlap = 0.0
+        if ($w -gt 0 -and $h -gt 0) { $overlap = $w * $h }
+
+        $dx = (($rect.Left + $rect.Right)  / 2) - (($wa.Left + $wa.Right)  / 2)
+        $dy = (($rect.Top  + $rect.Bottom) / 2) - (($wa.Top  + $wa.Bottom) / 2)
+        $distance = ($dx * $dx) + ($dy * $dy)
+
+        if ($overlap -gt $bestOverlap -or ($overlap -eq $bestOverlap -and $distance -lt $bestDistance)) {
+            $best         = $wa
+            $bestOverlap  = $overlap
+            $bestDistance = $distance
+        }
+    }
+    return $best
+}
+
+# Where a window should land when it is let go of: flush against any edge it was
+# dropped near, and inside the work area either way.
+#
+# Left outranks right, and top outranks bottom, for a window bigger than the
+# work area - there both edges are "near" and one of them has to give.
+function Get-SnappedPosition($rect, $workArea, [double]$threshold = 16, $scale = $null) {
+    $width  = $rect.Right  - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+    $left = $rect.Left
+    $top  = $rect.Top
+    if     (Test-NearEdge $rect.Left  $workArea.Left  $threshold) { $left = $workArea.Left }
+    elseif (Test-NearEdge $rect.Right $workArea.Right $threshold) { $left = $workArea.Right - $width }
+    if     (Test-NearEdge $rect.Top    $workArea.Top    $threshold) { $top = $workArea.Top }
+    elseif (Test-NearEdge $rect.Bottom $workArea.Bottom $threshold) { $top = $workArea.Bottom - $height }
+    return Get-ClampedPosition $left $top $width $height $workArea $scale
+}
+
+# Where a window should sit after its content changed size, holding whichever
+# edge it was already against. $rect is the window as it was BEFORE the resize.
+#
+# The held edge is the work area's, not the window's own. Holding the window's
+# own edge reads better - it would keep a toast sitting 10 units clear of the
+# taskbar exactly 10 units clear - but it feeds each result back in as the next
+# input, and the pixel grid rounding in Get-ClampedPosition only ever rounds one
+# way. Measured: growing and shrinking a toast 19 times walked it 7 device
+# pixels up the screen, and it would have kept going. The work area's edge does
+# not move, so the same height always gives the same position.
+function Get-ResizedPosition($rect, [double]$width, [double]$height, $workArea, $scale = $null) {
+    $left = if (Test-NearEdge $rect.Right  $workArea.Right)  { $workArea.Right  - $width }  else { $rect.Left }
+    $top  = if (Test-NearEdge $rect.Bottom $workArea.Bottom) { $workArea.Bottom - $height } else { $rect.Top }
+    # A left or top anchor outranks the opposite edge. Against both, the window
+    # is bigger than the work area, and overflowing right or bottom beats
+    # overflowing left or top where the drag area and the buttons live.
+    if (Test-NearEdge $rect.Left $workArea.Left) { $left = $rect.Left }
+    if (Test-NearEdge $rect.Top  $workArea.Top)  { $top  = $rect.Top }
+    return Get-ClampedPosition $left $top $width $height $workArea $scale
+}
+
+# The default corner, clamped like everything else so an oversized toast cannot
+# be placed off the top-left of the work area.
+function Get-BottomRightPosition([double]$width, [double]$height, $workArea, [double]$inset = 16, $scale = $null) {
+    return Get-ClampedPosition ($workArea.Right  - $width  - $inset) `
+                               ($workArea.Bottom - $height - $inset) `
+                               $width $height $workArea $scale
+}
+
+# --- the same, against the real desktop --------------------------------------
+
+# The scale between WinForms' device pixels and WPF's units, or $null when the
+# window has no presentation source and the two cannot be related at all.
+function Get-DeviceScale {
+    $src = [System.Windows.PresentationSource]::FromVisual($Window)
+    if (-not $src -or -not $src.CompositionTarget) { return $null }
+    $m = $src.CompositionTarget.TransformFromDevice
+    return [pscustomobject]@{ X = $m.M11; Y = $m.M22 }
+}
+
+# The monitors as plain rectangles in WPF units.
+#
+# WinForms reports these in device pixels while WPF positions in device-
+# independent ones, so they have to be scaled or a position is judged against
+# the wrong coordinate space on any display that is not at 100%. Measured here
+# at 125%: WinForms calls the primary screen 2304 wide, WPF places within
+# 1843.2, and TransformFromDevice is the 0.8 between them.
+#
+# -WorkArea excludes the taskbar, which is the whole point of the snapping.
+# Bounds and WorkingArea need identical DPI handling, so they share it rather
+# than being two copies that drift.
+#
+# Nothing comes back before the window is rendered. There is genuinely no answer
+# then - measured, a process with no WPF window yet is told the primary screen
+# is 1843 wide, and 2304 once one exists - and rectangles in a coordinate space
+# the caller cannot identify are worse than none. Every caller treats an empty
+# list as "leave the window alone".
+function Get-MonitorRects([switch]$WorkArea) {
     $out = @()
     try {
-        $src = [System.Windows.PresentationSource]::FromVisual($Window)
-        $sx = 1.0; $sy = 1.0
-        if ($src -and $src.CompositionTarget) {
-            $m = $src.CompositionTarget.TransformFromDevice
-            $sx = $m.M11; $sy = $m.M22
-        }
+        $scale = Get-DeviceScale
+        if (-not $scale) { return @() }
         foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
-            $b = $s.Bounds
+            $r = if ($WorkArea) { $s.WorkingArea } else { $s.Bounds }
             $out += [pscustomobject]@{
-                Left   = $b.Left   * $sx
-                Top    = $b.Top    * $sy
-                Right  = $b.Right  * $sx
-                Bottom = $b.Bottom * $sy
+                Left   = $r.Left   * $scale.X
+                Top    = $r.Top    * $scale.Y
+                Right  = $r.Right  * $scale.X
+                Bottom = $r.Bottom * $scale.Y
             }
         }
     } catch { }
     return $out
+}
+
+# For Get-RestoredPosition, which asks whether a position is reachable at all -
+# a toast overlapping the taskbar is still reachable, so that one wants Bounds.
+function Get-ScreenRects   { Get-MonitorRects }
+# For placement, which must not put anything under the taskbar.
+function Get-WorkAreaRects { Get-MonitorRects -WorkArea }
+
+# The toast's rectangle in WPF units, or $null before it has a position.
+function New-WindowRect {
+    $l = $Window.Left; $t = $Window.Top
+    if ([double]::IsNaN($l) -or [double]::IsNaN($t)) { return $null }
+    return [pscustomobject]@{
+        Left  = $l
+        Top   = $t
+        Right = $l + $Window.ActualWidth
+        Bottom = $t + $Window.ActualHeight
+    }
+}
+
+# The work areas, or the primary one as WPF reports it if the scale is not known
+# yet. That fallback is exactly what this function used to do outright, so the
+# unknown case behaves as it always has instead of placing the toast using
+# device pixels it would read as WPF units - which at 125% would put it off the
+# right of the screen.
+function Get-PlacementAreas {
+    $areas = @(Get-WorkAreaRects)
+    if ($areas.Count -gt 0) { return $areas }
+    $wa = [System.Windows.SystemParameters]::WorkArea
+    return @([pscustomobject]@{
+        Left = $wa.Left; Top = $wa.Top; Right = $wa.Right; Bottom = $wa.Bottom
+    })
+}
+
+function Place-BottomRight {
+    $area = Get-CurrentWorkArea (New-WindowRect) (Get-PlacementAreas)
+    if (-not $area) { return }
+    $pos = Get-BottomRightPosition $Window.ActualWidth $Window.ActualHeight $area 16 (Get-DeviceScale)
+    $Window.Left = $pos.Left
+    $Window.Top  = $pos.Top
 }
 
 # Put the toast back where it was last left, or in the corner if that position
@@ -3144,13 +3339,46 @@ $Window.Add_Loaded({
 })
 
 $Window.Add_SizeChanged({
-    # Only re-place a toast that is still in its default corner. Re-placing
-    # unconditionally is what made a moved toast snap back: the window is
-    # SizeToContent, so every step line, session row and approval card changes
-    # its height, and each one dragged it home again.
-    if ($script:SavedPosition) { return }
+    # The toast is SizeToContent, so every step line, session row and approval
+    # card changes its height - and WPF grows a window downwards from its
+    # top-left corner. Measured: parked flush on the work area at height 100 and
+    # grown to 320, the bottom lands 275px inside the taskbar.
+    #
+    # Re-placing unconditionally is not the answer either; that is what used to
+    # drag a moved toast back to the corner on every content change, and the
+    # early return that fixed it is what left a moved toast growing under the
+    # taskbar. So a toast still in its default corner is re-placed, and a moved
+    # one keeps whichever edge it is already sitting against.
     $script:SuppressPosSave = $true
-    try { Place-BottomRight } finally { $script:SuppressPosSave = $false }
+    try {
+        if (-not $script:SavedPosition) { Place-BottomRight; return }
+
+        $l = $Window.Left; $t = $Window.Top
+        if ([double]::IsNaN($l) -or [double]::IsNaN($t)) { return }
+
+        # $e does not exist in a PowerShell event handler - measured, it is
+        # $null, and the sizes come from $args[1]. Reading $e would have made
+        # every previous rectangle zero-sized, so no edge would ever look near
+        # and this whole handler would quietly do nothing at all.
+        $ev = $args[1]
+        if (-not $ev) { return }
+        $prevW = [double]$ev.PreviousSize.Width
+        $prevH = [double]$ev.PreviousSize.Height
+        # The first SizeChanged reports 0x0 as the previous size, because there
+        # was no window before it. Nothing to hold on to, and Loaded places it.
+        if ($prevW -le 0 -or $prevH -le 0) { return }
+
+        $areas = @(Get-WorkAreaRects)
+        if ($areas.Count -eq 0) { return }
+        $prev = [pscustomobject]@{
+            Left = $l; Top = $t; Right = $l + $prevW; Bottom = $t + $prevH
+        }
+        $area = Get-CurrentWorkArea $prev $areas
+        if (-not $area) { return }
+        $pos = Get-ResizedPosition $prev ([double]$ev.NewSize.Width) ([double]$ev.NewSize.Height) $area (Get-DeviceScale)
+        $Window.Left = $pos.Left
+        $Window.Top  = $pos.Top
+    } finally { $script:SuppressPosSave = $false }
 })
 
 $Window.Add_LocationChanged({
@@ -3165,7 +3393,30 @@ $Window.Add_LocationChanged({
     $script:PositionTimer.Start()
 })
 
-$Window.Add_MouseLeftButtonDown({ try { $Window.DragMove() } catch { } })
+$Window.Add_MouseLeftButtonDown({
+    # DragMove does not return until the drag is over, so this is also where the
+    # drop lands and where a near edge is worth snapping to.
+    try { $Window.DragMove() } catch { return }
+
+    # With rememberPosition off, the toast returns to the corner on the next
+    # content change anyway, so snapping here would only be undone - and
+    # Save-PendingPosition would refuse to record it in any case. Leaving early
+    # also means nothing here can create a SavedPosition behind the setting's
+    # back.
+    if (-not $Config.rememberPosition) { return }
+
+    $rect = New-WindowRect
+    if (-not $rect) { return }
+    $areas = @(Get-WorkAreaRects)
+    if ($areas.Count -eq 0) { return }
+    $area = Get-CurrentWorkArea $rect $areas
+    if (-not $area) { return }
+    $pos = Get-SnappedPosition $rect $area 16 (Get-DeviceScale)
+    # Deliberately not suppressed: this is the user choosing a position, so
+    # LocationChanged should carry it into the debounced save like any drag.
+    $Window.Left = $pos.Left
+    $Window.Top  = $pos.Top
+})
 
 $script:Hidden = $false
 # Set by the tray toggle only. The automatic rules decide when the toast is

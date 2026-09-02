@@ -223,14 +223,29 @@ try {
     #
     # It is SizeToContent, and the size handler re-ran the corner placement
     # unconditionally - so every step line, session row and approval card
-    # dragged a moved toast back to the bottom right. The guard is that the
-    # corner placement only applies while nothing has been remembered.
+    # dragged a moved toast back to the bottom right. The guard was to skip
+    # the placement entirely once a position had been remembered.
+    #
+    # That guard was then the other half of a second fault: skipping every
+    # resize meant a toast parked on the bottom edge kept its top and grew
+    # downwards, straight under the taskbar. Measured at 275px of overlap
+    # after one grow from 100 to 320. So the handler no longer skips - it
+    # branches, and a moved toast holds the edge it is sitting against
+    # instead of being re-placed or ignored.
+    #
+    # Both halves are pinned here, because either one alone is a bug that
+    # ships: re-place unconditionally and it walks home, skip
+    # unconditionally and it sinks.
     # ------------------------------------------------------------------
     Write-Host "`nthe toast stays where it is put"
     Check 'the position can be remembered' ([int][bool]($text -match 'rememberPosition\s+= \$true')) 1
     Check 'and there is a control for it'  ([int][bool]($w.FindName('RememberPosCheck'))) 1
-    # The fault itself: SizeChanged must not re-place a toast that was moved.
-    Check 'resizing does not move it back' ([int][bool]($text -match '(?s)Add_SizeChanged\(\{.*?if \(\$script:SavedPosition\) \{ return \}')) 1
+    # The corner placement is reachable only when nothing has been remembered.
+    Check 'the corner is only for an unmoved toast' `
+        ([int][bool]($text -match '(?s)Add_SizeChanged\(\{.*?if \(-not \$script:SavedPosition\) \{ Place-BottomRight; return \}')) 1
+    # And a moved one is anchored rather than left to grow under the taskbar.
+    Check 'a moved one is anchored instead' `
+        ([int][bool]($text -match '(?s)Add_SizeChanged\(\{.*?Get-ResizedPosition')) 1
     # Writes are coalesced, and a drag ending just before exit must not be lost.
     Check 'the write is debounced'         ([int][bool]($text -match 'PositionTimer')) 1
     Check 'and flushed on the way out'     ([int](([regex]::Matches($text, 'Save-PendingPosition')).Count -ge 4)) 1
