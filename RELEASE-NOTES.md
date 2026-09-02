@@ -6,6 +6,8 @@
 - Show language names in their native form so they remain recognizable after switching.
 - Clearly indicate when voice recognition falls back to English for a UI language that the
   speech engine does not support.
+- Keep the installer alive when an update is launched from the running Companion, preventing
+  the Settings status from remaining stuck on "Installing...".
 
 ## v0.13.0 — One .NET voice engine, no Python installation
 
