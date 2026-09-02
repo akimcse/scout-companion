@@ -82,7 +82,7 @@ function Get-CompanionVersion {
 # The companion has no taskbar button, so "is it running" is a process
 # question. Matched on the script path rather than the name, because every
 # PowerShell window is powershell.exe.
-function Stop-ProcessTree([int]$RootId) {
+function Stop-ProcessTree([int]$RootId, [int]$ExcludeId = $PID) {
     try { $all = @(Get-CimInstance Win32_Process -ErrorAction Stop) }
     catch { $all = @() }
     $pending = @($RootId)
@@ -91,6 +91,10 @@ function Stop-ProcessTree([int]$RootId) {
         $parent = $pending[0]
         $pending = @($pending | Select-Object -Skip 1)
         foreach ($child in @($all | Where-Object { $_.ParentProcessId -eq $parent })) {
+            # An in-app update launches this installer as a descendant of the
+            # Companion it must replace. Do not let tree cleanup kill the
+            # installer that is performing the cleanup.
+            if ($child.ProcessId -eq $ExcludeId) { continue }
             [void]$owned.Add([int]$child.ProcessId)
             $pending += [int]$child.ProcessId
         }

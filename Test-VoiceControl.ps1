@@ -211,6 +211,8 @@ Assert-True ($VoiceApp -match 'SetApartmentState\(ApartmentState\.STA\)') 'WPF e
 Assert-True ($Text -match '\$startInfo\.CreateNoWindow = \$true') 'voice enrollment does not open a console'
 $Installer = Get-Content (Join-Path $Root 'Install.ps1') -Raw
 Assert-True ($Installer -match 'Stop-ProcessTree') 'installer stops the voice process tree'
+Assert-True ($Installer -match 'Stop-ProcessTree\(\[int\]\$RootId, \[int\]\$ExcludeId = \$PID\)') 'installer excludes itself from in-app update cleanup'
+Assert-True ($Installer -match '\$child\.ProcessId -eq \$ExcludeId') 'installer does not traverse through its own process'
 Assert-True ($Installer -match 'Remove-UpgradePath') 'installer retries locked upgrade files'
 Assert-True ($Installer -match 'Voice engine installation is incomplete') 'installer verifies the selected engine'
 Assert-True ($Text -match 'Stop-OwnedProcessTree') 'Companion stops setup and enrollment children'
