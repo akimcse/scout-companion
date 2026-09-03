@@ -70,7 +70,8 @@ you act on approvals in place.
   offers to bring the window forward. It can't answer for you, so it doesn't pretend to.
 - **🏷️ Names each conversation** — shows what you last asked, or Scout's own sidebar title
   (toggle **Show the chat-list name**). Worked out without touching a window you're using.
-- **🐾 A mascot** — twelve to pick from, including five cats and one that isn't an animal.
+- **🐾 A mascot** — thirteen to pick from, including five cats, the original
+  **Scout Man** armored helmet, and one that isn't an animal.
   It types while busy, widens its eyes when it needs you, and blinks throughout.
 - **🔔 Long-turn & new-version alerts** — a tray balloon when a long turn ends, and an
   offer in the tray menu when a newer release exists.
@@ -166,7 +167,7 @@ Right-click the tray icon → **Settings**, or click the ⚙ on the toast.
 |---------|--------------|
 | **Start automatically with Scout** | Adds/removes the `Watch-Scout.ps1` Startup shortcut. Per-user, no registry writes. |
 | **Animate the mascot** | Off leaves it in a resting pose and stops its timer. Shared with **Pause animation** in the tray. |
-| **Mascot** | Switches between the twelve mascots live, no restart. |
+| **Mascot** | Switches between the thirteen mascots live, no restart. |
 | **Show the chat-list name** | Off (default) the row shows what you last asked; on, it shows Scout's own sidebar title once learned. |
 | **Opacity** | Fades the toast from solid down to 35% (a fully transparent window would still swallow clicks). |
 | **Remember where I put it** | Drag the toast anywhere and it comes back there instead of the bottom-right corner. Dropped near an edge it lines up flush against it, and then grows from that edge rather than downwards — so a toast at the bottom stays above the taskbar however many sessions and steps it is showing. If the screen it was on has gone — undocked, or a display switched off — it returns to the corner rather than opening somewhere unreachable, since it has no taskbar button. |

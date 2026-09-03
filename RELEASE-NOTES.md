@@ -1,5 +1,10 @@
 # Release notes
 
+## v0.15.3 — Scout Man mascot
+
+- Add the selectable Scout Man mascot with a red-and-gold pill-shaped helmet,
+  flat cyan optics, blinking animation, typing paws, and a matching tray silhouette.
+
 ## v0.14.0 — Select every supported UI language
 
 - Make all fifteen translated UI languages available directly in Settings.

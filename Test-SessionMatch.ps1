@@ -17,6 +17,7 @@ if (-not (Test-Path $src)) { Write-Host "scout-companion.ps1 not found next to t
 # Lift the functions under test out of the app rather than copying them, so the
 # tests can never drift from the code they claim to cover.
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$null)
+$appSrc = Get-Content $src -Raw
 $funcs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)
 foreach ($n in @('Truncate', 'Split-ChatRow', 'ConvertTo-AgeMinutes', 'Select-ChatRow',
                  'Get-LastUserMessage', 'Get-SessionSubject', 'Where-From', 'Get-QueueSuffix',
@@ -673,6 +674,12 @@ if ($sample) {
             ([int][bool](@($sample.processNames) -contains 'scout')) 1
     }
 }
+Same 'the armored pill mascot is selectable' `
+    ([int][bool]($appSrc -match "'armored-pill'\s*=\s*@\{\s*Label\s*=\s*'Scout Man'")) 1
+Same 'the armored pill has animated optics' `
+    ([int][bool]($appSrc -match '(?s)function New-ArmoredPillHead.*?x:Name="BlinkS"')) 1
+Same 'the armored pill has a tray silhouette' `
+    ([int][bool]($appSrc -match "(?s)'armor'\s*\{.*?FillRectangle\(\`$pale")) 1
 
 # The grid alignment only happens if the real scale is handed to the geometry.
 # It defaults to off so the pure tests can work in WPF units, which means a call
@@ -1242,7 +1249,6 @@ Write-Host "`nwhen the chat search is worth typing into"
 # sidebar only stamps rows with times once a query has been typed - and a time
 # is the only thing that can match a chat to a session folder. That is
 # intrusive, so it has to be earned.
-$appSrc = Get-Content $src -Raw
 # 0.8.0 made showChatTitle default to off and this was not revisited, so the
 # companion kept typing into the search box to learn a name it did not display.
 Same 'the scan is gated on the setting' ([bool]($appSrc -match '\$base = if \(\$Config\.showChatTitle\)')) $true
@@ -1267,4 +1273,3 @@ Same 'the tooltip says it will type'    ([bool]($appSrc -match "type into Scout'
 
 Write-Host ("`n{0} passed, {1} failed" -f $script:Pass, $script:Fail)
 if ($script:Fail -gt 0) { exit 1 }
-
