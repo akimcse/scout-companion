@@ -3985,6 +3985,36 @@ $(New-CuteEyes $p)
 "@
 }
 
+# A compact original tech helmet based on the approved N1 concept. Its pill
+# silhouette stays readable beside the organic mascots, while the empty space
+# between the optics and mouth plate prevents the face from implying a nose.
+function New-ArmoredPillHead($p) {
+    @"
+      <Path Fill="$($p.shell)" Stroke="$($p.shade)" StrokeThickness="1.2"
+            Data="M17,2 Q29,-2 41,2 Q50,5 50,15 L50,36 Q50,44 41,48
+                  Q29,53 17,48 Q8,44 8,36 L8,15 Q8,5 17,2 Z"/>
+      <Path Fill="$($p.crown)" Opacity="0.8"
+            Data="M17,3 Q29,-1 41,3 L44,11 L14,11 Z"/>
+      <Path Fill="$($p.plate)" Stroke="$($p.plateShade)" StrokeThickness="1"
+            Data="M19,8 Q29,4 39,8 Q43,10 43,16 L43,31
+                  Q43,35 39,37 L19,37 Q15,35 15,31 L15,16 Q15,10 19,8 Z"/>
+      <Path Fill="$($p.shell)" Data="M8,15 L15,14 L15,33 L8,36 Z M50,15 L43,14 L43,33 L50,36 Z"/>
+      <Canvas x:Name="EyeGroup" Width="58" Height="60">
+        <Canvas.RenderTransform>
+          <ScaleTransform x:Name="BlinkS" ScaleX="1" ScaleY="1" CenterX="29" CenterY="20"/>
+        </Canvas.RenderTransform>
+        <Path Fill="$($p.eyeGlow)" Stroke="$($p.eye)" StrokeThickness="0.9"
+              Data="M15,17 L27,17 L25,20.5 L15,20.5 Z"/>
+        <Path Fill="$($p.eyeGlow)" Stroke="$($p.eye)" StrokeThickness="0.9"
+              Data="M43,17 L31,17 L33,20.5 L43,20.5 Z"/>
+      </Canvas>
+      <Path Fill="$($p.plate)" Stroke="$($p.plateShade)" StrokeThickness="1"
+            Data="M22,39 L36,39 L35,47 Q29,51 23,47 Z"/>
+      <Line X1="25" Y1="44" X2="33" Y2="44" Stroke="$($p.mouth)"
+            StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+"@
+}
+
 # Not an animal, and the only mascot that does not sit at the laptop: a ribbon
 # of light that turns on the spot and drifts through its colours. Built from
 # stroked arcs rather than a filled outline -- the top of one loop plus the
@@ -4093,6 +4123,7 @@ $MascotBuilders = @{
     bunny   = ${function:New-BunnyHead}
     penguin = ${function:New-PenguinHead}
     tuna    = ${function:New-TunaHead}
+    armor   = ${function:New-ArmoredPillHead}
     ribbon  = ${function:New-RibbonMascot}
 }
 
@@ -4144,6 +4175,11 @@ $Mascots = [ordered]@{
     'penguin' = @{ Label = 'Penguin'; Species = 'penguin'; Palette = @{
         fur='#FF343945'; shade='#FF1A1D24'; ear='#FF464C5A'; earInner='#FF464C5A'
         muzzle='#FFFAF8F5'; nose='#FFF5AE44'; eye='#FF5E6B80'; blush='#FF8FA2C0'; paw='#FFF5AE44' } }
+
+    'armored-pill' = @{ Label = 'Scout Man'; Species = 'armor'; Palette = @{
+        shell='#FFB62531'; shade='#FF3D0C13'; crown='#FF761721'; plate='#FFE2AD4B'
+        plateShade='#FF704519'; eye='#FF68E9FF'; eyeGlow='#FFEFFFFF'
+        mouth='#FF583513'; paw='#FFB62531' } }
 
     # The odd one out, and deliberately so: no face, no laptop, no paws. Desk is
     # what tells Set-Mascot to hide the desk furniture the animals share.
@@ -4295,7 +4331,7 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
     $hx = 3.0; $hy = 8.0; $hw = 26.0; $hh = 22.0
     # The ribbon has no head and no eyes, so it opts out of the shared body plan
     # below rather than trying to squeeze into it.
-    $faceless = ($species -eq 'ribbon')
+    $faceless = ($species -in 'ribbon', 'armor')
     try {
         switch ($species) {
             'cat' {
@@ -4334,6 +4370,22 @@ function New-TrayIcon([string]$hex, [string]$species = 'quokka') {
                 Tri @(0.5,9, 8,17.5, 0.5,26)
                 Tri @(31.5,9, 24,17.5, 31.5,26)
                 Tri @(12,7, 16,0.5, 20,7)
+            }
+            'armor' {
+                [System.Drawing.PointF[]]$helmet = @(
+                    (New-Object System.Drawing.PointF 10.0, 2.0),
+                    (New-Object System.Drawing.PointF 22.0, 2.0),
+                    (New-Object System.Drawing.PointF 28.0, 7.0),
+                    (New-Object System.Drawing.PointF 28.0, 25.0),
+                    (New-Object System.Drawing.PointF 22.0, 30.0),
+                    (New-Object System.Drawing.PointF 10.0, 30.0),
+                    (New-Object System.Drawing.PointF 4.0, 25.0),
+                    (New-Object System.Drawing.PointF 4.0, 7.0))
+                $g.FillPolygon($brush, $helmet)
+                $g.DrawPolygon($pen, $helmet)
+                $g.FillRectangle($pale, 7.0, 13.0, 8.5, 3.0)
+                $g.FillRectangle($pale, 16.5, 13.0, 8.5, 3.0)
+                $g.DrawLine($pen, 12.0, 24.0, 20.0, 24.0)
             }
             'ribbon' {
                 # The sash alone, filling the frame on the diagonal, with the
