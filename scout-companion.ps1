@@ -1798,27 +1798,58 @@ function Read-VoiceUiRequest {
     }
 }
 
+function Wait-VoiceCommandSubmission(
+        [IntPtr]$hwnd, [string]$command, [int]$timeoutMilliseconds = 1200) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($timer.ElapsedMilliseconds -lt $timeoutMilliseconds) {
+        $box = Get-AgentMessageBox $hwnd
+        $text = Get-AgentMessageText $box
+        # Scout clears the composer as soon as it accepts the message. Do not
+        # treat a missing UIA element as success; Electron can briefly rebuild
+        # the tree while keeping the original draft.
+        if ($null -ne $text -and $text.Trim() -ne $command.Trim()) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    return $false
+}
+
 function Submit-VoiceUiRequest {
     $request = $script:VoiceUiRequest
     if (-not $request -or $request.Submitted) { return }
     $win = Get-AgentWindow
     if (-not $win) { return }
-    Wake-AgentA11y $win.Hwnd
-    $send = Find-AgentButton $win.Hwnd @('Send')
-    if (-not $send) { return }
-    $box = Get-AgentMessageBox $win.Hwnd
-    if (-not $box) { return }
-    $draft = Get-AgentMessageText $box
-    if ($null -eq $draft) { return }
-    if ($draft.Trim().Length -gt 0) {
-        Write-VoiceUiResponse $request.Id '' 'Scout has an unsent draft. Send or clear it before using voice control.'
-        Clear-VoiceUiRequest
-        return
-    }
-
-    $request.Offsets = Get-VoiceEventSnapshot
     $previous = [ScoutNative]::GetForegroundWindow()
+    $wasMinimized = [ScoutNative]::IsIconic($win.Hwnd)
     try {
+        # UI Automation may keep a minimized window's tree but mark every
+        # descendant off-screen. Find-AgentButton deliberately ignores
+        # off-screen controls, so restore before looking for Send or the message
+        # box. Put the window back afterwards; a background voice command must
+        # not leave Scout covering what the user was doing.
+        if ($wasMinimized) {
+            [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
+            Start-Sleep -Milliseconds 150
+        }
+        $send = $null
+        $box = $null
+        for ($attempt = 0; $attempt -lt 3 -and (-not $send -or -not $box); $attempt++) {
+            Wake-AgentA11y $win.Hwnd
+            $send = Find-AgentButton $win.Hwnd @('Send')
+            $box = Get-AgentMessageBox $win.Hwnd
+            if (-not $send -or -not $box) { Start-Sleep -Milliseconds 150 }
+        }
+        if (-not $send -or -not $box) { return }
+        $draft = Get-AgentMessageText $box
+        if ($null -eq $draft) { return }
+        if ($draft.Trim().Length -gt 0) {
+            Write-VoiceUiResponse $request.Id '' 'Scout has an unsent draft. Send or clear it before using voice control.'
+            Clear-VoiceUiRequest
+            return
+        }
+
+        $request.Offsets = Get-VoiceEventSnapshot
         $focused = $false
         for ($attempt = 0; $attempt -lt 3 -and -not $focused; $attempt++) {
             $box = Get-AgentMessageBox $win.Hwnd
@@ -1835,6 +1866,19 @@ function Submit-VoiceUiRequest {
             throw 'Scout did not accept the voice command text.'
         }
         [ScoutNative]::SendEnter()
+        if (-not (Wait-VoiceCommandSubmission $win.Hwnd $request.Command)) {
+            # A restored Electron window can receive the key-up after it has
+            # already begun losing activation. Invoke the on-screen Send
+            # control directly before giving up.
+            $send = Find-AgentButton $win.Hwnd @('Send')
+            if ($send) {
+                $send.GetCurrentPattern(
+                    [System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            }
+            if (-not (Wait-VoiceCommandSubmission $win.Hwnd $request.Command)) {
+                throw 'Scout kept the voice command as a draft instead of submitting it.'
+            }
+        }
         $request.Submitted = $true
         $request.Hwnd = $win.Hwnd
     } catch {
@@ -1842,6 +1886,10 @@ function Submit-VoiceUiRequest {
         Clear-VoiceUiRequest
     } finally {
         Start-Sleep -Milliseconds 100
+        if ($wasMinimized -and [ScoutNative]::IsWindow($win.Hwnd)) {
+            # SW_MINIMIZE restores the state the voice request found.
+            [void][ScoutNative]::ShowWindow($win.Hwnd, 6)
+        }
         if ($previous -ne [IntPtr]::Zero -and $previous -ne $win.Hwnd) {
             [void](Set-AgentMessageFocus $previous $null)
         }

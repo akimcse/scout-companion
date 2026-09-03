@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 
 namespace ScoutVoiceEngine;
 
@@ -18,7 +19,11 @@ internal static class SelfTests
             ("run language configuration", () => Sync(TestRunLanguage)),
             ("localized voice state", () => Sync(TestLocalizedState)),
             ("interrupt speaker threshold", () => Sync(TestInterruptSpeakerThreshold)),
+            ("wake mixed with TTS playback", () => Sync(TestMixedPlaybackWake)),
+            ("short wake during TTS playback", () => Sync(TestShortPlaybackWake)),
+            ("call confirmation responses", () => Sync(TestCallConfirmationResponses)),
             ("audible TTS volume", () => Sync(TestTtsVolume)),
+            ("online TTS protocol", () => Sync(TestOnlineTtsProtocol)),
             ("bounded lifecycle shutdown", TestBoundedShutdownAsync),
             ("response bridge protocol", TestBridgeAsync),
         };
@@ -124,6 +129,65 @@ internal static class SelfTests
             "barge-in still rejects low-confidence speakers");
     }
 
+    private static void TestMixedPlaybackWake()
+    {
+        var logged = VoiceEngine.DetectTtsInterrupt(
+            "금요일 일정 안내 중 헤이스웃 알았어 조용히 해줘", 85, false, 0.374f);
+        True(logged.Interrupt && logged.MixedWithPlayback,
+            "speaker-backed wake after playback text interrupts");
+        Equal("", logged.Command);
+
+        var playbackOnly = VoiceEngine.DetectTtsInterrupt(
+            "일정 안내에서 헤이 스카웃 사용법을 설명합니다", 85, false, 0.15f);
+        True(!playbackOnly.Interrupt,
+            "unverified playback mentioning the wake phrase does not interrupt");
+
+        var clean = VoiceEngine.DetectTtsInterrupt(
+            "헤이 스카웃 다음 일정 알려줘", 85, true, 0.62f);
+        True(clean.Interrupt && !clean.MixedWithPlayback,
+            "clean prefix wake keeps its command");
+        True(clean.Command.Contains("다음 일정"));
+        var shortFuzzy = VoiceEngine.DetectTtsInterrupt(
+            "헤이스웃", 85, false, 0.218f);
+        True(shortFuzzy.Interrupt, "low-score short wake can interrupt playback");
+        var echo = VoiceEngine.DetectTtsInterrupt(
+            "스카웃", 85, false, 0.15f);
+        True(!echo.Interrupt, "low-score bare playback echo does not interrupt");
+    }
+
+    private static void TestShortPlaybackWake()
+    {
+        var halfSecond = VoiceModels.SampleRate / 2;
+        True(VoiceEngine.ShouldProcessSegment(halfSecond, speaking: true),
+            "short standalone wake is transcribed during playback");
+        True(!VoiceEngine.ShouldProcessSegment(halfSecond, speaking: false),
+            "idle noise filtering keeps the existing minimum");
+        True(!VoiceEngine.ShouldProcessSegment(
+            (int)(0.29 * VoiceModels.SampleRate), speaking: true),
+            "sub-VAD fragments remain ignored");
+    }
+
+    private static void TestCallConfirmationResponses()
+    {
+        True(TextProcessing.IsCallAffirmative("저를 부르셨나요 네", "ko"));
+        True(TextProcessing.IsCallAffirmative("응", "ko"));
+        True(TextProcessing.IsCallAffirmative("그래 맞아", "ko"));
+        True(TextProcessing.IsCallNegative("아니야", "ko"));
+        True(TextProcessing.IsCallNegative("저를 부르셨나요 계속해", "ko"));
+        True(!TextProcessing.IsCallAffirmative("내일 날씨 알려줘", "ko"));
+        True(!TextProcessing.IsCallAffirmative("지금 뭐 했어", "ko"));
+        True(TextProcessing.IsCallNegative("そうじゃない", "ja"));
+        True(!TextProcessing.IsCallAffirmative("そうじゃない", "ja"));
+        True(TextProcessing.IsCallNegative("不对", "zh-Hans"));
+        True(!TextProcessing.IsCallAffirmative("不对", "zh-Hans"));
+        True(TextProcessing.IsCallNegative("incorrect", "en"));
+        True(!TextProcessing.IsCallAffirmative("incorrect", "en"));
+        var engineDirectory = Path.GetDirectoryName(typeof(WindowsTts).Assembly.Location)!;
+        foreach (var suffix in new[] { "en", "ko", "ja", "zh-Hans" })
+            True(File.Exists(Path.Combine(engineDirectory,
+                $"scout-called-{suffix}.wav")), $"call prompt {suffix}");
+    }
+
     private static void TestKoreanCommandCorrection()
     {
         Equal("지금 몇 시야?", TextProcessing.CorrectCommonRecognition("지금 몇.", "ko"));
@@ -137,6 +201,30 @@ internal static class SelfTests
     private static void TestTtsVolume()
     {
         Equal(70, WindowsTts.ConfiguredVolume);
+        Equal(45, WindowsTts.OnlineVolume);
+    }
+
+    private static void TestOnlineTtsProtocol()
+    {
+        Equal("ko-KR-SunHiNeural", WindowsTts.VoiceForCulture("ko-KR"));
+        Equal("ja-JP-NanamiNeural", WindowsTts.VoiceForCulture("ja-JP"));
+        Equal("zh-CN-XiaoxiaoNeural", WindowsTts.VoiceForCulture("zh-CN"));
+        Equal("en-US-AriaNeural", WindowsTts.VoiceForCulture("en-US"));
+        var token = WindowsTts.GenerateSecMsGec(
+            DateTimeOffset.FromUnixTimeSeconds(1_787_000_000));
+        Equal(64, token.Length);
+        True(token.All(character => char.IsAsciiHexDigit(character)));
+
+        var headers = Encoding.UTF8.GetBytes("X-RequestId:test\r\nPath:audio\r\n");
+        var data = new byte[headers.Length + 5];
+        data[0] = (byte)(headers.Length >> 8);
+        data[1] = (byte)headers.Length;
+        headers.CopyTo(data, 2);
+        data[^3] = 1;
+        data[^2] = 2;
+        data[^1] = 3;
+        True(WindowsTts.TryGetAudioPayload(data, out var payload));
+        Equal(3, payload.Length);
     }
 
     private static void TestLanguages()

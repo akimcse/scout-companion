@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <None Include="scout-listening.wav" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="scout-called-*.wav" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

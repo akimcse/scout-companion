@@ -8,7 +8,7 @@ internal static partial class TextProcessing
     private static readonly string[] WakeVariants =
     [
         "헤이스카웃", "헤이스카우트", "헤이스카우", "에이스카웃", "에이스카우트",
-        "해이스카웃", "스카웃", "스카우트", "스카우", "heyscout",
+        "해이스카웃", "헤이스웃", "헤이웃", "스카웃", "스카우트", "스카우", "heyscout",
         "へイスカウト", "へイスカ", "ヘイスカウト", "ヘイスカ", "嘿scout", "嗨scout"
     ];
 
@@ -20,6 +20,9 @@ internal static partial class TextProcessing
 
     [GeneratedRegex(@"(?:헤이\s*)?스카(?:웃|우트|우)(?:아|야)?", RegexOptions.IgnoreCase)]
     private static partial Regex KoreanWakeRegex();
+
+    [GeneratedRegex(@"^헤이\s*스카(?:웃|우트|우)(?:아|야)?", RegexOptions.IgnoreCase)]
+    private static partial Regex ExplicitKoreanWakeRegex();
 
     [GeneratedRegex(@"hey\s+scout", RegexOptions.IgnoreCase)]
     private static partial Regex EnglishWakeRegex();
@@ -200,4 +203,54 @@ internal static partial class TextProcessing
     }
 
     public static string StripModelTags(string text) => ModelTagRegex().Replace(text, "").Trim();
+
+    internal static bool IsCallAffirmative(string text, string language)
+    {
+        if (IsCallNegative(text, language))
+            return false;
+        var value = CallResponse(text, language);
+        return language switch
+        {
+            "ko" => StartsWithAny(value, "네", "예", "응", "그래", "그렇", "맞아", "불렀어"),
+            "ja" => StartsWithAny(value, "はい", "うん", "そう"),
+            "zh-Hans" => StartsWithAny(value, "是", "对", "嗯"),
+            _ => StartsWithAny(value, "yes", "yeah", "yep", "correct"),
+        };
+    }
+
+    internal static bool IsCallNegative(string text, string language)
+    {
+        var value = CallResponse(text, language);
+        return language switch
+        {
+            "ko" => StartsWithAny(value, "아니", "됐어", "계속해"),
+            "ja" => StartsWithAny(value, "いいえ", "違う", "そうじゃない", "続けて"),
+            "zh-Hans" => StartsWithAny(value, "不", "没有", "继续"),
+            _ => StartsWithAny(value, "no", "nope", "incorrect", "continue"),
+        };
+    }
+
+    internal static bool HasExplicitWakePrefix(string text) =>
+        ExplicitKoreanWakeRegex().IsMatch(text) ||
+        EnglishWakeRegex().Match(text) is { Success: true, Index: 0 } ||
+        JapaneseWakeRegex().Match(text) is { Success: true, Index: 0 } ||
+        ChineseWakeRegex().Match(text) is { Success: true, Index: 0 };
+
+    private static string CallResponse(string text, string language)
+    {
+        var value = Normalize(text);
+        var prompt = Normalize(language switch
+        {
+            "ko" => "저를 부르셨나요",
+            "ja" => "私を呼びましたか",
+            "zh-Hans" => "您叫我了吗",
+            _ => "Did you call me",
+        });
+        return value.StartsWith(prompt, StringComparison.OrdinalIgnoreCase)
+            ? value[prompt.Length..]
+            : value;
+    }
+
+    private static bool StartsWithAny(string value, params string[] choices) =>
+        choices.Any(choice => value.StartsWith(choice, StringComparison.OrdinalIgnoreCase));
 }
