@@ -59,6 +59,7 @@ internal sealed class VoiceModels : IDisposable
 
     public void AcceptVad(float[] samples) => _vad.AcceptWaveform(samples);
     public bool HasVadSegment => !_vad.IsEmpty();
+    public bool IsSpeechDetected => _vad.IsSpeechDetected();
     public float[] PopVadSegment()
     {
         var segment = _vad.Front().Samples;

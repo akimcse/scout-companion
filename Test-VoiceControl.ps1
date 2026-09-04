@@ -118,11 +118,15 @@ foreach ($tag in 'ko', 'ja', 'zh-Hans') {
 
 Write-Host 'current conversation bridge'
 Assert-True ($Text -match 'SendUnicodeText\(\$request\.Command\)') 'types into Scout'
+Assert-True ($Text -match 'Wait-VoiceCommandSubmission \$win\.Hwnd \$request\.Command') 'confirms Scout consumed the voice command'
+Assert-True ($Text -match 'kept the voice command as a draft') 'does not report an unsent draft as submitted'
+Assert-True ($Text -match '(?s)SendEnter\(\).*?Find-AgentButton \$win\.Hwnd @\(''Send''\).*?Invoke\(\)') 'falls back to invoking Send directly'
 Assert-True ($Text -match 'function Set-AgentMessageFocus') 'focus acquisition is guarded'
 Assert-True ($Text -match 'AttachThreadInput') 'foreground focus locks are handled'
 Assert-True ($Text -match '\$attempt -lt 3') 'focus acquisition is retried'
-Assert-True ($Text -match 'Set-AgentMessageFocus \$previous \$null') 'previous app focus is restored safely'
 Assert-True ($Text -match '(?s)IsIconic\(\$hwnd\).*?ShowWindow\(\$hwnd, 9\)') 'maximized windows are not restored'
+Assert-True ($Text -match '(?s)function Submit-VoiceUiRequest.*?ShowWindow\(\$win\.Hwnd, 3\).*?Find-AgentButton') 'voice commands maximize Scout before finding controls'
+Assert-True ($Text -notmatch 'ShowWindow\(\$win\.Hwnd, 6\)') 'voice commands leave Scout maximized'
 $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -158,7 +162,11 @@ $required = @(
     'voice\dotnet\ScoutVoiceEngine\VoiceEngine.cs',
     'voice\dotnet\ScoutVoiceEngine\EnrollmentForm.cs',
     'voice\dotnet\ScoutVoiceEngine\LanguageResources.cs',
-    'voice\dotnet\ScoutVoiceEngine\scout-listening.wav'
+    'voice\dotnet\ScoutVoiceEngine\scout-listening.wav',
+    'voice\dotnet\ScoutVoiceEngine\scout-called-en.wav',
+    'voice\dotnet\ScoutVoiceEngine\scout-called-ko.wav',
+    'voice\dotnet\ScoutVoiceEngine\scout-called-ja.wav',
+    'voice\dotnet\ScoutVoiceEngine\scout-called-zh-Hans.wav'
 )
 foreach ($relative in $required) {
     Assert-True (Test-Path (Join-Path $Root $relative)) "$relative is packaged"
@@ -189,11 +197,21 @@ Assert-True ($Build -match 'voice package is incomplete') 'release build verifie
 $Engine = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\VoiceEngine.cs') -Raw -Encoding UTF8
 Assert-True ($Engine -match 'Rejected unverified command') 'unregistered speakers are rejected'
 Assert-True ($Engine -match 'Explicit wake phrase interrupted TTS') 'only wake speech interrupts answers'
+Assert-True ($Engine -match 'Speaker-verified wake phrase mixed with playback interrupted TTS') 'speaker-backed mixed wake interrupts online playback'
+Assert-True ($Engine -match 'DetectTtsInterrupt') 'TTS interruption distinguishes clean and mixed wake speech'
+Assert-True ($Engine -match 'speaking \? 0\.30 : 0\.65') 'short standalone wake is processed during TTS'
 Assert-True ($Engine -match 'scout-listening\.wav') 'accepted commands play the original sound'
 $Processing = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\TextProcessing.cs') -Raw -Encoding UTF8
 Assert-True ($Processing -match '一-鿿') 'Chinese enrollment text survives normalization'
 $Tts = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\WindowsTts.cs') -Raw -Encoding UTF8
 Assert-True ($Tts -match 'Kill\(entireProcessTree: true\)') 'TTS playback is stopped as a process tree'
+Assert-True ($Tts -match 'ClientWebSocket') 'online neural TTS uses an architecture-neutral .NET client'
+Assert-True ($Tts -match 'ko-KR-SunHiNeural') 'online Korean TTS uses the approved neural voice'
+Assert-True ($Tts -match 'WaveOutEvent') 'online MP3 playback remains interruptible'
+Assert-True ($Tts -match 'using Windows offline voice') 'online failures fall back to Windows TTS'
+Assert-True ($Tts -match 'public void Pause\(\)') 'spoken answers can pause without losing position'
+Assert-True ($Tts -match 'public void Resume\(\)') 'declined calls resume the original answer'
+Assert-True ($Tts -match 'PlayCalledPromptAsync') 'call confirmation uses a pre-generated prompt'
 $Project = Get-Content (Join-Path $Root 'voice\dotnet\ScoutVoiceEngine\ScoutVoiceEngine.csproj') -Raw -Encoding UTF8
 Assert-True ($Project -match 'org\.k2fsa\.sherpa\.onnx') 'Sherpa ONNX is the .NET speech backend'
 Assert-True ($Project -match 'NAudio') 'NAudio is the Windows microphone backend'
@@ -210,6 +228,11 @@ Assert-True ($EnrollmentForm -match 'DwmSetWindowAttribute\(handle, 20') 'enroll
 Assert-True ($VoiceApp -match 'SetApartmentState\(ApartmentState\.STA\)') 'WPF enrollment runs on an STA thread'
 Assert-True ($Text -match '\$startInfo\.CreateNoWindow = \$true') 'voice enrollment does not open a console'
 $Installer = Get-Content (Join-Path $Root 'Install.ps1') -Raw
+foreach ($launcher in 'Start-ScoutCompanion.vbs', 'Watch-Scout.vbs') {
+    Assert-True (Test-Path (Join-Path $Root $launcher)) "$launcher is packaged"
+}
+$Shortcuts = Get-Content (Join-Path $Root 'Add-ToStartMenu.ps1') -Raw
+Assert-True ($Shortcuts -match 'System32\\wscript\.exe') 'shortcuts use the no-console WScript host'
 Assert-True ($Installer -match 'Stop-ProcessTree') 'installer stops the voice process tree'
 Assert-True ($Installer -match 'Stop-ProcessTree\(\[int\]\$RootId, \[int\]\$ExcludeId = \$PID\)') 'installer excludes itself from in-app update cleanup'
 Assert-True ($Installer -match '\$child\.ProcessId -eq \$ExcludeId') 'installer does not traverse through its own process'

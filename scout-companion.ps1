@@ -1798,27 +1798,53 @@ function Read-VoiceUiRequest {
     }
 }
 
+function Wait-VoiceCommandSubmission(
+        [IntPtr]$hwnd, [string]$command, [int]$timeoutMilliseconds = 1200) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($timer.ElapsedMilliseconds -lt $timeoutMilliseconds) {
+        $box = Get-AgentMessageBox $hwnd
+        $text = Get-AgentMessageText $box
+        # Scout clears the composer as soon as it accepts the message. Do not
+        # treat a missing UIA element as success; Electron can briefly rebuild
+        # the tree while keeping the original draft.
+        if ($null -ne $text -and $text.Trim() -ne $command.Trim()) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    return $false
+}
+
 function Submit-VoiceUiRequest {
     $request = $script:VoiceUiRequest
     if (-not $request -or $request.Submitted) { return }
     $win = Get-AgentWindow
     if (-not $win) { return }
-    Wake-AgentA11y $win.Hwnd
-    $send = Find-AgentButton $win.Hwnd @('Send')
-    if (-not $send) { return }
-    $box = Get-AgentMessageBox $win.Hwnd
-    if (-not $box) { return }
-    $draft = Get-AgentMessageText $box
-    if ($null -eq $draft) { return }
-    if ($draft.Trim().Length -gt 0) {
-        Write-VoiceUiResponse $request.Id '' 'Scout has an unsent draft. Send or clear it before using voice control.'
-        Clear-VoiceUiRequest
-        return
-    }
-
-    $request.Offsets = Get-VoiceEventSnapshot
-    $previous = [ScoutNative]::GetForegroundWindow()
     try {
+        # A voice command is an explicit request to use Scout. Maximize it
+        # before touching the Electron controls and leave it visible so the
+        # user can see the submitted command and follow the answer.
+        [void][ScoutNative]::ShowWindow($win.Hwnd, 3)
+        [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
+        Start-Sleep -Milliseconds 200
+        $send = $null
+        $box = $null
+        for ($attempt = 0; $attempt -lt 3 -and (-not $send -or -not $box); $attempt++) {
+            Wake-AgentA11y $win.Hwnd
+            $send = Find-AgentButton $win.Hwnd @('Send')
+            $box = Get-AgentMessageBox $win.Hwnd
+            if (-not $send -or -not $box) { Start-Sleep -Milliseconds 150 }
+        }
+        if (-not $send -or -not $box) { return }
+        $draft = Get-AgentMessageText $box
+        if ($null -eq $draft) { return }
+        if ($draft.Trim().Length -gt 0) {
+            Write-VoiceUiResponse $request.Id '' 'Scout has an unsent draft. Send or clear it before using voice control.'
+            Clear-VoiceUiRequest
+            return
+        }
+
+        $request.Offsets = Get-VoiceEventSnapshot
         $focused = $false
         for ($attempt = 0; $attempt -lt 3 -and -not $focused; $attempt++) {
             $box = Get-AgentMessageBox $win.Hwnd
@@ -1835,16 +1861,24 @@ function Submit-VoiceUiRequest {
             throw 'Scout did not accept the voice command text.'
         }
         [ScoutNative]::SendEnter()
+        if (-not (Wait-VoiceCommandSubmission $win.Hwnd $request.Command)) {
+            # A restored Electron window can receive the key-up after it has
+            # already begun losing activation. Invoke the on-screen Send
+            # control directly before giving up.
+            $send = Find-AgentButton $win.Hwnd @('Send')
+            if ($send) {
+                $send.GetCurrentPattern(
+                    [System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            }
+            if (-not (Wait-VoiceCommandSubmission $win.Hwnd $request.Command)) {
+                throw 'Scout kept the voice command as a draft instead of submitting it.'
+            }
+        }
         $request.Submitted = $true
         $request.Hwnd = $win.Hwnd
     } catch {
         Write-VoiceUiResponse $request.Id '' $_.Exception.Message
         Clear-VoiceUiRequest
-    } finally {
-        Start-Sleep -Milliseconds 100
-        if ($previous -ne [IntPtr]::Zero -and $previous -ne $win.Hwnd) {
-            [void](Set-AgentMessageFocus $previous $null)
-        }
     }
 }
 
@@ -4526,6 +4560,7 @@ function Stop-Companion {
 # remembered flag, so editing it by hand outside the app still works.
 # ---------------------------------------------------------------------------
 $WatcherPath = Join-Path $ScriptDir 'Watch-Scout.ps1'
+$WatcherLauncher = Join-Path $ScriptDir 'Watch-Scout.vbs'
 $StartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Scout Companion.lnk'
 
 function Test-AutoStart { return (Test-Path $StartupLink) }
@@ -4536,12 +4571,12 @@ function Set-AutoStart([bool]$on) {
             if (Test-Path $StartupLink) { Remove-Item $StartupLink -Force }
             return $true
         }
-        if (-not (Test-Path $WatcherPath)) { return $false }
+        if (-not (Test-Path $WatcherPath) -or -not (Test-Path $WatcherLauncher)) { return $false }
         $shell = New-Object -ComObject WScript.Shell
         try {
             $lnk = $shell.CreateShortcut($StartupLink)
-            $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            $lnk.Arguments  = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$WatcherPath`""
+            $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+            $lnk.Arguments  = "`"$WatcherLauncher`""
             $lnk.WorkingDirectory = $ScriptDir
             $lnk.Description = 'Starts Scout Companion when Microsoft Scout is running'
             $lnk.Save()

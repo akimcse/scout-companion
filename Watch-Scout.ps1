@@ -44,9 +44,12 @@ function Test-Companion {
 }
 
 function Start-Companion {
-    # Pass a single, explicitly-quoted argument string. Passing -File via an
-    # array (@('-File',$path)) mangles paths that contain spaces or non-ASCII
-    # characters (e.g. the Korean "문서" folder), so the script is never found.
+    $launcher = Join-Path $ScriptDir 'Start-ScoutCompanion.vbs'
+    if (Test-Path $launcher) {
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') `
+            -ArgumentList "`"$launcher`"" -WindowStyle Hidden
+        return
+    }
     $argline = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$Companion`""
     Start-Process -FilePath 'powershell.exe' -ArgumentList $argline -WindowStyle Hidden
 }

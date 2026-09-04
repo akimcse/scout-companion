@@ -16,7 +16,9 @@ without switching back.
 > `config.json`; the voice engine follows Companion's lifetime. First-time users can run the five-phrase
 > voice enrollment from the same settings section; raw recordings are discarded
 > and only the encrypted speaker profile is retained. The enrollment UI,
-> recognizer, and five prompts follow the selected language.
+> recognizer, and five prompts follow the selected language. Spoken answers use
+> Microsoft Edge online neural voices and automatically fall back to the installed
+> Windows voice if the service or network is unavailable.
 
 ![PowerShell](https://img.shields.io/badge/PowerShell-5%2B-5391FE?logo=powershell&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?logo=windows&logoColor=white)
@@ -104,6 +106,10 @@ Voice control is optional and requires no preinstalled Python or .NET. The first
 and Intel/AMD x64 are supported; only the current architecture is retained. Voice setup
 does not change PATH, install anything system-wide, enable itself, or add a separate
 startup task.
+
+During a spoken answer, saying **Hey Scout** pauses playback and uses a bundled prompt to
+ask whether you called. Say yes to stop the old answer and give a fresh command; say no,
+or do not respond for five seconds, to continue from the same playback position.
 
 **Or by hand** — download `ScoutCompanion-<version>.zip` from the
 [latest release](https://github.com/akimcse/scout-companion/releases/latest), unzip, and
@@ -514,7 +520,8 @@ because YAML is not testable and this is — see `Test-SessionMatch.ps1`.
 - The core overlay makes one anonymous GitHub release check a few times a day; set
   `updateCheck` to `false` to disable it. Optional voice setup downloads the official
   Microsoft .NET Desktop Runtime and speech models from GitHub; all downloads are pinned
-  and hash-verified. Speech output uses the installed Windows voice.
+  and hash-verified. Spoken-answer text is sent to Microsoft Edge's online neural speech
+  service for synthesis; if that request fails, it is read by the installed Windows voice.
 - Voice recordings are discarded after enrollment. Only a speaker embedding encrypted
   for the current Windows user is retained locally.
 - Clicking **Allow** here is exactly equivalent to clicking Allow in the agent — it forwards

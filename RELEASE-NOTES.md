@@ -1,5 +1,20 @@
 # Release notes
 
+## v0.15.4 — Online neural voice
+
+- Use Microsoft Edge online neural voices for spoken answers, with interruptible
+  playback and automatic fallback to the built-in Windows offline voice.
+- Maximize Scout before submitting a voice command and leave it visible so the
+  submitted request and its answer remain in view.
+- Recognize a speaker-verified wake phrase even when neural TTS echo precedes it in
+  the microphone segment, while discarding the mixed text before the next command.
+- Process short standalone wake phrases during TTS playback without lowering the
+  normal idle noise-filtering threshold.
+- Confirm that Scout consumed a voice command and directly invoke Send when the
+  restored window ignores the Enter key.
+- Launch the Companion and watcher through a no-console WScript host so Windows
+  Terminal does not surface a background PowerShell tab.
+
 ## v0.15.3 — Scout Man mascot
 
 - Add the selectable Scout Man mascot with a red-and-gold pill-shaped helmet,
