@@ -124,10 +124,9 @@ Assert-True ($Text -match '(?s)SendEnter\(\).*?Find-AgentButton \$win\.Hwnd @\('
 Assert-True ($Text -match 'function Set-AgentMessageFocus') 'focus acquisition is guarded'
 Assert-True ($Text -match 'AttachThreadInput') 'foreground focus locks are handled'
 Assert-True ($Text -match '\$attempt -lt 3') 'focus acquisition is retried'
-Assert-True ($Text -match 'Set-AgentMessageFocus \$previous \$null') 'previous app focus is restored safely'
 Assert-True ($Text -match '(?s)IsIconic\(\$hwnd\).*?ShowWindow\(\$hwnd, 9\)') 'maximized windows are not restored'
-Assert-True ($Text -match '(?s)function Submit-VoiceUiRequest.*?\$wasMinimized.*?ShowWindow\(\$win\.Hwnd, 9\).*?Find-AgentButton') 'voice commands restore Scout before finding controls'
-Assert-True ($Text -match '(?s)function Submit-VoiceUiRequest.*?\$wasMinimized.*?ShowWindow\(\$win\.Hwnd, 6\)') 'voice commands return Scout to minimized state'
+Assert-True ($Text -match '(?s)function Submit-VoiceUiRequest.*?ShowWindow\(\$win\.Hwnd, 3\).*?Find-AgentButton') 'voice commands maximize Scout before finding controls'
+Assert-True ($Text -notmatch 'ShowWindow\(\$win\.Hwnd, 6\)') 'voice commands leave Scout maximized'
 $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -229,6 +228,11 @@ Assert-True ($EnrollmentForm -match 'DwmSetWindowAttribute\(handle, 20') 'enroll
 Assert-True ($VoiceApp -match 'SetApartmentState\(ApartmentState\.STA\)') 'WPF enrollment runs on an STA thread'
 Assert-True ($Text -match '\$startInfo\.CreateNoWindow = \$true') 'voice enrollment does not open a console'
 $Installer = Get-Content (Join-Path $Root 'Install.ps1') -Raw
+foreach ($launcher in 'Start-ScoutCompanion.vbs', 'Watch-Scout.vbs') {
+    Assert-True (Test-Path (Join-Path $Root $launcher)) "$launcher is packaged"
+}
+$Shortcuts = Get-Content (Join-Path $Root 'Add-ToStartMenu.ps1') -Raw
+Assert-True ($Shortcuts -match 'System32\\wscript\.exe') 'shortcuts use the no-console WScript host'
 Assert-True ($Installer -match 'Stop-ProcessTree') 'installer stops the voice process tree'
 Assert-True ($Installer -match 'Stop-ProcessTree\(\[int\]\$RootId, \[int\]\$ExcludeId = \$PID\)') 'installer excludes itself from in-app update cleanup'
 Assert-True ($Installer -match '\$child\.ProcessId -eq \$ExcludeId') 'installer does not traverse through its own process'

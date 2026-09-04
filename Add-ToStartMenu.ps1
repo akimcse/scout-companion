@@ -35,6 +35,7 @@ $Links = @{
     Now  = Join-Path $StartMenu 'Scout Companion.lnk'
     Auto = Join-Path $StartMenu 'Scout Companion (auto).lnk'
 }
+$StartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Scout Companion.lnk'
 $IconPath = Join-Path $env:LOCALAPPDATA 'ScoutCompanion\scout-companion.ico'
 
 if ($Remove) {
@@ -45,7 +46,7 @@ if ($Remove) {
     return
 }
 
-foreach ($f in 'scout-companion.ps1', 'Watch-Scout.ps1') {
+foreach ($f in 'Start-ScoutCompanion.vbs', 'Watch-Scout.vbs') {
     if (-not (Test-Path (Join-Path $ScriptDir $f))) {
         throw "$f is missing from $ScriptDir - run this from the folder you cloned into."
     }
@@ -112,14 +113,14 @@ function New-IconFile([string]$path) {
 
 New-IconFile $IconPath
 
-$PowerShellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$WScriptExe = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $shell = New-Object -ComObject WScript.Shell
 try {
-    # -STA is required for WPF; -WindowStyle Hidden keeps the host console out
-    # of the way, and WindowStyle 7 stops a window flashing up on launch.
+    # WScript avoids allocating a console when Windows Terminal is the default
+    # terminal application.
     $now = $shell.CreateShortcut($Links.Now)
-    $now.TargetPath       = $PowerShellExe
-    $now.Arguments        = "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(Join-Path $ScriptDir 'scout-companion.ps1')`""
+    $now.TargetPath       = $WScriptExe
+    $now.Arguments        = "`"$(Join-Path $ScriptDir 'Start-ScoutCompanion.vbs')`""
     $now.WorkingDirectory = $ScriptDir
     $now.IconLocation     = "$IconPath,0"
     $now.Description      = 'Floating overlay showing what the Scout agent is doing'
@@ -127,13 +128,24 @@ try {
     $now.Save()
 
     $auto = $shell.CreateShortcut($Links.Auto)
-    $auto.TargetPath       = $PowerShellExe
-    $auto.Arguments        = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $ScriptDir 'Watch-Scout.ps1')`""
+    $auto.TargetPath       = $WScriptExe
+    $auto.Arguments        = "`"$(Join-Path $ScriptDir 'Watch-Scout.vbs')`""
     $auto.WorkingDirectory = $ScriptDir
     $auto.IconLocation     = "$IconPath,0"
     $auto.Description      = 'Launches Scout Companion whenever Microsoft Scout is running'
     $auto.WindowStyle      = 7
     $auto.Save()
+
+    if (Test-Path $StartupLink) {
+        $startup = $shell.CreateShortcut($StartupLink)
+        $startup.TargetPath = $WScriptExe
+        $startup.Arguments = "`"$(Join-Path $ScriptDir 'Watch-Scout.vbs')`""
+        $startup.WorkingDirectory = $ScriptDir
+        $startup.IconLocation = "$IconPath,0"
+        $startup.Description = 'Starts Scout Companion when Microsoft Scout is running'
+        $startup.WindowStyle = 7
+        $startup.Save()
+    }
 } finally {
     [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
 }

@@ -63,7 +63,9 @@ $UserState = 'config.json', 'titles.json'
 $Payload = @(
     'scout-companion.ps1'
     'Start-ScoutCompanion.cmd'
+    'Start-ScoutCompanion.vbs'
     'Watch-Scout.ps1'
+    'Watch-Scout.vbs'
     'Add-ToStartMenu.ps1'
     'voice'
     'config.sample.json'
@@ -370,7 +372,8 @@ Write-Host "  powershell -ExecutionPolicy Bypass -File `"$(Join-Path $InstallDir
 Write-Host ''
 
 if ($Run) {
-    Start-Process -FilePath (Join-Path $InstallDir 'Start-ScoutCompanion.cmd') `
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') `
+                  -ArgumentList "`"$(Join-Path $InstallDir 'Start-ScoutCompanion.vbs')`"" `
                   -WorkingDirectory $InstallDir -WindowStyle Hidden
     Write-Host 'Started. It stays hidden until Scout is working in the background.'
     Write-Host ''

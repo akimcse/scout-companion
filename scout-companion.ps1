@@ -1820,18 +1820,13 @@ function Submit-VoiceUiRequest {
     if (-not $request -or $request.Submitted) { return }
     $win = Get-AgentWindow
     if (-not $win) { return }
-    $previous = [ScoutNative]::GetForegroundWindow()
-    $wasMinimized = [ScoutNative]::IsIconic($win.Hwnd)
     try {
-        # UI Automation may keep a minimized window's tree but mark every
-        # descendant off-screen. Find-AgentButton deliberately ignores
-        # off-screen controls, so restore before looking for Send or the message
-        # box. Put the window back afterwards; a background voice command must
-        # not leave Scout covering what the user was doing.
-        if ($wasMinimized) {
-            [void][ScoutNative]::ShowWindow($win.Hwnd, 9)
-            Start-Sleep -Milliseconds 150
-        }
+        # A voice command is an explicit request to use Scout. Maximize it
+        # before touching the Electron controls and leave it visible so the
+        # user can see the submitted command and follow the answer.
+        [void][ScoutNative]::ShowWindow($win.Hwnd, 3)
+        [void][ScoutNative]::SetForegroundWindow($win.Hwnd)
+        Start-Sleep -Milliseconds 200
         $send = $null
         $box = $null
         for ($attempt = 0; $attempt -lt 3 -and (-not $send -or -not $box); $attempt++) {
@@ -1884,15 +1879,6 @@ function Submit-VoiceUiRequest {
     } catch {
         Write-VoiceUiResponse $request.Id '' $_.Exception.Message
         Clear-VoiceUiRequest
-    } finally {
-        Start-Sleep -Milliseconds 100
-        if ($wasMinimized -and [ScoutNative]::IsWindow($win.Hwnd)) {
-            # SW_MINIMIZE restores the state the voice request found.
-            [void][ScoutNative]::ShowWindow($win.Hwnd, 6)
-        }
-        if ($previous -ne [IntPtr]::Zero -and $previous -ne $win.Hwnd) {
-            [void](Set-AgentMessageFocus $previous $null)
-        }
     }
 }
 
@@ -4574,6 +4560,7 @@ function Stop-Companion {
 # remembered flag, so editing it by hand outside the app still works.
 # ---------------------------------------------------------------------------
 $WatcherPath = Join-Path $ScriptDir 'Watch-Scout.ps1'
+$WatcherLauncher = Join-Path $ScriptDir 'Watch-Scout.vbs'
 $StartupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Scout Companion.lnk'
 
 function Test-AutoStart { return (Test-Path $StartupLink) }
@@ -4584,12 +4571,12 @@ function Set-AutoStart([bool]$on) {
             if (Test-Path $StartupLink) { Remove-Item $StartupLink -Force }
             return $true
         }
-        if (-not (Test-Path $WatcherPath)) { return $false }
+        if (-not (Test-Path $WatcherPath) -or -not (Test-Path $WatcherLauncher)) { return $false }
         $shell = New-Object -ComObject WScript.Shell
         try {
             $lnk = $shell.CreateShortcut($StartupLink)
-            $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            $lnk.Arguments  = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$WatcherPath`""
+            $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+            $lnk.Arguments  = "`"$WatcherLauncher`""
             $lnk.WorkingDirectory = $ScriptDir
             $lnk.Description = 'Starts Scout Companion when Microsoft Scout is running'
             $lnk.Save()

@@ -32,7 +32,9 @@ if (-not $OutDir) { $OutDir = Join-Path $ScriptDir 'dist' }
 $Payload = @(
     'scout-companion.ps1'
     'Start-ScoutCompanion.cmd'
+    'Start-ScoutCompanion.vbs'
     'Watch-Scout.ps1'
+    'Watch-Scout.vbs'
     'Add-ToStartMenu.ps1'
     'Install.ps1'
     'Install.cmd'
