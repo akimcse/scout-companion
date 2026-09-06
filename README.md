@@ -137,8 +137,9 @@ Tie the companion to Scout's lifetime — it **opens when Scout starts and close
 quits**. Open **Settings** from the tray and tick **Start automatically with Scout**; that
 writes a shortcut to `Watch-Scout.ps1` into your Startup folder (unticking removes it).
 
-`Watch-Scout.ps1` is a tiny watcher: while Scout is closed it just does a cheap process
-check every few seconds; when Scout appears it launches the companion, and the companion
+`Watch-Scout.ps1` checks for the desktop application's exact process name every few
+seconds. Other Copilot apps and Electron helper processes do not count as Scout.
+When Scout appears it launches the companion, and the companion
 shuts **itself** down a few seconds after Scout exits (`exitWhenAgentGone` /
 `exitGraceSeconds`).
 
@@ -148,8 +149,14 @@ To do it by hand, put a shortcut with this target in `shell:startup`:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "<path>\Watch-Scout.ps1"
 ```
 
-To stop it entirely: right-click the tray icon → **Exit**. Clicking **✕** on the toast only
-hides it until the next prompt.
+To stop it entirely: right-click the tray icon → **Exit**. The watcher respects that
+choice until Scout fully quits and a new Scout process starts. Starting Companion
+manually also resumes automatic startup. Minimizing Scout or closing it to the tray
+does not start a new process and does not cancel the stop.
+
+Clicking **✕** on the toast only dismisses the current activity; it does not exit the
+app. Manual-stop markers live in `lifecycle-state/`, survive watcher restarts and
+upgrades, and are removed once their Scout process instance is gone.
 
 </details>
 

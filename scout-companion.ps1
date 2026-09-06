@@ -241,6 +241,8 @@ if (-not ('ScoutNative' -as [type])) {
 # Configuration (with sane defaults; overridable via config.json or env var).
 # ---------------------------------------------------------------------------
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir 'Companion-Lifecycle.ps1')
+$LifecycleStateDir = Join-Path $ScriptDir 'lifecycle-state'
 
 $Config = [ordered]@{
     home          = $null
@@ -549,6 +551,7 @@ if (-not $Config.home) {
 }
 
 $SessionRoot = Join-Path $Config.home 'session-state'
+Clear-CompanionManualStop $LifecycleStateDir @(Get-CompanionAgentInstances $Config.processNames -Refresh)
 
 # ---------------------------------------------------------------------------
 # Shared mutable state.
@@ -837,20 +840,7 @@ function Get-AgentWindow {
 # Lightweight presence check (process only, no window). Used to decide when Scout
 # has fully closed so the companion can shut itself down.
 function Test-AgentProcess {
-    foreach ($name in $Config.processNames) {
-        $ps = $null
-        try { $ps = [System.Diagnostics.Process]::GetProcessesByName($name) } catch { continue }
-        try { if ($ps.Count -gt 0) { return $true } }
-        finally { foreach ($p in $ps) { $p.Dispose() } }
-    }
-    # GetProcessesByName matches whole names, so fall back to a substring scan to
-    # keep partial names in config.json working. This only runs when the agent
-    # already looks gone, i.e. right before the companion would shut itself down.
-    $all = Get-Process -ErrorAction SilentlyContinue
-    foreach ($name in $Config.processNames) {
-        if ($all | Where-Object { $_.ProcessName -like "*$name*" } | Select-Object -First 1) { return $true }
-    }
-    return $false
+    return @(Get-CompanionAgentInstances $Config.processNames).Count -gt 0
 }
 
 function Test-AutomationSession([string]$dir, [string]$events) {
@@ -4548,7 +4538,17 @@ function Set-TrayState([string]$state, [string]$detail) {
     $Tray.Text = $t
 }
 
-function Stop-Companion {
+function Stop-Companion([switch]$Manual) {
+    if ($Manual) {
+        try {
+            Set-CompanionManualStop $LifecycleStateDir @(Get-CompanionAgentInstances $Config.processNames -Refresh)
+        } catch {
+            $message = "Could not pause automatic restart: $($_.Exception.Message)"
+            Write-CompanionLog $message
+            Show-TrayBalloon 'Scout Companion' $message
+            return
+        }
+    }
     # Every exit path funnels through here: an orphaned NotifyIcon lingers in
     # the tray until the user hovers over it, which looks like a crash.
     #
@@ -6192,7 +6192,7 @@ $MenuPause.Add_Click({
     Sync-AnimationEnabled (-not $MenuPause.Checked) -Persist
 })
 $MenuSet.Add_Click({ Show-SettingsWindow })
-$MenuExit.Add_Click({ Stop-Companion })
+$MenuExit.Add_Click({ Stop-Companion -Manual })
 
 $MenuUpdate = New-Object System.Windows.Forms.ToolStripMenuItem (T 'Install update')
 $MenuUpdate.Available = $false
@@ -6803,7 +6803,11 @@ $timer.Add_Tick({
 
     # Lifecycle: when Scout has fully closed, shut the companion down after a short
     # grace period (covers restarts / momentary window-title flaps).
-    if ($agentRunning -or (Test-AgentProcess)) {
+    $agentPresent = $null
+    try { $agentPresent = Test-AgentProcess }
+    catch { Write-CompanionLog "agent detection failed: $($_.Exception.Message)" }
+    # An inaccessible process list is not evidence that Scout has exited.
+    if ($null -eq $agentPresent -or $agentPresent) {
         $script:AgentGoneSince = $null
     } elseif ($Config.exitWhenAgentGone) {
         if (-not $script:AgentGoneSince) {
