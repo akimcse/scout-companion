@@ -5,7 +5,7 @@
   "_home": "Agent home folder. Default: %USERPROFILE%\\.copilot. You can also set the SCOUT_COMPANION_HOME environment variable.",
 
   "processNames": ["scout", "Microsoft Scout", "OpenClaw", "Clawpilot", "Claw"],
-  "_processNames": "Process names of your agent's desktop window, matched as substrings and case-insensitively. These must be the names Windows knows the process by, not the name on the title bar: Microsoft Scout runs as 'scout', so a list containing only 'Microsoft Scout' matches nothing. Setting this replaces the list rather than adding to it, so keep the entries you still need. Avoid short generic words - an earlier version of this file listed 'Copilot', which matched eleven unrelated Windows Copilot processes and no Scout at all.",
+  "_processNames": "Windows executable names for your agent, without .exe. Automatic startup and shutdown use case-insensitive exact matches and exclude Electron helper processes; window navigation retains its substring fallback. Microsoft Scout runs as 'scout', not 'Microsoft Scout'. Setting this replaces the list rather than adding to it. Do not use generic aliases such as 'Copilot', which can identify unrelated applications.",
 
   "windowHints": ["Microsoft Scout", "Clawpilot", "OpenClaw"],
   "_windowHints": "Fallback window-title substrings, used only when no process name matches.",

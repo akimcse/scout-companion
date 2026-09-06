@@ -11,7 +11,8 @@
     nothing in Program Files and nothing in HKLM.
 
     Installing over an existing copy keeps your settings - config.json and the
-    learned chat titles are carried across rather than replaced.
+    learned chat titles and current manual-stop state are carried across
+    rather than replaced.
 
 .PARAMETER Uninstall
     Removes the shortcuts, the installed copy and the Add/Remove Programs entry.
@@ -43,6 +44,7 @@ $RegKey     = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ScoutCo
 $IconPath   = Join-Path $env:LOCALAPPDATA 'ScoutCompanion\scout-companion.ico'
 $VoiceDir   = Join-Path $env:LOCALAPPDATA 'ScoutVoiceAssistant'
 $SourceDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $SourceDir 'Companion-Lifecycle.ps1')
 $installedConfig = Join-Path $InstallDir 'config.json'
 if (Test-Path $installedConfig) {
     try {
@@ -56,12 +58,13 @@ if (Test-Path $installedConfig) {
 # Carried across an upgrade rather than overwritten: these are the user's, not
 # ours. They live beside the script because that is where the app looks for
 # them.
-$UserState = 'config.json', 'titles.json'
+$UserState = 'config.json', 'titles.json', 'lifecycle-state'
 
 # What actually has to be there to run. Tests, screenshots and the git
 # machinery are not part of an installation.
 $Payload = @(
     'scout-companion.ps1'
+    'Companion-Lifecycle.ps1'
     'Start-ScoutCompanion.cmd'
     'Start-ScoutCompanion.vbs'
     'Watch-Scout.ps1'
@@ -132,19 +135,19 @@ function Remove-UpgradePath([string]$Path) {
 
 function Stop-Companion {
     $stopped = 0
-    $me = $PID
-    try {
-        $procs = Get-CimInstance Win32_Process -Filter "Name='powershell.exe' OR Name='pwsh.exe'" -ErrorAction Stop
-    } catch { return 0 }
-    foreach ($p in $procs) {
-        if ($p.ProcessId -eq $me) { continue }
-        if ($p.CommandLine -notlike '*scout-companion.ps1*') { continue }
-        # Only ever the copy being operated on, so a checkout running from
-        # somewhere else is left alone.
-        if ($p.CommandLine -notlike "*$InstallDir*") { continue }
-        try { Stop-ProcessTree $p.ProcessId; $stopped++ } catch { }
+    foreach ($p in @(Get-CompanionProcesses $InstallDir)) {
+        Stop-ProcessTree $p.ProcessId
+        $stopped++
     }
     return $stopped
+}
+
+function Stop-CompanionWatchers {
+    $watchers = @(Get-CompanionProcesses $InstallDir 'Watch-Scout.ps1')
+    foreach ($watcher in $watchers) {
+        Stop-Process -Id $watcher.ProcessId -Force -ErrorAction Stop
+    }
+    return $watchers.Count
 }
 
 # ---------------------------------------------------------------------------
@@ -154,6 +157,7 @@ if ($Uninstall) {
     Write-Host ''
     Write-Host "Removing $AppName..."
 
+    [void](Stop-CompanionWatchers)
     $n = Stop-Companion
     if ($n -gt 0) { Write-Host "  stopped $n running instance(s)" }
 
@@ -240,6 +244,9 @@ if ($srcFull -eq $dstFull) {
     return
 }
 
+# Stop supervision first: an old watcher must not resurrect the app while its
+# files are being replaced, or survive the upgrade with the old detection rules.
+$watchersStopped = Stop-CompanionWatchers
 $n = Stop-Companion
 if ($n -gt 0) { Write-Host "  stopped $n running instance(s)" }
 
@@ -247,7 +254,7 @@ if ($n -gt 0) { Write-Host "  stopped $n running instance(s)" }
 $saved = @{}
 foreach ($f in $UserState) {
     $p = Join-Path $InstallDir $f
-    if (Test-Path $p) { $saved[$f] = Get-Content $p -Raw }
+    if (Test-Path $p -PathType Leaf) { $saved[$f] = Get-Content $p -Raw }
 }
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -375,6 +382,20 @@ if ($Run) {
     Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') `
                   -ArgumentList "`"$(Join-Path $InstallDir 'Start-ScoutCompanion.vbs')`"" `
                   -WorkingDirectory $InstallDir -WindowStyle Hidden
+    $deadline = [datetime]::UtcNow.AddSeconds(15)
+    do {
+        Start-Sleep -Milliseconds 500
+        $started = @(Get-CompanionProcesses $InstallDir)
+    } while (-not $started.Count -and [datetime]::UtcNow -lt $deadline)
+    if ($started.Count -ne 1) {
+        throw "Expected one Companion after installation, found $($started.Count)."
+    }
     Write-Host 'Started. It stays hidden until Scout is working in the background.'
     Write-Host ''
+}
+
+if ($watchersStopped) {
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') `
+                  -ArgumentList "`"$(Join-Path $InstallDir 'Watch-Scout.vbs')`"" `
+                  -WorkingDirectory $InstallDir -WindowStyle Hidden
 }
