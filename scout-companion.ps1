@@ -328,6 +328,12 @@ $Config = [ordered]@{
     # than restoring the toast somewhere unreachable - it has no taskbar button
     # to get it back with.
     rememberPosition    = $true
+    # Keep the toast up while Scout is in front, but only when more than one
+    # conversation is running. The rule that hides it on focus is right for a
+    # single conversation - the toast would be repeating the window you are
+    # looking at. With several, Scout can only show one of them, so clicking
+    # into it to read one made every other conversation disappear from view.
+    keepVisibleMultiSession = $true
     windowLeft          = $null
     windowTop           = $null
     # Say so when a long turn finishes. Measured over three days of real use: 83
@@ -3759,7 +3765,10 @@ function Get-ShouldShow {
     param(
         [bool]$HasPending, [bool]$HasAsk, [bool]$IsActive,
         [bool]$AgentRunning, [bool]$IsMinimized, [bool]$IsForeground,
-        [bool]$Hidden, [bool]$Pinned, [bool]$Greeting
+        [bool]$Hidden, [bool]$Pinned, [bool]$Greeting,
+        # How many conversations are being followed, and whether the toast is
+        # allowed to stay up for them while Scout is in front.
+        [int]$SessionCount = 1, [bool]$KeepForMultiSession = $true
     )
     $show = $false
     if ($HasPending -or $HasAsk) { $show = $true }
@@ -3769,6 +3778,17 @@ function Get-ShouldShow {
     elseif ($Greeting) { $show = $true }
     elseif ($AgentRunning -and $IsMinimized) { $show = $true }
     elseif ($IsActive -and $AgentRunning -and ($IsMinimized -or -not $IsForeground)) { $show = $true }
+    # Several conversations running at once is the case the hide-on-focus rule
+    # gets wrong. That rule exists because with one conversation the toast is
+    # telling you what the window in front is already showing, so it is noise.
+    # With several, Scout shows exactly one of them and the toast is the only
+    # place the others are visible - so clicking into Scout to read one made the
+    # rest disappear, which is the opposite of what the toast is for.
+    #
+    # Deliberately below $Hidden: the close button still closes it. And gated on
+    # IsActive, so a set of finished conversations does not leave the toast up
+    # for ever - it stays only while there is something to watch.
+    elseif ($KeepForMultiSession -and $SessionCount -gt 1 -and $IsActive -and $AgentRunning) { $show = $true }
     if ($Hidden) { $show = $false }
     if ($Pinned) { $show = $true }
     return $show
@@ -5176,6 +5196,14 @@ function Restart-CompanionForLanguage([string]$language) {
       </Border>
     </DockPanel>
 
+    <DockPanel LastChildFill="False" Margin="0,12,0,0">
+      <CheckBox x:Name="MultiSessionCheck" Content="Keep showing while several are running" DockPanel.Dock="Left" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Info}" DockPanel.Dock="Left">
+        <Border.ToolTip><ToolTip>Normally the toast hides while Scout is in front, because it would only be repeating the window you are already looking at. That stops being true once more than one conversation is running: Scout shows exactly one of them, and the toast is the only place the rest are visible - so clicking into Scout to read one made every other conversation disappear. With this on it stays up whenever two or more are active. The close button still closes it.</ToolTip></Border.ToolTip>
+        <TextBlock Style="{StaticResource InfoGlyph}"/>
+      </Border>
+    </DockPanel>
+
     <Border Height="1" Background="#FF2A3142" Margin="0,14,0,14"/>
 
     <!-- The agent's activity and the companion's own overhead sit side by side:
@@ -5324,6 +5352,7 @@ function Show-SettingsWindow {
     $script:SettingsAgentSess = $sw.FindName('AgentSessText')
     $script:SettingsNotifyChk = $sw.FindName('NotifyFinishChk')
     $script:SettingsRememberPos = $sw.FindName('RememberPosCheck')
+    $script:SettingsMultiSess = $sw.FindName('MultiSessionCheck')
     $script:SettingsMascot    = $sw.FindName('MascotPicker')
     $script:SettingsOpacity   = $sw.FindName('OpacitySlider')
     $script:SettingsOpacityText = $sw.FindName('OpacityValue')
@@ -5433,6 +5462,7 @@ function Show-SettingsWindow {
         $script:SettingsAutoUpdChk.IsEnabled = [bool]$Config.updateCheck
         $script:SettingsNotifyChk.IsChecked  = [bool]$Config.notifyOnFinish
         $script:SettingsRememberPos.IsChecked = [bool]$Config.rememberPosition
+        $script:SettingsMultiSess.IsChecked   = [bool]$Config.keepVisibleMultiSession
         $script:SettingsBetaChk.IsChecked     = [bool]$Config.updateBeta
     } finally { $script:SettingsSuppress = $false }
     Sync-UpdateStatusText
@@ -5464,6 +5494,19 @@ function Show-SettingsWindow {
     }
     $script:SettingsRememberPos.Add_Checked($onRememberPos)
     $script:SettingsRememberPos.Add_Unchecked($onRememberPos)
+
+    $onMultiSess = {
+        if ($script:SettingsSuppress) { return }
+        $on = [bool]$script:SettingsMultiSess.IsChecked
+        $Config.keepVisibleMultiSession = $on
+        [void](Save-Setting @{ keepVisibleMultiSession = $on })
+        # No redraw from here. The visibility policy is decided on the timer
+        # tick, which reads $Config every time and runs every 700ms by default,
+        # so the change lands on its own. There is also no function to call:
+        # the tick is an anonymous handler on $timer, not a named one.
+    }
+    $script:SettingsMultiSess.Add_Checked($onMultiSess)
+    $script:SettingsMultiSess.Add_Unchecked($onMultiSess)
 
     # Checked/Unchecked, matching every other checkbox here - see the note on
     # the update ones below.
@@ -5691,6 +5734,7 @@ function Show-SettingsWindow {
         $script:SettingsLanguage = $null
         $script:SettingsVoiceLanguageHint = $null
         $script:SettingsRememberPos = $null
+        $script:SettingsMultiSess = $null
         $script:SettingsBetaChk = $null
     })
 
@@ -6939,7 +6983,8 @@ $timer.Add_Tick({
     $shouldShow = Get-ShouldShow -HasPending $hasPending -HasAsk $hasAsk `
         -IsActive $isActive -AgentRunning $agentRunning -IsMinimized $isMinimized `
         -IsForeground $isForeground -Hidden $script:Hidden -Pinned $script:Pinned `
-        -Greeting $greeting
+        -Greeting $greeting -SessionCount $Sessions.Count `
+        -KeepForMultiSession ([bool]$Config.keepVisibleMultiSession)
     if ($voiceVisible) { $shouldShow = $true }
 
     # A long turn just finished. Worth saying only when it is not already on

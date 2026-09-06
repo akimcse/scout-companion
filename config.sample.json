@@ -90,6 +90,9 @@
   "windowTop": null,
   "_windowPosition": "Where the toast was last left, in device-independent units. Written for you when you drag it; there is no reason to set these by hand. Both must be present or the position is ignored.",
 
+  "keepVisibleMultiSession": true,
+  "_keepVisibleMultiSession": "Keep the toast on screen while Scout is in front, but only while more than one conversation is running. The toast normally hides as soon as Scout has focus, and for a single conversation that is right - it would just be repeating the window you are already looking at. With several it is wrong: Scout shows exactly one of them at a time, so the toast is the only place the others appear, and clicking into Scout to read one made every other conversation disappear. This only holds while at least one of them is still active, so a set of finished conversations does not leave the toast up for ever, and the close button still closes it. Set to false for the old behaviour, where focusing Scout always hides the toast. Also toggleable from the settings window.",
+
   "updateCheck": true,
   "_updateCheck": "Ask GitHub every so often whether there is a newer release, and say so in the tray. The check runs off the UI thread so a slow or unreachable GitHub never stalls the toast, and it fails silently - being offline is not an error worth reporting. Set to false to never look.",
 

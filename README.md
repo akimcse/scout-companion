@@ -177,6 +177,7 @@ Right-click the tray icon → **Settings**, or click the ⚙ on the toast.
 | **Show the chat-list name** | Off (default) the row shows what you last asked; on, it shows Scout's own sidebar title once learned. |
 | **Opacity** | Fades the toast from solid down to 35% (a fully transparent window would still swallow clicks). |
 | **Remember where I put it** | Drag the toast anywhere and it comes back there instead of the bottom-right corner. Dropped near an edge it lines up flush against it, and then grows from that edge rather than downwards — so a toast at the bottom stays above the taskbar however many sessions and steps it is showing. If the screen it was on has gone — undocked, or a display switched off — it returns to the corner rather than opening somewhere unreachable, since it has no taskbar button. |
+| **Keep showing while several are running** | On by default. The toast normally hides while Scout is in front; with two or more conversations active it stays up, because Scout can only show one of them and the toast is the only place the rest are visible. |
 | **This process** | Live working set, CPU, uptime and the running version. |
 | **Tell me when a long turn finishes** | A tray balloon past `notifyAfterSeconds`. Silent while the toast is up or the agent is in front. |
 | **The agent today** | Working time, turns and conversations — see [What the agent is doing](#what-the-agent-is-doing). |
@@ -444,6 +445,7 @@ Everything works out of the box; Settings covers the day-to-day knobs. To go fur
 | `startupGreetingSeconds` | `5` | Show the toast briefly at startup. `0` starts silently |
 | `rememberPosition` | `true` | Put the toast back where you last dragged it, snapping to a screen edge if you drop it near one. Checked against the screens that exist at the time. Also in Settings |
 | `windowLeft` / `windowTop` | `null` | Where it was last left. Written for you; no reason to set these by hand |
+| `keepVisibleMultiSession` | `true` | Stay visible while Scout is in front, but only with more than one conversation active. Also in Settings |
 | `notifyOnFinish` | `true` | Tray balloon when a long turn finishes. Also in Settings |
 | `notifyAfterSeconds` | `60` | How long a turn must run before finishing is worth saying |
 | `updateCheck` | `true` | Ask GitHub for the newest release. `false` makes no network calls |
