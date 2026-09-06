@@ -137,6 +137,9 @@ function Same([string]$name, $got, $expect) {
     else { $script:Fail++; Write-Host ("  FAIL {0,-42} -> {1}   expected {2}" -f $name, $g, $e) }
 }
 
+Write-Host "`nConvertTo-AgeMinutes"
+Same 'Yesterday converts to one day' (ConvertTo-AgeMinutes 'Yesterday') 1440
+
 Write-Host "`nGet-LastUserMessage"
 # A session that opens with "carry on" and only says what it wants later is the
 # case the old first-message topic got wrong, so it is the case worth pinning.
