@@ -97,7 +97,8 @@ try {
     # the behaviour, and the convention the behaviour depends on.
     # ------------------------------------------------------------------
     Write-Host "`nthe update checkboxes answer to more than a mouse"
-    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'NotifyFinishChk', 'RememberPosCheck', 'BetaRingChk')) {
+    foreach ($n in @('UpdateCheckChk', 'AutoUpdateChk', 'NotifyFinishChk', 'RememberPosCheck', 'BetaRingChk',
+                     'MultiSessionCheck')) {
         $cb = $w.FindName($n)
         if (-not $cb) {
             $script:Fail++; Write-Host ("  FAIL missing control {0}" -f $n); continue
@@ -126,7 +127,7 @@ try {
     # would behave differently for reasons no reader could see.
     Write-Host "`nand are wired the same way as the rest of the window"
     foreach ($n in @('SettingsUpdateChk', 'SettingsAutoUpdChk', 'SettingsNotifyChk', 'SettingsRememberPos',
-                     'SettingsBetaChk')) {
+                     'SettingsBetaChk', 'SettingsMultiSess')) {
         $usesToggle = $text -match [regex]::Escape("`$script:$n.Add_Checked")
         $usesClick  = $text -match [regex]::Escape("`$script:$n.Add_Click")
         Check "$n subscribes to Checked"   ([int][bool]$usesToggle) 1
@@ -240,6 +241,22 @@ try {
     Write-Host "`nthe toast stays where it is put"
     Check 'the position can be remembered' ([int][bool]($text -match 'rememberPosition\s+= \$true')) 1
     Check 'and there is a control for it'  ([int][bool]($w.FindName('RememberPosCheck'))) 1
+
+    # ------------------------------------------------------------------
+    # ...and it has to stay put while several conversations are running.
+    #
+    # The toast hides while Scout is in front because it would otherwise be
+    # repeating the window you are already looking at. That reasoning holds for
+    # one conversation and fails for several: Scout shows exactly one of them,
+    # so clicking into it to read one made every other conversation vanish -
+    # and the toast is the only place they were visible.
+    # ------------------------------------------------------------------
+    Write-Host "`nand stays up while several conversations run"
+    Check 'the setting exists'             ([int][bool]($text -match 'keepVisibleMultiSession\s+= \$true')) 1
+    Check 'and there is a control for it'  ([int][bool]($w.FindName('MultiSessionCheck'))) 1
+    # The rule is decided in Get-ShouldShow, not by poking the window from the
+    # settings handler - the tick owns visibility and re-reads $Config anyway.
+    Check 'the handler only saves'         ([int][bool]($text -match '(?s)\$onMultiSess = \{.*?keepVisibleMultiSession = \$on \}\)')) 1
     # The corner placement is reachable only when nothing has been remembered.
     Check 'the corner is only for an unmoved toast' `
         ([int][bool]($text -match '(?s)Add_SizeChanged\(\{.*?if \(-not \$script:SavedPosition\) \{ Place-BottomRight; return \}')) 1

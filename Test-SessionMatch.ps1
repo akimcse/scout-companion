@@ -221,6 +221,48 @@ Same 'greeting shows even when idle'      (Get-ShouldShow @idleGreet) $true
 $bg = $busyFg.Clone(); $bg.IsForeground = $false
 Same 'busy in background -> shown'        (Get-ShouldShow @bg) $true
 
+# Several conversations at once is where hide-on-focus gets it wrong. That rule
+# is right for one: the toast would be repeating the window you are looking at.
+# With several, Scout shows exactly one of them, so clicking into Scout to read
+# one made every other conversation disappear from view - the toast is the only
+# place they exist.
+$multi = $busyFg.Clone(); $multi.SessionCount = 2; $multi.KeepForMultiSession = $true
+Same 'several sessions stay up in front'  (Get-ShouldShow @multi) $true
+# One conversation is unchanged, which is the whole point of the count test.
+$single = $busyFg.Clone(); $single.SessionCount = 1; $single.KeepForMultiSession = $true
+Same 'one session still hides in front'   (Get-ShouldShow @single) $false
+# The setting has to actually turn it off.
+$multiOff = $multi.Clone(); $multiOff.KeepForMultiSession = $false
+Same 'and the setting can turn it off'    (Get-ShouldShow @multiOff) $false
+# Closing still closes. This sits below $Hidden on purpose - a rule that could
+# not be dismissed would be worse than the behaviour it replaces.
+$multiClosed = $multi.Clone(); $multiClosed.Hidden = $true
+Same 'closing still beats it'             (Get-ShouldShow @multiClosed) $false
+# And it only holds while there is something to watch: several conversations
+# that have all gone quiet must not pin the toast open for ever.
+$multiIdle = $multi.Clone(); $multiIdle.IsActive = $false
+Same 'idle sessions do not pin it open'   (Get-ShouldShow @multiIdle) $false
+# Nothing about it depends on the agent still being there.
+$multiGone = $multi.Clone(); $multiGone.AgentRunning = $false
+Same 'nor does it outlive the agent'      (Get-ShouldShow @multiGone) $false
+# The default is on, so a companion that has never seen the setting behaves the
+# way this was asked for. Checked against the app's own $Config, not retyped.
+$cfgForShow = $ast.FindAll({ param($n)
+    $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $n.Left.Extent.Text -eq '$Config' }, $true) | Select-Object -First 1
+Same 'the app declares the setting' `
+    ([int][bool]($cfgForShow -and $cfgForShow.Extent.Text -match 'keepVisibleMultiSession\s*=\s*\$true')) 1
+# ...and the tick actually passes it in. Both parameters have defaults so the
+# function keeps working without them - which means a caller that forgot to
+# wire them up would pass every test above and change nothing on screen.
+$appSrc = Get-Content $src -Raw
+$tickCall = ''
+$m = [regex]::Match($appSrc, '(?s)\$shouldShow = Get-ShouldShow.*?Greeting \$greeting[^\r\n]*(\r?\n[^\r\n]*)*?(?=\r?\n\s*\r?\n)')
+if ($m.Success) { $tickCall = $m.Value }
+Same 'the tick passes the session count'  ([int][bool]($tickCall -match '-SessionCount')) 1
+Same 'and the setting with it'            ([int][bool]($tickCall -match '-KeepForMultiSession')) 1
+Same 'from the real session list'         ([int][bool]($tickCall -match '\$Sessions\.Count')) 1
+
 Write-Host "`nFormat-Idle"
 Same 'seconds stay seconds'            (Format-Idle 42)   '42s'
 Same 'a minute is minutes'             (Format-Idle 60)   '1m'
