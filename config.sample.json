@@ -38,8 +38,8 @@
   "voiceCommandEnabled": false,
   "_voiceCommandEnabled": "Listen for Hey Scout and type recognized commands into the currently visible Scout conversation. Saved by the Voice control setting.",
 
-  "voiceReplyEnabled": true,
-  "_voiceReplyEnabled": "Read the final answer from the current Scout conversation aloud. Saved independently from voice command input.",
+  "voiceReplyEnabled": false,
+  "_voiceReplyEnabled": "Read the final answer from the current Scout conversation aloud. Saved independently from voice command input, but it only does anything while voiceCommandEnabled is on - the two together are what make the companion talk. Both default off: voice is opt-in because it takes the microphone, fetches a runtime on first use, and speaks out loud.",
 
   "voiceWakeSensitivity": 65,
   "_voiceWakeSensitivity": "Hey Scout wake-word sensitivity from 0 to 100. Higher accepts more STT variations but can increase false activations.",

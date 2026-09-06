@@ -1,8 +1,21 @@
 ﻿$ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $App = Join-Path $Root 'scout-companion.ps1'
-$Config = Get-Content (Join-Path $Root 'config.sample.json') -Raw | ConvertFrom-Json
+# The defaults come from the app, not from config.sample.json.
+#
+# This read the sample, which meant every "defaults to" assertion below was
+# really an assertion about a documentation file. Measured: changing
+# voiceReplyEnabled in the app and leaving the sample alone kept this suite
+# green. The sample is still worth checking - Test-SessionMatch compares the two
+# and fails when they disagree - but that is a different claim from this one.
 $Text = Get-Content $App -Raw
+$ConfigAst = ([System.Management.Automation.Language.Parser]::ParseFile($App, [ref]$null, [ref]$null)).FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $n.Left.Extent.Text -eq '$Config'
+}, $true) | Select-Object -First 1
+if (-not $ConfigAst) { Write-Host 'FAIL could not find $Config in the app'; exit 1 }
+Invoke-Expression $ConfigAst.Extent.Text
 $failed = 0
 
 function Assert-True([bool]$Value, [string]$Name) {
@@ -12,8 +25,13 @@ function Assert-True([bool]$Value, [string]$Name) {
 }
 
 Write-Host 'voice settings'
+# Both halves of voice default off. It takes the microphone, downloads a runtime
+# on first use, and speaks out loud - none of which should happen to someone who
+# installed a toast that watches an agent. Reply used to default on; harmless in
+# isolation because it does nothing until the bridge is running, but it meant
+# switching voice on also meant it started talking.
 Assert-True ($Config.voiceCommandEnabled -eq $false) 'command input defaults off'
-Assert-True ($Config.voiceReplyEnabled -eq $true) 'spoken replies default on'
+Assert-True ($Config.voiceReplyEnabled -eq $false) 'spoken replies default off'
 Assert-True ($Config.voiceWakeSensitivity -eq 65) 'wake sensitivity has a default'
 Assert-True ($Config.voiceNoiseSensitivity -eq 35) 'noise sensitivity has a default'
 foreach ($name in 'VoiceCommandCheck', 'VoiceReplyCheck', 'VoiceLanguageHint',
