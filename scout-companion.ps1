@@ -290,8 +290,14 @@ $Config = [ordered]@{
     animationEnabled    = $true
     # Reuse the local Scout Voice runtime as a headless child process. This only
     # follows the companion's lifetime. Both choices are persisted in config.
+    #
+    # Both default off. Voice is opt-in: it takes a microphone, downloads a
+    # runtime on first use, and speaks out loud - none of which should happen
+    # to someone who installed a toast that watches an agent. Reply defaulted
+    # on, which was harmless only because it does nothing until the bridge is
+    # running, but it meant "turn voice on" also meant "and start talking".
     voiceCommandEnabled = $false
-    voiceReplyEnabled   = $true
+    voiceReplyEnabled   = $false
     voiceWakeSensitivity = 65
     voiceNoiseSensitivity = 35
     voiceRuntimeDir     = $null

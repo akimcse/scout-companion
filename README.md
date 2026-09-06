@@ -435,7 +435,7 @@ Everything works out of the box; Settings covers the day-to-day knobs. To go fur
 | `animIntervalMs` | `80` | Mascot frame interval (80 = 12.5 fps) |
 | `animationEnabled` | `true` | Whether the mascot animates. Also in Settings |
 | `voiceCommandEnabled` | `false` | Listen for “Hey Scout” and type the command into the current Scout conversation |
-| `voiceReplyEnabled` | `true` | Read the completed answer aloud when voice command input is enabled |
+| `voiceReplyEnabled` | `false` | Read the completed answer aloud when voice command input is enabled |
 | `voiceWakeSensitivity` | `65` | Wake-word matching sensitivity from 0–100 |
 | `voiceNoiseSensitivity` | `35` | Ambient-noise sensitivity from 0–100; lower rejects more background sound |
 | `voiceRuntimeDir` | `%LOCALAPPDATA%\ScoutVoiceAssistant` | Private .NET runtime, models, and encrypted speaker profile |

@@ -711,6 +711,39 @@ if ($sample) {
             if ($a -ne $b) { $drift += $k }
         }
         Same 'the lists it repeats match'  ($drift -join ',') ''
+
+        # The same for every plain value. Checking only the lists left the
+        # scalars free to disagree, and they are the ones people read as "this
+        # is the default" - a sample saying true beside an app saying false
+        # documents behaviour the app does not have. Found when voiceReplyEnabled
+        # was turned off in the app and the sample still advertised it as on.
+        #
+        # Compared as numbers where both sides are numeric - 1 and 1.0 are the
+        # same default, and comparing them as text says otherwise. Everything
+        # else compares as text so 1/true and 0/false do not read as different.
+        # Only keys the sample actually repeats; nulls are skipped because the
+        # app's own null means "work it out at runtime".
+        $scalarDrift = @()
+        foreach ($k in @($Config.Keys)) {
+            if (-not $sample.PSObject.Properties[$k]) { continue }
+            $appVal = $Config[$k]
+            if ($null -eq $appVal) { continue }
+            if ($appVal -is [array]) { continue }          # covered above
+            $sampleVal = $sample.$k
+            if ($null -eq $sampleVal) { continue }
+            $same = $false
+            $an = 0.0; $bn = 0.0
+            if ([double]::TryParse([string]$appVal, [ref]$an) -and
+                [double]::TryParse([string]$sampleVal, [ref]$bn)) {
+                $same = ($an -eq $bn)
+            } else {
+                $same = ([string]$appVal -eq [string]$sampleVal)
+            }
+            if (-not $same) {
+                $scalarDrift += ("{0}(app={1} sample={2})" -f $k, $appVal, $sampleVal)
+            }
+        }
+        Same 'and so do its plain values'  ($scalarDrift -join ', ') ''
         # And the one that actually bit: the real process name is in there.
         Same 'the real process name is listed' `
             ([int][bool](@($sample.processNames) -contains 'scout')) 1
