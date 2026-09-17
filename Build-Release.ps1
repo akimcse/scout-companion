@@ -31,6 +31,7 @@ if (-not $OutDir) { $OutDir = Join-Path $ScriptDir 'dist' }
 # to travel with the app.
 $Payload = @(
     'scout-companion.ps1'
+    'Companion-Lifecycle.ps1'
     'Start-ScoutCompanion.cmd'
     'Start-ScoutCompanion.vbs'
     'Watch-Scout.ps1'
